@@ -1,205 +1,172 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from agents.llm import LLM
-from openai import OpenAI
+from typing import Any
 
-MAX_RETRYS = 10
+from core import ExecutionContext, ToolCall, ToolCatalogTool, ToolExecutionManager, ToolRegistry
+from core.registry import BaseTool
 
-class agent(ABC):
-    def __init__(self, name):
+from .llm import LLM
 
-        self.llm = LLM()
-        self.tools :dict[dict[str,any]] = []
-        self.providers :dict[dict[str,any]] = []
-        self.global_model = "None"
+MAX_RETRIES = 3
 
+
+class Agent(ABC):
+    """Agent shell with provider management and centralized tool execution."""
+
+    def __init__(self, name: str, *, llm: LLM | None = None) -> None:
         self.name = name
-        self.role : list[str] = ["user", "assistant", "system", "tool"]
-        self.prompt : dict[str, str] = {}
-        self.history : list[str] = []
-        self.max_retries = MAX_RETRYS
+        self.llm = llm
+        self.tools = ToolRegistry()
+        self.catalog_tool = ToolCatalogTool(self.tools)
+        self.tools.register(self.catalog_tool)
+        self.execution_manager = ToolExecutionManager(self.tools)
+        self.providers: dict[str, dict[str, Any]] = {}
+        self.global_model: str | None = None
+        self.role = ["user", "assistant", "system", "tool"]
+        self.prompt: dict[str, str] = {}
+        self.history: list[dict[str, str]] = []
+        self.max_retries = MAX_RETRIES
 
-    def clear_history(self):
-        self.history = []
+    def clear_history(self) -> None:
+        self.history.clear()
 
     @abstractmethod
-    def run(self,query: str) -> str:
-        pass
+    def run(self, query: str) -> str:
+        raise NotImplementedError
 
-#   设置
+    def register_tool(self, tool: BaseTool, *, replace: bool = False) -> None:
+        self.tools.register(tool, replace=replace)
 
-    def set_system_prompt(self, prompt: str):
+    async def execute_tool_calls(
+        self,
+        calls: list[ToolCall],
+        context: ExecutionContext | None = None,
+    ):
+        return await self.execution_manager.execute_batch(calls, context)
+
+    def set_system_prompt(self, prompt: str) -> None:
         self.prompt["system"] = prompt
 
-    def set_user_prompt(self, prompt: str):
+    def set_user_prompt(self, prompt: str) -> None:
         self.prompt["user"] = prompt
 
-    def set_assistant_prompt(self, prompt: str):
+    def set_assistant_prompt(self, prompt: str) -> None:
         self.prompt["assistant"] = prompt
 
-    def set_tool_prompt(self, prompt: str):
+    def set_tool_prompt(self, prompt: str) -> None:
         self.prompt["tool"] = prompt
 
-    def set_global_model(self, model: str):
+    def set_global_model(self, model: str | None) -> None:
         self.global_model = model
 
+    def detect_models(self, base_url: str, api_key: str) -> list[str]:
+        from openai import OpenAI
 
-#   常规函数
+        client = OpenAI(api_key=api_key, base_url=base_url, max_retries=self.max_retries)
+        response = client.models.list()
+        return [item.id if hasattr(item, "id") else str(item) for item in response.data]
 
-    def detect_models(self,base_url:str,api_key:str) -> list[str] :
-        detect_client = OpenAI(api_key=api_key, base_url=base_url,max_retries=self.max_retries)
-        return detect_client.models.list()
+    def add_provider(
+        self,
+        provider_name: str,
+        api_key: str,
+        base_url: str,
+        default_model: str | None = None,
+    ) -> None:
+        if provider_name in self.providers:
+            raise ValueError(f"Provider '{provider_name}' already exists.")
+        supported_models = self.detect_models(base_url, api_key)
+        if default_model is None:
+            default_model = supported_models[0] if supported_models else None
+        if default_model is not None and default_model not in supported_models:
+            raise ValueError(f"Provider '{provider_name}' does not support model '{default_model}'.")
+        self.providers[provider_name] = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "all_available_models": supported_models,
+            "models": [],
+            "default_model": default_model,
+        }
 
+    def add_model_to_provider(self, provider_name: str, model_name: str) -> None:
+        provider = self._provider(provider_name)
+        if model_name not in provider["all_available_models"]:
+            raise ValueError(f"Provider '{provider_name}' does not support model '{model_name}'.")
+        if model_name not in provider["models"]:
+            provider["models"].append(model_name)
 
-#   增
-    #   provider
-    def add_provider(self,provider_name:str,api_key:str,base_url:str,default_model:str = None) :
+    def delete_model_from_provider(self, provider_name: str, model_name: str) -> None:
+        provider = self._provider(provider_name)
+        if model_name not in provider["models"]:
+            raise ValueError(f"Model '{model_name}' not found for provider '{provider_name}'.")
+        provider["models"].remove(model_name)
 
-            if provider_name in self.providers:
-                raise ValueError(f"Provider '{provider_name}' already exists.")
-    
-            supported_models = self.detect_models(base_url,api_key)
+    def delete_provider(self, provider_name: str) -> None:
+        self._provider(provider_name)
+        del self.providers[provider_name]
 
-            if default_model is None:
-                if supported_models:
-                    default_model = supported_models[0]
-                else:
-                    default_model = "None"
+    def change_all_provider_available_models(self) -> None:
+        for name, provider in self.providers.items():
+            models = self.detect_models(provider["base_url"], provider["api_key"])
+            provider["all_available_models"] = models
+            provider["models"] = [model for model in provider["models"] if model in models]
+            if provider["default_model"] not in models:
+                provider["default_model"] = models[0] if models else None
 
-            provider : dict[str, any] = {
-                "api_key": api_key,
-                "base_url": base_url,
-                "all_unvisual_models":supported_models,
-                "models": [],
-                "default_model": default_model
-            }
-            self.providers.append({provider_name: provider})
+    # Backward-compatible spellings used by the original prototype.
+    change_all_provider_avalible_models = change_all_provider_available_models
 
-    def add_model_to_provider(self, provider_name: str, model_name: str):
-    
-            if provider_name not in self.providers:
-                raise ValueError(f"Provider '{provider_name}' not found.")
-    
-            if model_name not in self.providers[provider_name]["all_unvisual_models"]:
-                self.list_single_provider_models(provider_name)
-                raise ValueError(f"提供商 '{provider_name}' 不支持模型 '{model_name}'。")
-            
-            self.providers[provider_name]["models"].append(model_name)
+    def change_default_model(self, provider_name: str, default_model: str) -> None:
+        provider = self._provider(provider_name)
+        if default_model not in provider["all_available_models"]:
+            raise ValueError(f"Provider '{provider_name}' does not support model '{default_model}'.")
+        provider["default_model"] = default_model
 
-
-    
-
-#   删
-
-    #provider
-    def delete_model_from_provider(self, provider_name: str, model_name: str):
-    
-            if provider_name not in self.providers:
-                raise ValueError(f"Provider '{provider_name}' not found.")
-    
-            if model_name not in self.providers[provider_name]["models"]:
-                raise ValueError(f"Model '{model_name}' not found for provider '{provider_name}'.")
-    
-            self.providers[provider_name]["models"].remove(model_name)
-
-
-    def delete_provider(self,provider_name:str) :
-         self.providers.remove(provider_name)
-
-#   改/更新
-
-    #provider
-    def change_all_provider_avalible_models(self):
-        for provider , provider_info in self.providers.items():
-            url = provider_info["base_url"]
-            api_key = provider_info["api_key"]
-            supported_models = self.detect_models(url,api_key)
-            provider_info["all_unvisual_models"] = self.detect_models(url,api_key)
-
-    
-    
-    def change_default_model(self, provider_name: str, default_model: str):
-            if provider_name not in self.providers:
-                raise ValueError(f"Provider '{provider_name}' not found.")
-
-            if default_model not in self.providers[provider_name]["all_unvisual_models"]:
-                raise ValueError(f"提供商 '{provider_name}' 不支持模型 '{default_model}'。 请手动探测可用模型之后重试")
-            
-            self.providers[provider_name]["default_model"] = default_model
-
-    
-
-
-#   查
-
-    #provider
     def get_single_provider_models(self, provider_name: str) -> list[str]:
-            models = self.providers[provider_name]["models"]
-    
-            if not models:
-                models.append("None")
-            return models
-    
-    def get_all_providers(self) -> list[str] :
-            return list(self.providers.keys())
-    
-    def get_single_provider_avalible_models(self,provider_name:str) -> list[str] :
-        return self.providers[provider_name]["all_unvisual_models"]
+        return list(self._provider(provider_name)["models"])
 
+    def get_all_providers(self) -> list[str]:
+        return list(self.providers)
 
-    def get_all_avalible_models(self) -> list[str] :
-        all_models :list[str] = []
+    def get_single_provider_available_models(self, provider_name: str) -> list[str]:
+        return list(self._provider(provider_name)["all_available_models"])
 
-        for provider, provider_info in self.providers.items():
-            for model in provider_info["all_unvisual_models"]:
-                all_models.append( provider +":" + model )
+    get_single_provider_avalible_models = get_single_provider_available_models
 
-        if not all_models:
-            all_models.append("None")
-        
-        return all_models
+    def get_all_available_models(self) -> list[str]:
+        return [f"{name}:{model}" for name, provider in self.providers.items() for model in provider["all_available_models"]]
 
-#O   O
+    get_all_avalible_models = get_all_available_models
 
-    #provider
-    def list_all_avalible_models(self) -> list[str] :
-            all_models :list[str] = self.get_all_avalible_models()
-    
-            if not all_models:
-                print("No available models found.")
-                return None
-    
-            for p in all_models:
-                print(p)
+    def list_all_available_models(self) -> list[str]:
+        models = self.get_all_available_models()
+        for model in models:
+            print(model)
+        return models
+
+    list_all_avalible_models = list_all_available_models
 
     def list_single_provider_models(self, provider_name: str) -> list[str]:
-            models = self.get_single_provider_models(provider_name)
-    
-            if not models:
-                print(f"No models found for provider '{provider_name}'.")
-                return None
-            for model in models:
-                print(model)
+        models = self.get_single_provider_models(provider_name)
+        for model in models:
+            print(model)
+        return models
 
-    def list_all_providers_info(self) :
-        for provider, provider_info in self.providers.items():
-            print(f"Provider: {provider} url: {provider_info['base_url']} default_model: {provider_info['default_model']}")
+    def list_single_provider_info(self, provider_name: str) -> dict[str, Any]:
+        provider = self._provider(provider_name)
+        info = {"provider": provider_name, "base_url": provider["base_url"], "default_model": provider["default_model"]}
+        print(info)
+        return info
 
-    def list_single_provider_info(self, provider_name: str) :
+    def list_all_providers_info(self) -> list[dict[str, Any]]:
+        return [self.list_single_provider_info(name) for name in self.providers]
+
+    def _provider(self, provider_name: str) -> dict[str, Any]:
         if provider_name not in self.providers:
             raise ValueError(f"Provider '{provider_name}' not found.")
-        provider_info = self.providers[provider_name]
-        print(f"Provider: {provider_name} url: {provider_info['base_url']} default_model: {provider_info['default_model']}")
-#    I
+        return self.providers[provider_name]
 
 
-
-
-        
-
-    
-    
-
-    
-
-    
-
+# Preserve the original public name while offering the conventional class name.
+agent = Agent
