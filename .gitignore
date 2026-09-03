@@ -11,6 +11,7 @@ __pycache__/
 htmlcov/
 *.db
 *.sqlite3
+!update_log.sqlite3
 dist/
 build/
 *.egg-info/
