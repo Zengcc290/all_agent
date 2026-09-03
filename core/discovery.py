@@ -97,21 +97,28 @@ def discover_tools(
     replace: bool = False,
     strict: bool = False,
     reload_modules: bool = False,
+    metadata_only: bool = False,
 ) -> ToolDiscoveryReport:
     """Discover direct child modules that implement the single-file tool protocol.
 
     Enabled modules must expose ``TOOL_ENABLED: bool`` and a zero-argument
     ``create_tool()`` factory returning ``BaseTool``. Importing a module executes
     its top-level Python code, so only trusted packages should be scanned.
+    With ``metadata_only=True``, the factory is validated but not called;
+    exactly one module-level ``BaseTool`` subclass with a class-level ``ToolSpec``
+    is persisted to the supplied repository and no executable is registered.
     """
     if not isinstance(registry, ToolRegistry):
         raise TypeError("registry must be a ToolRegistry")
+    if metadata_only and repository is None:
+        raise ValueError("metadata_only discovery requires a ToolSpecRepository")
     if repository is not None and not isinstance(repository, ToolSpecRepository):
         raise TypeError("repository must be a ToolSpecRepository or None")
     for value, name in (
         (replace, "replace"),
         (strict, "strict"),
         (reload_modules, "reload_modules"),
+        (metadata_only, "metadata_only"),
     ):
         if not isinstance(value, bool):
             raise TypeError(f"{name} must be a boolean")
@@ -211,6 +218,29 @@ def discover_tools(
                     "create_tool must be callable without arguments",
                 )
             )
+            continue
+
+        if metadata_only:
+            try:
+                record = _register_discovered_metadata(
+                    module,
+                    module_path,
+                    registry,
+                    repository=repository,
+                    replace=replace,
+                )
+            except Exception as exc:  # noqa: BLE001
+                records.append(
+                    _error_record(
+                        module.__name__,
+                        module_path,
+                        True,
+                        exc,
+                        "metadata registration failed",
+                    )
+                )
+            else:
+                records.append(record)
             continue
 
         tool: object | None = None
@@ -341,6 +371,78 @@ def _register_discovered_tool(
     )
 
 
+def _register_discovered_metadata(
+    module: ModuleType,
+    module_path: str | None,
+    registry: ToolRegistry,
+    *,
+    repository: ToolSpecRepository | None,
+    replace: bool,
+) -> ToolDiscoveryRecord:
+    """Persist a module's static ``ToolSpec`` without calling its factory."""
+
+    candidates: list[tuple[type[BaseTool], ToolSpec]] = []
+    for value in vars(module).values():
+        if not inspect.isclass(value) or value is BaseTool:
+            continue
+        try:
+            is_tool = issubclass(value, BaseTool)
+        except TypeError:
+            is_tool = False
+        spec = getattr(value, "spec", None)
+        if is_tool and value.__module__ == module.__name__ and isinstance(spec, ToolSpec):
+            candidates.append((value, spec))
+    if len(candidates) != 1:
+        raise TypeError(
+            "metadata-only discovery requires exactly one BaseTool subclass "
+            "with a class-level ToolSpec"
+        )
+    tool_class, spec = candidates[0]
+    current = registry.maybe_resolve(spec.name)
+    if current is not None:
+        current_tool, generation = current
+        if current_tool.spec == spec:
+            _save_metadata(repository, spec, module, tool_class, replace=True)
+            return ToolDiscoveryRecord(
+                module=module.__name__,
+                path=module_path,
+                enabled=True,
+                status="already_registered",
+                tool_name=spec.name,
+                version=spec.version,
+                generation=generation,
+            )
+        if not replace:
+            raise ValueError(
+                f"tool '{spec.name}' has a different active implementation; "
+                "pass replace=True to replace it"
+            )
+
+    if repository is not None:
+        stored = repository.get(spec.name, spec.version)
+        if (
+            stored is not None
+            and stored["schema_hash"] != spec.schema_hash
+            and not replace
+        ):
+            raise ValueError(
+                f"tool '{spec.name}' has a different catalog schema; "
+                "pass replace=True to replace it"
+            )
+        _save_metadata(repository, spec, module, tool_class, replace=True)
+
+    # A metadata-only scan deliberately leaves the executable registry empty.
+    return ToolDiscoveryRecord(
+        module=module.__name__,
+        path=module_path,
+        enabled=True,
+        status="registered",
+        tool_name=spec.name,
+        version=spec.version,
+        generation=None,
+    )
+
+
 def _save_spec(
     repository: ToolSpecRepository | None,
     spec: ToolSpec,
@@ -355,6 +457,20 @@ def _save_spec(
         implementation_ref=implementation_ref,
         replace=True,
     )
+
+
+def _save_metadata(
+    repository: ToolSpecRepository | None,
+    spec: ToolSpec,
+    module: ModuleType,
+    tool_class: type[BaseTool],
+    *,
+    replace: bool,
+) -> None:
+    if repository is None:
+        return
+    implementation_ref = f"{module.__name__}:{tool_class.__qualname__}"
+    repository.save(spec, implementation_ref=implementation_ref, replace=replace)
 
 
 def _candidate_path(module_info: pkgutil.ModuleInfo) -> str | None:

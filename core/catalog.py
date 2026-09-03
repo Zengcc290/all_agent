@@ -51,9 +51,14 @@ class ToolCatalogTool(BaseTool):
         self,
         registry: ToolRegistry,
         repository: ToolSpecRepository | None = None,
+        *,
+        repository_only: bool = False,
     ) -> None:
         self.registry = registry
         self.repository = repository
+        if not isinstance(repository_only, bool):
+            raise TypeError("repository_only must be a boolean")
+        self.repository_only = repository_only
 
     def execute(
         self,
@@ -71,7 +76,24 @@ class ToolCatalogTool(BaseTool):
                 raise ValueError("tool_name is required for get_spec")
             registration = self.registry.maybe_resolve(arguments.tool_name)
             if registration is None:
-                raise ValueError(f"tool '{arguments.tool_name}' is not registered")
+                # A persistent catalog may intentionally contain metadata for
+                # tools whose executable implementation has not been loaded
+                # into this process yet.  Returning that metadata is what
+                # enables a catalog-first/lazy execution workflow.
+                if self.repository is None:
+                    raise ValueError(
+                        f"tool '{arguments.tool_name}' is not registered"
+                    )
+                stored = self.repository.get(arguments.tool_name, arguments.version)
+                if stored is None:
+                    raise ValueError(
+                        f"tool '{arguments.tool_name}' is not registered"
+                    )
+                if not set(stored["permissions"]).issubset(context.permissions):
+                    raise ValueError(
+                        f"tool '{arguments.tool_name}' is not available"
+                    )
+                return CatalogOutput(spec=self._full_stored_spec(stored, 0))
             tool, generation = registration
             if not set(tool.spec.permissions).issubset(context.permissions):
                 raise ValueError(f"tool '{arguments.tool_name}' is not available")
@@ -82,6 +104,39 @@ class ToolCatalogTool(BaseTool):
                 if stored is None or stored["schema_hash"] != tool.spec.schema_hash:
                     raise ValueError("active tool metadata is not synchronized")
             return CatalogOutput(spec=self._full_spec(tool.spec, generation))
+
+        if self.repository is not None and (
+            self.repository_only or not self._has_loaded_tools()
+        ):
+            selected_records = [
+                item
+                for item in self.repository.search(arguments.intent or "", arguments.limit)
+                if set(item["permissions"]).issubset(context.permissions)
+            ]
+            if arguments.action == "resolve" and selected_records:
+                record = selected_records[0]
+                return CatalogOutput(
+                    spec=self._full_stored_spec(
+                        record, self._stored_generation(record)
+                    )
+                )
+            if arguments.action == "resolve":
+                raise ValueError("no matching tool found")
+            return CatalogOutput(
+                candidates=[
+                    {
+                        "tool_name": item["tool_name"],
+                        "description": item["description"],
+                        "version": item["version"],
+                        "schema_hash": item["schema_hash"],
+                        "side_effect": item["side_effect"],
+                        "max_concurrency": item["max_concurrency"],
+                        "tags": list(item["tags"]),
+                        "registry_generation": self._stored_generation(item),
+                    }
+                    for item in selected_records
+                ]
+            )
 
         selected = self._search_specs(arguments.intent or "", arguments.limit, context)
         if arguments.action == "resolve" and selected:
@@ -100,6 +155,30 @@ class ToolCatalogTool(BaseTool):
         tool, generation = self.registry.resolve(spec.name)
         if tool.spec != spec:
             raise ValueError("tool catalog changed while the request was running")
+        return generation
+
+    def _has_loaded_tools(self) -> bool:
+        """Whether the registry contains an executable tool besides catalog."""
+
+        return any(
+            name != self.spec.name for name in self.registry.snapshot()
+        )
+
+    def _stored_generation(self, stored: dict[str, Any]) -> int:
+        """Return the active registry generation when metadata is loaded.
+
+        ``0`` explicitly means "catalog-only".  Once a lazy agent loads the
+        implementation, the next catalog call reports its real generation.
+        """
+
+        registration = self.registry.maybe_resolve(stored["tool_name"])
+        if registration is None:
+            return 0
+        tool, generation = registration
+        if tool.spec.version != stored["version"] or tool.spec.schema_hash != stored[
+            "schema_hash"
+        ]:
+            return 0
         return generation
 
     def _search_specs(
@@ -128,6 +207,27 @@ class ToolCatalogTool(BaseTool):
             ranked.append((score, spec))
         ranked.sort(key=lambda item: (-item[0], item[1].name))
         return [spec for score, spec in ranked if not terms or score > 0][:limit]
+
+    @staticmethod
+    def _full_stored_spec(stored: dict[str, Any], generation: int) -> dict[str, Any]:
+        """Convert a repository row to the same shape as ``_full_spec``."""
+
+        return {
+            "tool_name": stored["tool_name"],
+            "description": stored["description"],
+            "version": stored["version"],
+            "schema_hash": stored["schema_hash"],
+            "side_effect": stored["side_effect"],
+            "max_concurrency": stored["max_concurrency"],
+            "tags": list(stored["tags"]),
+            "registry_generation": generation,
+            "input_schema": stored["input_schema"],
+            "output_schema": stored["output_schema"],
+            "permissions": list(stored["permissions"]),
+            "timeout_seconds": stored["timeout_seconds"],
+            "idempotent": stored["idempotent"],
+            "parallel_safe": stored["parallel_safe"],
+        }
 
     @staticmethod
     def _full_spec(spec: ToolSpec, generation: int) -> dict[str, Any]:
