@@ -1,5 +1,12 @@
 """Core contracts and runtime for agent tools."""
 
+from .catalog import CatalogInput, CatalogOutput, ToolCatalogTool
+from .discovery import (
+    ToolDiscoveryError,
+    ToolDiscoveryRecord,
+    ToolDiscoveryReport,
+    discover_tools,
+)
 from .models import (
     BatchToolResult,
     ExecutionContext,
@@ -8,26 +15,32 @@ from .models import (
     ToolResult,
     ToolSpec,
 )
-from .catalog import CatalogInput, CatalogOutput, ToolCatalogTool
-from .registry import BaseTool, ToolRegistry
-from .runtime import ToolExecutionManager
 from .parser import parse_openai_tool_calls, parse_tool_calls
+from .registry import BaseTool, ToolRegistry
 from .repository import ToolSpecRepository
+from .runtime import ToolExecutionManager
+from .update_log import DEFAULT_UPDATE_LOG_FILENAME, UpdateLogRepository
 
 __all__ = [
     "BaseTool",
+    "BatchToolResult",
     "CatalogInput",
     "CatalogOutput",
-    "BatchToolResult",
     "ExecutionContext",
     "ToolCall",
     "ToolCatalogTool",
+    "ToolDiscoveryError",
+    "ToolDiscoveryRecord",
+    "ToolDiscoveryReport",
     "ToolError",
     "ToolExecutionManager",
     "ToolRegistry",
     "ToolResult",
     "ToolSpec",
     "ToolSpecRepository",
+    "DEFAULT_UPDATE_LOG_FILENAME",
+    "UpdateLogRepository",
+    "discover_tools",
     "parse_openai_tool_calls",
     "parse_tool_calls",
 ]
