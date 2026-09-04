@@ -1,5 +1,6 @@
 from .agent import Agent, agent
 from .llm import LLM
+from .providers import ProviderProfile, ProviderRegistry
 from .react import (
     ReAct,
     ReActAgent,
@@ -11,6 +12,8 @@ from .react import (
 
 __all__ = [
     "LLM",
+    "ProviderProfile",
+    "ProviderRegistry",
     "Agent",
     "agent",
     "ReActAgent",

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -10,13 +9,14 @@ LOGGER = logging.getLogger(__name__)
 
 
 class LLM:
-    """Small OpenAI-compatible client wrapper with lazy SDK import."""
+    """Small OpenAI-compatible client wrapper for one resolved profile."""
 
     def __init__(
         self,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        model: str | None = None,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
         max_retries: int = 3,
     ) -> None:
         if (
@@ -25,25 +25,22 @@ class LLM:
             or max_retries < 0
         ):
             raise ValueError("max_retries must be a non-negative integer")
-        from dotenv import load_dotenv
-
-        load_dotenv(override=False)
-        self.api_key = os.getenv("LLM_API_KEY") if api_key is None else api_key
-        self.base_url = os.getenv("LLM_BASE_URL") if base_url is None else base_url
-        self.model = os.getenv("LLM_MODEL") if model is None else model
-        if self.api_key is not None and not isinstance(self.api_key, str):
+        if not isinstance(api_key, str):
             raise TypeError("api_key must be a string")
-        if self.base_url is not None and not isinstance(self.base_url, str):
+        if not isinstance(base_url, str):
             raise TypeError("base_url must be a string")
-        if self.model is not None and not isinstance(self.model, str):
+        if not isinstance(model, str):
             raise TypeError("model must be a string")
+        self.api_key = api_key.strip()
+        self.base_url = base_url.strip()
+        self.model = model.strip()
         self.max_retries = max_retries
         missing = [
             name
             for name, value in (
-                ("LLM_API_KEY", self.api_key),
-                ("LLM_BASE_URL", self.base_url),
-                ("LLM_MODEL", self.model),
+                ("api_key", self.api_key),
+                ("base_url", self.base_url),
+                ("model", self.model),
             )
             if not value
         ]

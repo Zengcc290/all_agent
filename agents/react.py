@@ -277,6 +277,8 @@ class ReActAgent(Agent):
         name: str,
         *,
         llm: Any | None = None,
+        provider_config: str | None = None,
+        provider_registry: Any | None = None,
         repository: ToolSpecRepository | None = None,
         auto_discover_tools: bool = True,
         tool_package: str | Any = "tool",
@@ -299,6 +301,8 @@ class ReActAgent(Agent):
         super().__init__(
             name,
             llm=llm,
+            provider_config=provider_config,
+            provider_registry=provider_registry,
             repository=repository,
             auto_discover_tools=False,
             tool_package=tool_package,
@@ -453,6 +457,7 @@ class ReActAgent(Agent):
         temperature: float = 0.7,
         timeout: float = 60,
         tool_names: list[str] | None = None,
+        profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
         defer_tool_loading: bool = True,
@@ -467,6 +472,7 @@ class ReActAgent(Agent):
             temperature=temperature,
             timeout=timeout,
             tool_names=tool_names,
+            profile_name=profile_name,
             provider_name=provider_name,
             use_history=use_history,
             defer_tool_loading=defer_tool_loading,
@@ -482,6 +488,7 @@ class ReActAgent(Agent):
         temperature: float = 0.7,
         timeout: float = 60,
         tool_names: list[str] | None = None,
+        profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
         defer_tool_loading: bool = True,
@@ -514,9 +521,11 @@ class ReActAgent(Agent):
         ):
             raise TypeError("use_history and defer_tool_loading must be booleans")
 
-        completion_llm, selected_model = self._completion_target(provider_name, model)
+        completion_llm, selected_model, history_key = self._completion_target(
+            profile_name, model, provider_name=provider_name
+        )
         conversation = self._initial_conversation(
-            request_messages, use_history=use_history
+            request_messages, use_history=use_history, history_key=history_key
         )
         # A provider can still occasionally copy the user's subject into the
         # catalog ``intent`` despite the explicit protocol instructions. Keep
@@ -633,6 +642,7 @@ class ReActAgent(Agent):
                 log_react_thought(round_number, parsed.thought)
             if parsed.is_final:
                 log_react_final_answer(round_number, parsed.final_answer or "")
+                self._profile_histories[history_key] = [dict(item) for item in conversation]
                 self.history = [dict(item) for item in conversation]
                 return parsed.final_answer or ""
 
@@ -650,6 +660,7 @@ class ReActAgent(Agent):
                 # A plain text response is already interpreted as a final
                 # answer by the parser; this branch is defensive only.
                 log_react_final_answer(round_number, content.strip())
+                self._profile_histories[history_key] = [dict(item) for item in conversation]
                 self.history = [dict(item) for item in conversation]
                 return content.strip()
 
@@ -775,9 +786,10 @@ class ReActAgent(Agent):
         request_messages: list[dict[str, Any]],
         *,
         use_history: bool,
+        history_key: str,
     ) -> list[dict[str, Any]]:
-        if use_history and self.history:
-            prefix = [dict(item) for item in self.history]
+        if use_history and self._profile_histories.get(history_key):
+            prefix = [dict(item) for item in self._profile_histories[history_key]]
         else:
             prefix = self._configured_prompt_messages()
         return prefix + request_messages

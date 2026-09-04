@@ -24,6 +24,7 @@ from core import discover_tools as discover_tool_modules
 from core.registry import BaseTool
 
 from .llm import LLM
+from .providers import ProviderProfile, ProviderRegistry
 
 MAX_RETRIES = 3
 
@@ -36,6 +37,8 @@ class Agent(ABC):
         name: str,
         *,
         llm: LLM | None = None,
+        provider_config: str | None = None,
+        provider_registry: ProviderRegistry | None = None,
         repository: ToolSpecRepository | None = None,
         auto_discover_tools: bool = True,
         tool_package: str | ModuleType = "tool",
@@ -57,6 +60,14 @@ class Agent(ABC):
             )
         self.name = name
         self.llm = llm
+        if provider_registry is not None and not isinstance(
+            provider_registry, ProviderRegistry
+        ):
+            raise TypeError("provider_registry must be a ProviderRegistry or None")
+        self.provider_registry = provider_registry or ProviderRegistry(provider_config)
+        self.active_profile = self.provider_registry.active_profile
+        self._profile_clients: dict[tuple[str, str], LLM] = {}
+        self._profile_histories: dict[str, list[dict[str, Any]]] = {}
         self.repository = repository
         self.tool_package = tool_package
         self.tools = ToolRegistry()
@@ -68,7 +79,9 @@ class Agent(ABC):
         if auto_discover_tools:
             self.discover_tools(strict=discovery_strict)
         self.execution_manager = ToolExecutionManager(self.tools)
-        self.providers: dict[str, dict[str, Any]] = {}
+        # ``providers`` and ``global_model`` remain read-only compatibility
+        # views for callers of the original prototype. New code should use
+        # ``provider_registry`` and ``active_profile``.
         self.global_model: str | None = None
         self.role = ["user", "assistant", "system", "tool"]
         self.prompt: dict[str, str] = {}
@@ -77,6 +90,7 @@ class Agent(ABC):
 
     def clear_history(self) -> None:
         self.history.clear()
+        self._profile_histories.clear()
 
     @abstractmethod
     def run(self, query: str) -> str:
@@ -198,6 +212,7 @@ class Agent(ABC):
         temperature: float = 0.7,
         timeout: float = 60,
         tool_names: list[str] | None = None,
+        profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
         defer_tool_loading: bool = False,
@@ -222,8 +237,14 @@ class Agent(ABC):
         ):
             raise TypeError("use_history and defer_tool_loading must be booleans")
 
-        completion_llm, selected_model = self._completion_target(provider_name, model)
-        prefix = [dict(item) for item in self.history] if use_history else []
+        completion_llm, selected_model, history_key = self._completion_target(
+            profile_name, model, provider_name=provider_name
+        )
+        prefix = (
+            [dict(item) for item in self._profile_histories.get(history_key, [])]
+            if use_history
+            else []
+        )
         if not prefix:
             prefix = self._configured_prompt_messages()
         conversation = prefix + [dict(message) for message in messages]
@@ -283,6 +304,7 @@ class Agent(ABC):
             assistant_message = _message_dict(message)
             conversation.append(assistant_message)
             if not native_calls:
+                self._profile_histories[history_key] = [dict(item) for item in conversation]
                 self.history = [dict(item) for item in conversation]
                 return _field(message, "content") or ""
 
@@ -420,19 +442,90 @@ class Agent(ABC):
             *conversation,
         ]
 
+    @property
+    def profiles(self) -> Mapping[str, ProviderProfile]:
+        """Configured provider profiles (without resolved API keys)."""
+
+        return self.provider_registry.profiles
+
+    def set_active_profile(self, profile_name: str) -> None:
+        """Select the default profile for subsequent requests."""
+
+        profile = self.provider_registry.get(profile_name)
+        self.active_profile = profile.name
+        self.provider_registry.active_profile = profile.name
+
+    def reload_provider_profiles(self) -> None:
+        """Reload TOML and environment-backed credentials.
+
+        Existing clients are discarded so URL/key changes take effect on the
+        next request. Conversation history remains isolated per profile.
+        """
+
+        self.provider_registry.reload()
+        self.active_profile = self.provider_registry.active_profile
+        self._profile_clients.clear()
+
+    def profile_info(self, profile_name: str | None = None) -> dict[str, Any]:
+        selected = profile_name or self.active_profile
+        return self.provider_registry.get(selected).public_info()
+
+    def list_profiles(self) -> list[dict[str, Any]]:
+        return [profile.public_info() for profile in self.provider_registry.profiles.values()]
+
+    def add_provider(
+        self,
+        provider_name: str,
+        api_key: str,
+        base_url: str,
+        default_model: str,
+    ) -> None:
+        """Deprecated compatibility shim; prefer a TOML profile.
+
+        It deliberately does not probe ``/models``. The old API's network
+        probe made valid gateways impossible to configure when that endpoint
+        was unavailable.
+        """
+
+        self.provider_registry.register_ephemeral(
+            provider_name,
+            api_key=api_key,
+            base_url=base_url,
+            default_model=default_model,
+        )
+
+    def detect_models(self, base_url: str, api_key: str) -> list[str]:
+        """Deprecated compatibility helper for callers migrating to profiles."""
+
+        from openai import OpenAI
+
+        response = OpenAI(
+            api_key=api_key, base_url=base_url, max_retries=self.max_retries
+        ).models.list()
+        raw_models = _field(response, "data")
+        if not isinstance(raw_models, (list, tuple)):
+            raise TypeError("provider model response data must be a list")
+        return list(dict.fromkeys(str(_field(item, "id", item)).strip() for item in raw_models if str(_field(item, "id", item)).strip()))
+
     def _completion_target(
         self,
-        provider_name: str | None,
+        profile_name: str | None,
         model: str | None,
-    ) -> tuple[Any, str | None]:
-        if provider_name is not None and (
-            not isinstance(provider_name, str) or not provider_name.strip()
+        *,
+        provider_name: str | None = None,
+    ) -> tuple[Any, str | None, str]:
+        if profile_name is not None and (
+            not isinstance(profile_name, str) or not profile_name.strip()
         ):
-            raise ValueError("provider_name must be a non-empty string or None")
+            raise ValueError("profile_name must be a non-empty string or None")
+        if provider_name is not None:
+            if profile_name is not None and profile_name != provider_name:
+                raise ValueError("profile_name and provider_name must match when both are set")
+            profile_name = provider_name
         if model is not None and (not isinstance(model, str) or not model.strip()):
             raise ValueError("model must be a non-empty string or None")
 
-        selected_provider = provider_name
+        selected_provider = profile_name
         selected_model = model
         if selected_model is None and isinstance(self.global_model, str):
             possible_provider, separator, possible_model = self.global_model.partition(
@@ -440,7 +533,7 @@ class Agent(ABC):
             )
             qualified = (
                 separator
-                and possible_provider in self.providers
+                and possible_provider in self.provider_registry.profiles
                 and bool(possible_model)
             )
             if selected_provider is None and qualified:
@@ -452,33 +545,28 @@ class Agent(ABC):
             else:
                 selected_model = self.global_model
 
-        if selected_provider is None:
-            if self.llm is None:
-                raise ValueError(
-                    "an LLM instance or provider_name is required for run_with_tools"
-                )
-            return self.llm, selected_model
-
-        provider = self._provider(selected_provider)
-        selected_model = selected_model or provider["default_model"]
-        if selected_model is None:
-            raise ValueError(f"Provider '{selected_provider}' has no selectable model.")
-        if selected_model not in provider["all_available_models"]:
+        if selected_provider is None and self.llm is not None:
+            return self.llm, selected_model, "__injected__"
+        selected_provider = selected_provider or self.active_profile
+        profile = self.provider_registry.get(selected_provider)
+        selected_model = selected_model or profile.default_model
+        if selected_model not in profile.models:
             raise ValueError(
-                f"Provider '{selected_provider}' does not support model "
+                f"Provider profile '{selected_provider}' does not support model "
                 f"'{selected_model}'."
             )
-        clients = provider.setdefault("_clients", {})
-        client = clients.get(selected_model)
+        cache_key = (selected_provider, selected_model)
+        client = self._profile_clients.get(cache_key)
         if client is None:
+            api_key = self.provider_registry.resolve_api_key(selected_provider)
             client = LLM(
-                api_key=provider["api_key"],
-                base_url=provider["base_url"],
+                api_key=api_key,
+                base_url=profile.base_url,
                 model=selected_model,
                 max_retries=self.max_retries,
             )
-            clients[selected_model] = client
-        return client, selected_model
+            self._profile_clients[cache_key] = client
+        return client, selected_model, selected_provider
 
     def set_system_prompt(self, prompt: str) -> None:
         self._set_prompt("system", prompt)
@@ -498,177 +586,10 @@ class Agent(ABC):
         self.prompt[role] = prompt
 
     def set_global_model(self, model: str | None) -> None:
+        """Deprecated compatibility setter; prefer ``set_active_profile`` and ``model=``."""
         if model is not None and (not isinstance(model, str) or not model.strip()):
             raise ValueError("model must be a non-empty string or None")
         self.global_model = model
-
-    def detect_models(self, base_url: str, api_key: str) -> list[str]:
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError("base_url must be a non-empty string")
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ValueError("api_key must be a non-empty string")
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=api_key, base_url=base_url, max_retries=self.max_retries
-        )
-        response = client.models.list()
-        raw_models = _field(response, "data")
-        if not isinstance(raw_models, (list, tuple)):
-            raise TypeError("provider model response data must be a list")
-        models: list[str] = []
-        for item in raw_models:
-            model_id = _field(item, "id")
-            if model_id is None and isinstance(item, str):
-                model_id = item
-            if model_id is None:
-                continue
-            model_id = str(model_id).strip()
-            if model_id and model_id not in models:
-                models.append(model_id)
-        return models
-
-    def add_provider(
-        self,
-        provider_name: str,
-        api_key: str,
-        base_url: str,
-        default_model: str | None = None,
-    ) -> None:
-        if not isinstance(provider_name, str) or not provider_name.strip():
-            raise ValueError("provider_name must be a non-empty string")
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ValueError("api_key must be a non-empty string")
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError("base_url must be a non-empty string")
-        if default_model is not None and (
-            not isinstance(default_model, str) or not default_model.strip()
-        ):
-            raise ValueError("default_model must be a non-empty string")
-        if provider_name in self.providers:
-            raise ValueError(f"Provider '{provider_name}' already exists.")
-        supported_models = self.detect_models(base_url, api_key)
-        if default_model is None:
-            default_model = supported_models[0] if supported_models else None
-        if default_model is not None and default_model not in supported_models:
-            raise ValueError(
-                f"Provider '{provider_name}' does not support model '{default_model}'."
-            )
-        self.providers[provider_name] = {
-            "api_key": api_key,
-            "base_url": base_url,
-            "all_available_models": supported_models,
-            "models": [],
-            "default_model": default_model,
-            "_clients": {},
-        }
-
-    def add_model_to_provider(self, provider_name: str, model_name: str) -> None:
-        if not isinstance(model_name, str) or not model_name.strip():
-            raise ValueError("model_name must be a non-empty string")
-        provider = self._provider(provider_name)
-        if model_name not in provider["all_available_models"]:
-            raise ValueError(
-                f"Provider '{provider_name}' does not support model '{model_name}'."
-            )
-        if model_name not in provider["models"]:
-            provider["models"].append(model_name)
-
-    def delete_model_from_provider(self, provider_name: str, model_name: str) -> None:
-        if not isinstance(model_name, str) or not model_name.strip():
-            raise ValueError("model_name must be a non-empty string")
-        provider = self._provider(provider_name)
-        if model_name not in provider["models"]:
-            raise ValueError(
-                f"Model '{model_name}' not found for provider '{provider_name}'."
-            )
-        provider["models"].remove(model_name)
-
-    def delete_provider(self, provider_name: str) -> None:
-        self._provider(provider_name)
-        del self.providers[provider_name]
-
-    def change_all_provider_available_models(self) -> None:
-        for provider in self.providers.values():
-            models = self.detect_models(provider["base_url"], provider["api_key"])
-            provider["all_available_models"] = models
-            provider["models"] = [
-                model for model in provider["models"] if model in models
-            ]
-            if provider["default_model"] not in models:
-                provider["default_model"] = models[0] if models else None
-            provider["_clients"] = {
-                model: client
-                for model, client in provider.get("_clients", {}).items()
-                if model in models
-            }
-
-    # Backward-compatible spellings used by the original prototype.
-    change_all_provider_avalible_models = change_all_provider_available_models
-
-    def change_default_model(self, provider_name: str, default_model: str) -> None:
-        if not isinstance(default_model, str) or not default_model.strip():
-            raise ValueError("default_model must be a non-empty string")
-        provider = self._provider(provider_name)
-        if default_model not in provider["all_available_models"]:
-            raise ValueError(
-                f"Provider '{provider_name}' does not support model '{default_model}'."
-            )
-        provider["default_model"] = default_model
-
-    def get_single_provider_models(self, provider_name: str) -> list[str]:
-        return list(self._provider(provider_name)["models"])
-
-    def get_all_providers(self) -> list[str]:
-        return list(self.providers)
-
-    def get_single_provider_available_models(self, provider_name: str) -> list[str]:
-        return list(self._provider(provider_name)["all_available_models"])
-
-    get_single_provider_avalible_models = get_single_provider_available_models
-
-    def get_all_available_models(self) -> list[str]:
-        return [
-            f"{name}:{model}"
-            for name, provider in self.providers.items()
-            for model in provider["all_available_models"]
-        ]
-
-    get_all_avalible_models = get_all_available_models
-
-    def list_all_available_models(self) -> list[str]:
-        models = self.get_all_available_models()
-        for model in models:
-            print(model)
-        return models
-
-    list_all_avalible_models = list_all_available_models
-
-    def list_single_provider_models(self, provider_name: str) -> list[str]:
-        models = self.get_single_provider_models(provider_name)
-        for model in models:
-            print(model)
-        return models
-
-    def list_single_provider_info(self, provider_name: str) -> dict[str, Any]:
-        provider = self._provider(provider_name)
-        info = {
-            "provider": provider_name,
-            "base_url": provider["base_url"],
-            "default_model": provider["default_model"],
-        }
-        print(info)
-        return info
-
-    def list_all_providers_info(self) -> list[dict[str, Any]]:
-        return [self.list_single_provider_info(name) for name in self.providers]
-
-    def _provider(self, provider_name: str) -> dict[str, Any]:
-        if not isinstance(provider_name, str) or not provider_name:
-            raise ValueError("provider_name must be a non-empty string")
-        if provider_name not in self.providers:
-            raise ValueError(f"Provider '{provider_name}' not found.")
-        return self.providers[provider_name]
 
 
 # Preserve the original public name while offering the conventional class name.

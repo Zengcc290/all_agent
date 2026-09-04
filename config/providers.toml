@@ -1,0 +1,19 @@
+[defaults]
+# Change this value to switch the default provider for new requests.
+active_profile = "openai"
+
+[profiles.openai]
+adapter = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key_env = "LLM_OPENAI_API_KEY"
+default_model = "gpt-4.1"
+models = ["gpt-4.1", "gpt-4.1-mini"]
+tool_mode = "native_strict"
+
+[profiles.deepseek]
+adapter = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "LLM_DEEPSEEK_API_KEY"
+default_model = "deepseek-chat"
+models = ["deepseek-chat", "deepseek-reasoner"]
+tool_mode = "text_react"

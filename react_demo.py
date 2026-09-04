@@ -10,7 +10,6 @@ import json
 import sys
 
 from agents import ReActAgent
-from agents.llm import LLM
 from core import ExecutionContext
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -45,7 +44,7 @@ def extract_message(response):
 
 
 def main() -> None:
-    agent = ReActAgent("react-demo", llm=LLM())
+    agent = ReActAgent("react-demo")
 
     # ---------- 0. 工具发现与访问视图 ----------
     banner("[0] 工具自动发现报告")
@@ -90,7 +89,8 @@ def main() -> None:
     )
 
     # ---------- 2. 拦截 LLM.complete ----------
-    original_complete = agent.llm.complete
+    original_client = agent._completion_target(None, None)[0]
+    original_complete = original_client.complete
 
     def logging_complete(messages, **kwargs):
         STATE["llm_rounds"] += 1
@@ -123,7 +123,7 @@ def main() -> None:
             print("  (无法解析)", dump(response))
         return response
 
-    agent.llm.complete = logging_complete
+    original_client.complete = logging_complete
 
     # ---------- 3. 拦截 execute_tool_calls ----------
     original_execute = agent.execute_tool_calls
