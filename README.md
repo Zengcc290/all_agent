@@ -65,7 +65,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`ToolCatalogTool` is available as `system.tool_catalog` for summary search and versioned schema loading. It exposes fixed operations and does not execute arbitrary SQL. Tools are eagerly discovered, instantiated, and registered before the first model request by default. Pass a `ToolSpecRepository` to persist the active catalog. Use `lazy_tools=True` on `ReActAgent` or `run_with_tools(..., defer_tool_loading=True)` only when the catalog-first/lazy-loading tradeoff is intentional.
+`ToolCatalogTool` is available as `system.tool_catalog` for summary search and versioned schema loading. It exposes fixed operations and does not execute arbitrary SQL. Tools are eagerly discovered, instantiated, and registered before the first model request by default. ReAct runs use catalog-first schema exposure by default: the first request contains every registered tool name and only the complete schema for `system.tool_catalog`; the model resolves a needed capability before invoking it. This is schema retrieval, not registration or permission checking. Pass `defer_tool_loading=False` to `run_with_react(...)` for a one-round full-schema ReAct prompt. Pass a `ToolSpecRepository` to persist the active catalog; `lazy_tools=True` remains a separate implementation-loading optimization.
 
 Project changes are recorded compactly in SQLite by the auto-discovered
 `system.update_log` tool. Read [update_log_readme_first.md](update_log_readme_first.md)

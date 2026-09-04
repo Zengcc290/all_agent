@@ -180,7 +180,7 @@ record = agent.tool_discovery_report.for_tool("web.search")
 7. 工具执行结果再次由输出模型校验。异常、超时或校验失败都转成统一 `ToolResult.error`。
 8. Agent 按原 `call_id` 追加工具结果并再次请求模型，直到模型生成最终文本或超过 `max_rounds`。
 
-默认第一轮就暴露全部已注册工具的完整 Schema。若显式启用 `lazy_tools=True` 或 `defer_tool_loading=True`，第一轮才只暴露 `system.tool_catalog`，后续通过目录结果加载工具；这能减少上下文占用，但会增加至少一轮模型调用和一次工具发现路径。
+工具实例默认在 Agent 构造阶段完成发现、实例化和注册。ReAct 默认采用“目录优先”的 Schema 暴露策略：首轮仅显示全部已注册工具的名称以及 `system.tool_catalog` 的完整 Schema；模型根据名称推断所需能力，再用目录工具取得目标工具 Schema 后调用。目录查询只是取得契约，不是注册、权限或访问申请；名称已列出的工具均已注册且可用。传入 `defer_tool_loading=False` 可显式改为首轮发送全部已注册工具的完整 Schema。`lazy_tools=True` 仍是独立的实现按需加载优化。
 
 ## 自动发现的内部链路
 

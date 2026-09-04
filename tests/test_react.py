@@ -56,6 +56,56 @@ class ReActLoggingLLM:
         return "Final Answer: done"
 
 
+class CatalogFirstEchoLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests = []
+
+    def complete(self, messages, **_options):
+        self.requests.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: find the echo input contract\n"
+                "Action: system.tool_catalog\n"
+                'Action Input: {"action":"resolve","intent":"echo"}'
+            )
+        if self.calls == 2:
+            return (
+                "Thought: use the resolved echo tool\n"
+                "Action: test.react_echo\n"
+                'Action Input: {"value":7}'
+            )
+        return "Final Answer: done"
+
+
+class DirectThenCatalogEchoLLM(CatalogFirstEchoLLM):
+    def complete(self, messages, **_options):
+        self.requests.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: try the echo tool\n"
+                "Action: test.react_echo\n"
+                'Action Input: {"value":7}'
+            )
+        if self.calls == 2:
+            return (
+                "Thought: retrieve the echo input contract\n"
+                "Action: system.tool_catalog\n"
+                'Action Input: {"action":"resolve","intent":"echo"}'
+            )
+        if self.calls == 3:
+            return (
+                "Thought: use the resolved echo tool\n"
+                "Action: test.react_echo\n"
+                'Action Input: {"value":7}'
+            )
+        return "Final Answer: done"
+
+
 class NativeReActLoggingLLM:
     model = "test-model"
 
@@ -263,21 +313,46 @@ async def test_react_logs_progress_and_each_round_result(capsys):
 
 
 @pytest.mark.asyncio
-async def test_react_eagerly_exposes_registered_tools_by_default():
-    llm = ReActLoggingLLM()
+async def test_react_exposes_registered_names_and_catalog_schema_by_default():
+    llm = CatalogFirstEchoLLM()
     agent = ReActAgent(
-        "eager-default-test",
+        "catalog-first-default-test",
+        llm=llm,
+        auto_discover_tools=False,
+    )
+    agent.register_tool(EchoTool())
+    assert "test.react_echo" in agent.tools
+
+    answer = await agent.run_with_react("echo 7", max_rounds=4)
+
+    assert answer == "done"
+    first_instruction = llm.requests[0][0]["content"]
+    assert "All registered tool names: system.tool_catalog, test.react_echo" in first_instruction
+    assert "- system.tool_catalog:" in first_instruction
+    assert "Action Input schema:" in first_instruction
+    assert "- test.react_echo:" not in first_instruction
+    assert "already registered and usable" in first_instruction
+    second_instruction = llm.requests[1][0]["content"]
+    assert "test.react_echo:" in second_instruction
+    assert "test.react_echo" in agent.tools
+
+
+@pytest.mark.asyncio
+async def test_catalog_first_direct_call_requests_schema_without_denying_tool():
+    llm = DirectThenCatalogEchoLLM()
+    agent = ReActAgent(
+        "catalog-first-recovery-test",
         llm=llm,
         auto_discover_tools=False,
     )
     agent.register_tool(EchoTool())
 
-    answer = await agent.run_with_react("echo 7", max_rounds=3)
+    answer = await agent.run_with_react("echo 7", max_rounds=5)
 
     assert answer == "done"
-    first_instruction = llm.requests[0][0]["content"]
-    assert "- test.react_echo:" in first_instruction
-    assert "Action Input schema:" in first_instruction
+    first_observation = llm.requests[1][-1]["content"]
+    assert "TOOL_SCHEMA_REQUIRED" in first_observation
+    assert "registered and usable" in first_observation
 
 
 @pytest.mark.asyncio

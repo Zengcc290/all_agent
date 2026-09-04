@@ -264,16 +264,19 @@ class ReActAgent(Agent):
         "system.tool_catalog tool is optional in that mode."
     )
 
-    LAZY_REACT_INSTRUCTIONS = (
-        "The system.tool_catalog tool is a capability directory, not the user's "
-        "task itself. Its `intent` field must describe the capability you need "
-        "(for example `web search`, `read a file`, or `send email`), never the "
-        "actual subject/query from the user. When a requested tool is not loaded, "
-        "resolve the capability through the catalog first, then call the resolved "
-        "tool with the user's words in its input. Do not claim that a tool is "
-        "unavailable merely because a catalog lookup failed; correct the capability "
-        "intent and retry. Resolve multiple capabilities together with `limit: 20` "
-        "when possible."
+    CATALOG_FIRST_REACT_INSTRUCTIONS = (
+        "Every name in `All registered tool names` is already registered and usable. "
+        "That list is a capability index; a name without an Action Input schema in "
+        "this request is not unavailable or blocked. Before calling any listed tool "
+        "other than system.tool_catalog whose schema has not been provided, first "
+        "call system.tool_catalog with `action`: `resolve` and an `intent` describing "
+        "the capability you need (for example `web search`, `read a file`, or `send "
+        "email`), never the user's actual subject/query. Catalog resolution only "
+        "retrieves a tool contract; it is not a registration, permission, or access "
+        "request. After its Observation returns the schema, call the resolved tool "
+        "with the user's words in its input. Do not claim that a tool is unavailable "
+        "merely because a catalog lookup failed; correct the capability intent and "
+        "retry. Resolve multiple capabilities together with `limit`: 20 when possible."
     )
 
     def __init__(
@@ -462,7 +465,7 @@ class ReActAgent(Agent):
         profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
-        defer_tool_loading: bool = False,
+        defer_tool_loading: bool = True,
     ) -> str:
         """Run one textual ReAct conversation to a final answer."""
 
@@ -493,7 +496,7 @@ class ReActAgent(Agent):
         profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
-        defer_tool_loading: bool = False,
+        defer_tool_loading: bool = True,
     ) -> str:
         if isinstance(messages, str):
             if not messages.strip():
@@ -583,7 +586,10 @@ class ReActAgent(Agent):
             for name, (tool, _) in registrations.items():
                 loaded_tool_schemas.setdefault(name, tool.spec.input_schema)
             conversation_for_request = self._with_tool_instructions(
-                conversation, registrations, loaded_tool_schemas
+                conversation,
+                registrations,
+                loaded_tool_schemas,
+                catalog_first=defer_tool_loading or self.lazy_tools,
             )
             options: dict[str, Any] = {
                 "model": selected_model,
@@ -858,6 +864,8 @@ class ReActAgent(Agent):
         conversation: list[dict[str, Any]],
         registrations: Mapping[str, tuple[Any, int]],
         loaded_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
+        *,
+        catalog_first: bool = False,
     ) -> list[dict[str, Any]]:
         if self.lazy_tools:
             registrations = {
@@ -875,8 +883,8 @@ class ReActAgent(Agent):
             "All registered tool names: " + inventory,
             "",
         ]
-        if self.lazy_tools:
-            lines.extend((self.LAZY_REACT_INSTRUCTIONS, ""))
+        if catalog_first:
+            lines.extend((self.CATALOG_FIRST_REACT_INSTRUCTIONS, ""))
         lines.append("Available tools:")
         if not registrations:
             lines.append("(No tools are currently available; answer directly.)")
@@ -888,11 +896,16 @@ class ReActAgent(Agent):
                     "  Action Input schema: "
                     + json.dumps(schema, ensure_ascii=False, sort_keys=True)
                 )
-        if loaded_tool_schemas:
+        resolved_schemas = {
+            name: schema
+            for name, schema in (loaded_tool_schemas or {}).items()
+            if name not in registrations
+        }
+        if resolved_schemas:
             lines.extend(("", "Loaded tool input schemas:"))
-            for name in sorted(loaded_tool_schemas):
+            for name in sorted(resolved_schemas):
                 schema = self._strict_react_schema(
-                    dict(loaded_tool_schemas[name])
+                    dict(resolved_schemas[name])
                 )
                 lines.append(
                     f"- {name}: "
@@ -944,7 +957,7 @@ class ReActAgent(Agent):
         context: ExecutionContext,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        """Queue a repository-only catalog result for lazy loading."""
+        """Queue schemas returned by a successful catalog resolution."""
 
         if not result.ok or result.tool_name != self.catalog_tool.spec.name:
             return
@@ -1101,8 +1114,12 @@ class ReActAgent(Agent):
                 tool_name=_safe_tool_name(action_name),
                 ok=False,
                 error=ToolError(
-                    code="TOOL_NOT_EXPOSED",
-                    message="tool was not included in the current model request",
+                    code="TOOL_SCHEMA_REQUIRED",
+                    message=(
+                        f"tool '{_safe_tool_name(action_name)}' is registered and "
+                        "usable; first call system.tool_catalog with action "
+                        "'resolve' to load its Action Input schema"
+                    ),
                 ),
             )
         if parsed.error is not None:
@@ -1230,17 +1247,24 @@ class ReActAgent(Agent):
                 )[0]
             except (TypeError, ValueError) as exc:
                 code = (
-                    "TOOL_NOT_EXPOSED"
+                    "TOOL_SCHEMA_REQUIRED"
                     if isinstance(canonical, str)
                     and canonical in current_snapshot
                     and canonical not in registrations
                     else "INVALID_TOOL_CALL"
                 )
+                message = (
+                    f"tool '{_safe_tool_name(canonical)}' is registered and usable; "
+                    "first call system.tool_catalog with action 'resolve' to load "
+                    "its Action Input schema"
+                    if code == "TOOL_SCHEMA_REQUIRED"
+                    else _safe_tool_call_error(exc)
+                )
                 results[position] = ToolResult(
                     call_id=call_id,
                     tool_name=_safe_tool_name(canonical),
                     ok=False,
-                    error=ToolError(code=code, message=_safe_tool_call_error(exc)),
+                    error=ToolError(code=code, message=message),
                 )
                 continue
             calls.append(call)
