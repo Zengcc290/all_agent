@@ -6,9 +6,10 @@ return text: it asks the model for ``Thought``/``Action``/``Action Input``
 steps, executes actions through the same registry and execution manager, and
 feeds a structured ``Observation`` back to the model.
 
-No tool implementation is duplicated here.  Registry generations, schemas,
-permissions, confirmations, timeouts and output validation are all delegated
-to ``Agent.execute_tool_calls``.
+No tool implementation is duplicated here. Registry generations, schemas,
+side-effect confirmations, timeouts and output validation are all delegated to
+``Agent.execute_tool_calls``. Permission declarations remain compatibility
+metadata and are not used as an authorization gate.
 """
 
 from __future__ import annotations
@@ -259,20 +260,20 @@ class ReActAgent(Agent):
         "complete, respond with:\nFinal Answer: your final response. Never put an "
         "Observation in your own response. Use only the listed tool names and "
         "JSON object inputs. Do not output placeholder text such as <answer>.\n\n"
+        "Use a listed tool directly when its complete schema is available. The "
+        "system.tool_catalog tool is optional in that mode."
+    )
+
+    LAZY_REACT_INSTRUCTIONS = (
         "The system.tool_catalog tool is a capability directory, not the user's "
         "task itself. Its `intent` field must describe the capability you need "
         "(for example `web search`, `read a file`, or `send email`), never the "
-        "actual subject/query from the user. For a web-search request, the first "
-        "step MUST be a catalog resolve call with exactly an intent such as "
-        "`web search`; after the Observation returns the complete schema, call "
-        "the resolved search tool and put the user's words in its `query` field. "
-        "Do not claim that a tool is unavailable merely because a catalog lookup "
-        "failed; correct the capability intent and retry the catalog lookup. "
-        "When a task may require more than one capability, resolve them together "
-        "in one catalog call with a combined intent (for example `current time "
-        "and web search`) and use `limit: 20`. The catalog response may contain "
-        "multiple complete tool schemas in `specs`; use every relevant tool from "
-        "that list instead of making one catalog call per tool."
+        "actual subject/query from the user. When a requested tool is not loaded, "
+        "resolve the capability through the catalog first, then call the resolved "
+        "tool with the user's words in its input. Do not claim that a tool is "
+        "unavailable merely because a catalog lookup failed; correct the capability "
+        "intent and retry. Resolve multiple capabilities together with `limit: 20` "
+        "when possible."
     )
 
     def __init__(
@@ -286,14 +287,12 @@ class ReActAgent(Agent):
         auto_discover_tools: bool = True,
         tool_package: str | Any = "tool",
         discovery_strict: bool = False,
-        lazy_tools: bool = True,
+        lazy_tools: bool = False,
     ) -> None:
-        """Create a catalog-first agent.
+        """Create an agent with eager tool registration by default.
 
-        Discovery writes versioned metadata to ``repository`` while keeping
-        only ``system.tool_catalog`` registered in this process.  A concrete
-        tool implementation is imported and constructed only after the model
-        resolves it through the catalog.
+        Set ``lazy_tools=True`` explicitly to persist metadata and defer
+        implementation construction until a catalog lookup or direct call.
         """
 
         if not isinstance(lazy_tools, bool):
@@ -463,7 +462,7 @@ class ReActAgent(Agent):
         profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
-        defer_tool_loading: bool = True,
+        defer_tool_loading: bool = False,
     ) -> str:
         """Run one textual ReAct conversation to a final answer."""
 
@@ -494,7 +493,7 @@ class ReActAgent(Agent):
         profile_name: str | None = None,
         provider_name: str | None = None,
         use_history: bool = False,
-        defer_tool_loading: bool = True,
+        defer_tool_loading: bool = False,
     ) -> str:
         if isinstance(messages, str):
             if not messages.strip():
@@ -538,8 +537,8 @@ class ReActAgent(Agent):
         catalog_intent_hint = self._infer_catalog_intent(request_messages)
 
         initial_snapshot = self.tools.snapshot()
-        # Tool permissions are intentionally disabled for this deployment:
-        # every registered tool is exposed to every execution context.
+        # Permission metadata is retained for compatibility and audit output,
+        # but it is not an authorization filter in this deployment.
         loaded_tool_schemas: dict[str, dict[str, Any]] = {}
         visible_order = list(initial_snapshot)
         if tool_names is not None:
@@ -875,8 +874,10 @@ class ReActAgent(Agent):
             "",
             "All registered tool names: " + inventory,
             "",
-            "Available tools:",
         ]
+        if self.lazy_tools:
+            lines.extend((self.LAZY_REACT_INSTRUCTIONS, ""))
+        lines.append("Available tools:")
         if not registrations:
             lines.append("(No tools are currently available; answer directly.)")
         else:

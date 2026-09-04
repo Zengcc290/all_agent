@@ -250,8 +250,8 @@ class Agent(ABC):
         conversation = prefix + [dict(message) for message in messages]
 
         initial_snapshot = self.tools.snapshot()
-        # Tool permissions are intentionally disabled for this deployment:
-        # every registered tool is exposed to every execution context.
+        # Permission metadata is retained for compatibility and audit output,
+        # but it is not an authorization filter in this deployment.
         visible_order = list(initial_snapshot)
         if tool_names is not None:
             if not isinstance(tool_names, (list, tuple)) or not all(

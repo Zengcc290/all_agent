@@ -20,12 +20,12 @@ tool names being called, and the final answer. Raw tool arguments and return
 values are omitted to keep the output readable.
 
 Every model request also includes a system message listing all registered tool
-names. This includes repository-only tools that have not yet had their schemas
-loaded for lazy execution.
+names. In the explicit lazy-loading mode this can include repository-only tools
+whose schemas have not yet been loaded.
 
 ## Tool execution
 
-Tools declare their input and output Pydantic models in `ToolSpec`. Both models must use `ConfigDict(extra="forbid")`; this prevents unknown fields from being silently discarded. The runtime validates every call before execution, checks the registration generation and schema version/hash, applies side-effect confirmation rules, and returns one result per call. Permission declarations are retained as metadata but are currently not enforced, so every caller can access every registered tool.
+Tools declare their input and output Pydantic models in `ToolSpec`. Both models must use `ConfigDict(extra="forbid")`; this prevents unknown fields from being silently discarded. The runtime validates every call before execution, checks the registration generation and schema version/hash, applies side-effect confirmation rules, and returns one result per call. Permission declarations are optional compatibility metadata and are not enforced, so every caller can access every registered tool.
 
 Independent calls can run concurrently. Calls with `depends_on` are executed in dependency layers. Tools marked `parallel_safe=False` are isolated into single-call layers.
 
@@ -65,13 +65,14 @@ async def main():
 asyncio.run(main())
 ```
 
-`ToolCatalogTool` is available as `system.tool_catalog` for summary search and versioned schema loading. It exposes fixed operations and does not execute arbitrary SQL. Pass a `ToolSpecRepository` to `Agent` to persist the active catalog, and use `run_with_tools(..., defer_tool_loading=True)` to expose only the catalog initially and load a resolved tool on the next model round.
+`ToolCatalogTool` is available as `system.tool_catalog` for summary search and versioned schema loading. It exposes fixed operations and does not execute arbitrary SQL. Tools are eagerly discovered, instantiated, and registered before the first model request by default. Pass a `ToolSpecRepository` to persist the active catalog. Use `lazy_tools=True` on `ReActAgent` or `run_with_tools(..., defer_tool_loading=True)` only when the catalog-first/lazy-loading tradeoff is intentional.
 
 Project changes are recorded compactly in SQLite by the auto-discovered
 `system.update_log` tool. Read [update_log_readme_first.md](update_log_readme_first.md)
 before making changes. After every actual modification, provide the tool's
-generation-bound confirmation and call it once; `database.write` remains
-informational metadata while permission enforcement is disabled. The guide
+generation-bound side-effect confirmation and call it once. Permission fields
+are retained only as compatibility/audit metadata; they do not grant or deny
+access in this public-tool deployment. The guide
 stores only the last/next numeric ID, while full structured
 entries remain in `update_log.sqlite3`.
 

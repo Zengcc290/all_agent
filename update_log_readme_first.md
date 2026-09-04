@@ -6,8 +6,8 @@
 
 - **日志数据库**：`update_log.sqlite3`
 - **数据库表**：`update_logs`
-- **已写入的最后更新 ID**：`26`
-- **下一次必须写入的更新 ID**：`27`
+- **已写入的最后更新 ID**：`27`
+- **下一次必须写入的更新 ID**：`28`
 - **写入工具**：`system.update_log`（实现：`tool/update_log.py`）
 
 ## 所有 AI 必须遵守的协议
@@ -36,7 +36,7 @@
 
 `system.update_log` 是自动发现的单文件工具，具有以下固定约束：
 
-- `side_effect="write"`、权限元数据为 `database.write`、单并发，专门追加日志，不能执行其他业务；权限当前不参与访问控制，但写入确认仍是必需的。
+- `side_effect="write"`、单并发，专门追加日志，不能执行其他业务；权限字段不参与访问控制，但写入确认仍是必需的。
 - `system_name`、时间和 ID 由工具/数据库生成；AI 不应自行编造这些值。
 - `files` 至少包含一项，每项包含 `path`、`action`（added/modified/deleted/renamed/generated 等）和具体 `description`。
 - 没有新增功能、风险或后续事项时，填写明确的 `none`（或中文“无”），不要省略字段。

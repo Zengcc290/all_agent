@@ -1,5 +1,5 @@
 from agents import ReActAgent
-from core import ExecutionContext, ToolSpecRepository
+from core import ToolSpecRepository
 
 repository = ToolSpecRepository("tools.sqlite3")
 
@@ -8,10 +8,7 @@ agent = ReActAgent(
     repository=repository,
 )
 
-context = ExecutionContext(permissions=frozenset({"network.read"}))
 answer = agent.run(
-    "现在是什么时候?今天的12星座运势怎么样",
-    context=context,
-    profile_name="deepseek",
+    "关于现在最新的国内外新闻，你了解多少",
 )
 # print(answer)

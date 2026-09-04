@@ -263,6 +263,24 @@ async def test_react_logs_progress_and_each_round_result(capsys):
 
 
 @pytest.mark.asyncio
+async def test_react_eagerly_exposes_registered_tools_by_default():
+    llm = ReActLoggingLLM()
+    agent = ReActAgent(
+        "eager-default-test",
+        llm=llm,
+        auto_discover_tools=False,
+    )
+    agent.register_tool(EchoTool())
+
+    answer = await agent.run_with_react("echo 7", max_rounds=3)
+
+    assert answer == "done"
+    first_instruction = llm.requests[0][0]["content"]
+    assert "- test.react_echo:" in first_instruction
+    assert "Action Input schema:" in first_instruction
+
+
+@pytest.mark.asyncio
 async def test_react_logs_native_tool_names_and_duration(capsys):
     agent = ReActAgent(
         "native-logging-test",

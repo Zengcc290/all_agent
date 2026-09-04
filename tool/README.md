@@ -48,9 +48,8 @@ def create_tool() -> BaseTool:
 使用 `AUTOINCREMENT` 生成从 1 开始的连续 `update_id`，并只返回新 ID、下一
 ID、写入时间和系统名，不把历史正文带回模型上下文。
 
-所有 AI 修改项目后都必须调用该工具一次。它是有副作用的本地写入工具；当前
-`database.write` 只保留为权限元数据、不参与访问控制，运行环境仍需提供当前注册
-代次的确认 key；详见项目根目录的
+所有 AI 修改项目后都必须调用该工具一次。它是有副作用的本地写入工具；访问不由
+权限字段控制，但运行环境仍需提供当前注册代次的 side-effect confirmation key；详见项目根目录的
 [`update_log_readme_first.md`](../update_log_readme_first.md)。数据库路径可用
 `UPDATE_LOG_DB_PATH` 覆盖，默认是项目工作目录下的 `update_log.sqlite3`。
 
@@ -172,7 +171,7 @@ record = agent.tool_discovery_report.for_tool("web.search")
 
 一次调用的关键步骤是：
 
-1. Agent 根据当前注册快照和 `tool_names` 选择可见工具；权限元数据不参与过滤。
+1. Agent 在构造阶段完成自动发现和注册；每次请求再根据当前注册快照和 `tool_names` 选择可见工具。权限元数据不参与过滤。
 2. 输入模型生成严格 JSON Schema，随对话发送给 LLM。
 3. LLM 自己决定直接回答，或返回 `tool_calls`（名称、`call_id`、JSON 参数）。
 4. Parser 只负责把提供商格式转为统一 `ToolCall`，并绑定模型所看到的注册代次；它不执行工具。
@@ -181,7 +180,7 @@ record = agent.tool_discovery_report.for_tool("web.search")
 7. 工具执行结果再次由输出模型校验。异常、超时或校验失败都转成统一 `ToolResult.error`。
 8. Agent 按原 `call_id` 追加工具结果并再次请求模型，直到模型生成最终文本或超过 `max_rounds`。
 
-如果启用 `defer_tool_loading=True`，第一轮只暴露 `system.tool_catalog`。模型先调用目录工具搜索/解析候选，Agent 的 `_load_catalog_result()` 再把选中的完整工具 Schema 加到下一轮；这减少大量工具同时占用上下文，但目录工具本身仍走同一套校验和执行链。
+默认第一轮就暴露全部已注册工具的完整 Schema。若显式启用 `lazy_tools=True` 或 `defer_tool_loading=True`，第一轮才只暴露 `system.tool_catalog`，后续通过目录结果加载工具；这能减少上下文占用，但会增加至少一轮模型调用和一次工具发现路径。
 
 ## 自动发现的内部链路
 

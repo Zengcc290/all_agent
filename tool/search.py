@@ -190,7 +190,9 @@ class SearchTool(BaseTool):
         input_model=SearchInput,
         output_model=SearchOutput,
         side_effect="read",
-        permissions=("network.read",),
+        # Permission metadata is intentionally empty; access is not filtered
+        # by permissions in the current public-tool deployment.
+        permissions=(),
         timeout_seconds=30.0,
         idempotent=True,
         parallel_safe=True,
