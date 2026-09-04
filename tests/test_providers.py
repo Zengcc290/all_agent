@@ -49,6 +49,27 @@ def test_registry_rejects_unknown_active_profile(tmp_path):
         ProviderRegistry(config)
 
 
+def test_registry_loads_direct_api_key_and_api_url(tmp_path):
+    config = tmp_path / "provider.toml"
+    config.write_text(
+        """[defaults]
+active_profile = "local"
+
+[profiles.local]
+api_url = "http://localhost:8000/v1"
+api_key = "local-secret"
+default_model = "local-model"
+models = ["local-model"]
+""",
+        encoding="utf-8",
+    )
+    registry = ProviderRegistry(config)
+
+    assert registry.get("local").base_url == "http://localhost:8000/v1"
+    assert registry.resolve_api_key("local") == "local-secret"
+    assert registry.get("local").public_info()["api_key"] == "***"
+
+
 def test_registry_uses_legacy_single_profile_environment(tmp_path, monkeypatch):
     config = tmp_path / "providers.toml"
     write_config(config, active="local")

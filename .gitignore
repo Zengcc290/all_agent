@@ -20,3 +20,9 @@ build/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local provider profile may contain plaintext API keys. Publish only the
+# sanitized provider.example.toml template.
+config/provider.toml
+config/providers.toml
+!config/provider.example.toml

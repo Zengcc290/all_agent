@@ -1,0 +1,28 @@
+[defaults]
+# Change this value to select the default provider for new requests.
+active_profile = "openai"
+
+[profiles.openai]
+adapter = "openai_compatible"
+api_url = "https://api.openai.com/v1"
+api_key = "replace-with-openai-api-key"
+default_model = "gpt-4.1"
+models = ["gpt-4.1", "gpt-4.1-mini"]
+tool_mode = "native_strict"
+
+[profiles.deepseek]
+adapter = "openai_compatible"
+api_url = "https://api.deepseek.com/v1"
+api_key = "replace-with-deepseek-api-key"
+default_model = "deepseek-chat"
+models = ["deepseek-chat", "deepseek-reasoner"]
+tool_mode = "text_react"
+
+# Example local OpenAI-compatible gateway.
+[profiles.local]
+adapter = "openai_compatible"
+api_url = "http://localhost:8000/v1"
+api_key = "replace-with-local-api-key"
+default_model = "local-model"
+models = ["local-model"]
+tool_mode = "text_react"

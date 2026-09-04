@@ -1,8 +1,9 @@
 """Named provider-profile configuration for OpenAI-compatible LLMs.
 
-Provider metadata is kept in a TOML file while credentials remain environment
-variables.  A profile therefore contains no secret material and is safe to
-commit or share with the project.
+Each profile is self-contained: its TOML entry contains the API URL and key,
+so switching profiles does not require changing process environment variables.
+The real ``provider.toml`` is ignored by Git; ``provider.example.toml`` is the
+safe template to publish.
 """
 
 from __future__ import annotations
@@ -16,8 +17,6 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from dotenv import load_dotenv
-
 _PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _TOOL_MODES = frozenset({"native_strict", "native_loose", "text_react", "none"})
@@ -25,15 +24,22 @@ _TOOL_MODES = frozenset({"native_strict", "native_loose", "text_react", "none"})
 
 @dataclass(frozen=True)
 class ProviderProfile:
-    """One named, secret-free OpenAI-compatible provider configuration."""
+    """One named OpenAI-compatible provider configuration."""
 
     name: str
     base_url: str
-    api_key_env: str
+    api_key: str
     default_model: str
     models: tuple[str, ...]
+    api_key_env: str | None = None
     adapter: str = "openai_compatible"
     tool_mode: str = "native_strict"
+
+    @property
+    def api_url(self) -> str:
+        """Public spelling for the normalized URL used by the client."""
+
+        return self.base_url
 
     def public_info(self) -> dict[str, Any]:
         """Return inspectable profile metadata without resolving its secret."""
@@ -42,6 +48,8 @@ class ProviderProfile:
             "name": self.name,
             "adapter": self.adapter,
             "base_url": self.base_url,
+            "api_url": self.base_url,
+            "api_key": "***" if self.api_key else "",
             "api_key_env": self.api_key_env,
             "default_model": self.default_model,
             "models": list(self.models),
@@ -59,27 +67,31 @@ class ProviderRegistry:
             else self.default_config_path()
         )
         self._profiles: Mapping[str, ProviderProfile] = MappingProxyType({})
-        self._ephemeral_keys: dict[str, str] = {}
         self.active_profile = ""
         self.reload()
 
     @staticmethod
     def default_config_path() -> Path:
-        return Path(__file__).resolve().parent.parent / "config" / "providers.toml"
+        config_dir = Path(__file__).resolve().parent.parent / "config"
+        # Prefer the private runtime file. The example fallback keeps a fresh
+        # checkout usable for injected/fake LLMs until the user copies it.
+        for filename in ("provider.toml", "providers.toml", "provider.example.toml"):
+            candidate = config_dir / filename
+            if candidate.is_file():
+                return candidate
+        return config_dir / "provider.toml"
 
     @property
     def profiles(self) -> Mapping[str, ProviderProfile]:
         return self._profiles
 
     def reload(self) -> None:
-        """Reload configuration and environment variables without exposing keys."""
+        """Reload the TOML configuration without exposing keys."""
 
         if not self.config_path.is_file():
             raise FileNotFoundError(
                 f"provider profile configuration was not found: {self.config_path}"
             )
-        dotenv_path = self.config_path.parent.parent / ".env"
-        load_dotenv(dotenv_path=dotenv_path, override=False)
         try:
             with self.config_path.open("rb") as handle:
                 document = tomllib.load(handle)
@@ -88,37 +100,6 @@ class ProviderRegistry:
                 f"invalid provider profile TOML: {self.config_path}"
             ) from exc
         profiles, active_profile = _parse_document(document, self.config_path)
-        self._ephemeral_keys.clear()
-        # One-release migration bridge for projects that still have the old
-        # single-profile variables. New profile variables always take priority.
-        if (
-            active_profile == "openai"
-            and os.getenv("LLM_OPENAI_API_KEY") is None
-            and os.getenv("LLM_API_KEY")
-        ):
-            legacy_url = os.getenv("LLM_BASE_URL")
-            legacy_model = os.getenv("LLM_MODEL")
-            current = profiles[active_profile]
-            if legacy_url and legacy_model:
-                profiles[active_profile] = ProviderProfile(
-                    name=current.name,
-                    adapter=current.adapter,
-                    base_url=legacy_url.rstrip("/"),
-                    api_key_env="LLM_API_KEY",
-                    default_model=legacy_model,
-                    models=tuple(dict.fromkeys((*current.models, legacy_model))),
-                    tool_mode=current.tool_mode,
-                )
-            else:
-                profiles[active_profile] = ProviderProfile(
-                    name=current.name,
-                    adapter=current.adapter,
-                    base_url=current.base_url,
-                    api_key_env="LLM_API_KEY",
-                    default_model=current.default_model,
-                    models=current.models,
-                    tool_mode=current.tool_mode,
-                )
         self._profiles = MappingProxyType(profiles)
         self.active_profile = active_profile
 
@@ -134,16 +115,21 @@ class ProviderRegistry:
             ) from exc
 
     def resolve_api_key(self, profile_name: str) -> str:
-        """Resolve a profile credential only at client creation time."""
+        """Return the key stored in the selected profile."""
 
         profile = self.get(profile_name)
-        api_key = self._ephemeral_keys.get(profile_name) or os.getenv(profile.api_key_env)
-        if not isinstance(api_key, str) or not api_key.strip():
+        if profile.api_key:
+            return profile.api_key
+        if profile.api_key_env:
+            api_key = os.getenv(profile.api_key_env)
+            if isinstance(api_key, str) and api_key.strip():
+                return api_key.strip()
+        if profile.api_key_env:
             raise ValueError(
                 f"provider profile '{profile.name}' requires environment variable "
                 f"{profile.api_key_env}"
             )
-        return api_key.strip()
+        raise ValueError(f"provider profile '{profile.name}' has an empty api_key")
 
     def register_ephemeral(
         self,
@@ -155,8 +141,8 @@ class ProviderRegistry:
     ) -> None:
         """Register an in-memory profile for legacy integrations.
 
-        New applications should put metadata in TOML and credentials in the
-        environment. This escape hatch exists only for callers that inject
+        New applications should put metadata and credentials in TOML. This
+        escape hatch exists only for callers that inject
         credentials programmatically (for example test doubles).
         """
 
@@ -166,7 +152,7 @@ class ProviderRegistry:
             name,
             {
                 "base_url": base_url,
-                "api_key_env": f"__ALL_AGENT_EPHEMERAL_{re.sub(r'[^A-Z0-9_]', '_', name.upper())}_KEY",
+                "api_key": api_key,
                 "default_model": default_model,
                 "models": [default_model],
             },
@@ -176,7 +162,6 @@ class ProviderRegistry:
             raise ValueError(f"provider profile '{name}' already exists")
         profiles[name] = profile
         self._profiles = MappingProxyType(profiles)
-        self._ephemeral_keys[name] = api_key.strip()
 
 
 def _parse_document(
@@ -215,13 +200,33 @@ def _parse_profile(name: str, raw_profile: Mapping[str, Any]) -> ProviderProfile
             f"profile '{name}' has unsupported adapter '{adapter}'; "
             "only 'openai_compatible' is currently implemented"
         )
-    base_url = _required_string(raw_profile, "base_url", f"profile '{name}'")
+    base_url = _required_string(
+        raw_profile,
+        "api_url" if "api_url" in raw_profile else "base_url",
+        f"profile '{name}'",
+    )
     parsed_url = urlsplit(base_url)
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError(f"profile '{name}' base_url must be an absolute HTTP(S) URL")
-    api_key_env = _required_string(raw_profile, "api_key_env", f"profile '{name}'")
-    if not _ENV_NAME_RE.fullmatch(api_key_env):
-        raise ValueError(f"profile '{name}' api_key_env must be an environment variable name")
+    raw_api_key = raw_profile.get("api_key")
+    api_key_env: str | None = None
+    if raw_api_key is None:
+        # Accept the previous field for one migration cycle. A value that is
+        # not a valid variable name is treated as the old, accidentally
+        # inlined key so existing local files continue to work.
+        legacy_key = raw_profile.get("api_key_env")
+        if isinstance(legacy_key, str) and legacy_key.strip():
+            if _ENV_NAME_RE.fullmatch(legacy_key.strip()):
+                api_key_env = legacy_key.strip()
+                raw_api_key = ""
+            else:
+                raw_api_key = legacy_key
+        else:
+            raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
+    if not isinstance(raw_api_key, str):
+        raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
+    if not raw_api_key.strip() and api_key_env is None:
+        raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
     default_model = _required_string(raw_profile, "default_model", f"profile '{name}'")
     raw_models = raw_profile.get("models")
     if not isinstance(raw_models, list) or not raw_models:
@@ -239,6 +244,7 @@ def _parse_profile(name: str, raw_profile: Mapping[str, Any]) -> ProviderProfile
         name=name,
         adapter=adapter,
         base_url=base_url.rstrip("/"),
+        api_key=raw_api_key.strip(),
         api_key_env=api_key_env,
         default_model=default_model,
         models=models,
