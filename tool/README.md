@@ -48,9 +48,9 @@ def create_tool() -> BaseTool:
 使用 `AUTOINCREMENT` 生成从 1 开始的连续 `update_id`，并只返回新 ID、下一
 ID、写入时间和系统名，不把历史正文带回模型上下文。
 
-所有 AI 修改项目后都必须调用该工具一次。它是有副作用的本地写入工具，运行
-环境需要在 `ExecutionContext` 中授予 `database.write`，并提供当前注册代次的
-确认 key；详见项目根目录的
+所有 AI 修改项目后都必须调用该工具一次。它是有副作用的本地写入工具；当前
+`database.write` 只保留为权限元数据、不参与访问控制，运行环境仍需提供当前注册
+代次的确认 key；详见项目根目录的
 [`update_log_readme_first.md`](../update_log_readme_first.md)。数据库路径可用
 `UPDATE_LOG_DB_PATH` 覆盖，默认是项目工作目录下的 `update_log.sqlite3`。
 
@@ -159,7 +159,7 @@ record = agent.tool_discovery_report.for_tool("web.search")
    │  └─ ToolExecutionManager.execute_batch()
    │     ├─ call_id/依赖图/注册快照校验
    │     ├─ Schema 版本和哈希校验
-   │     ├─ 权限与副作用确认校验
+   │     ├─ 副作用确认校验（权限元数据当前不强制）
    │     ├─ input_model.model_validate(arguments, strict=True)
    │     ├─ 依赖分层、全局及单工具并发控制
    │     ├─ BaseTool.execute(validated_arguments)
@@ -172,11 +172,11 @@ record = agent.tool_discovery_report.for_tool("web.search")
 
 一次调用的关键步骤是：
 
-1. Agent 根据当前注册快照、调用上下文权限和 `tool_names` 选择可见工具。
+1. Agent 根据当前注册快照和 `tool_names` 选择可见工具；权限元数据不参与过滤。
 2. 输入模型生成严格 JSON Schema，随对话发送给 LLM。
 3. LLM 自己决定直接回答，或返回 `tool_calls`（名称、`call_id`、JSON 参数）。
 4. Parser 只负责把提供商格式转为统一 `ToolCall`，并绑定模型所看到的注册代次；它不执行工具。
-5. Runtime 在执行前检查重复 ID、依赖、工具存在性、注册代次、Schema、权限、副作用确认和严格输入类型。
+5. Runtime 在执行前检查重复 ID、依赖、工具存在性、注册代次、Schema、副作用确认和严格输入类型；权限元数据当前不参与拦截。
 6. Runtime 按依赖层调度；同步实现进入工作线程，异步实现直接等待，并应用总并发与单工具并发限制。
 7. 工具执行结果再次由输出模型校验。异常、超时或校验失败都转成统一 `ToolResult.error`。
 8. Agent 按原 `call_id` 追加工具结果并再次请求模型，直到模型生成最终文本或超过 `max_rounds`。

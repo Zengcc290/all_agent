@@ -23,6 +23,7 @@ def test_repository_persists_versioned_metadata(tmp_path):
     assert stored["schema_hash"] == search.spec.schema_hash
     assert stored["input_schema"]["properties"]["query"]["type"] == "string"
     assert repository.search("web search")[0]["tool_name"] == "web.search"
+    assert repository.active_tool_names() == ["web.search"]
 
 
 def test_repository_returns_natural_latest_version_and_one_entry_per_tool(tmp_path):
@@ -47,6 +48,7 @@ def test_repository_returns_natural_latest_version_and_one_entry_per_tool(tmp_pa
     ] == [
         ("test.versioned", "10.0", 3),
     ]
+    assert repository.active_tool_names() == ["test.versioned"]
 
     with pytest.raises(ValueError, match="between 1 and 20"):
         repository.search("versioned", 0)

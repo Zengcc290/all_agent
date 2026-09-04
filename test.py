@@ -13,5 +13,5 @@ agent = ReActAgent(
 )
 
 context = ExecutionContext(permissions=frozenset({"network.read"}))
-answer = agent.run("请搜索 Python 3.12 的资料", context=context)
-print(answer)
+answer = agent.run("现在是什么时候?今天的12星座运势怎么样", context=context)
+# print(answer)

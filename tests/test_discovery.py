@@ -64,7 +64,9 @@ def remove_test_packages():
             sys.modules.pop(module_name, None)
 
 
-def test_discovery_registers_enabled_and_skips_disabled_factory(tmp_path, monkeypatch):
+def test_discovery_registers_enabled_and_skips_disabled_factory(
+    tmp_path, monkeypatch, capsys
+):
     package = make_package(
         tmp_path,
         monkeypatch,
@@ -85,6 +87,7 @@ def create_tool():
     repository = ToolSpecRepository(":memory:")
 
     report = discover_tools(registry, package=package, repository=repository)
+    output = capsys.readouterr().out
 
     assert registry.is_registered("plugin.echo", version="1.2.3")
     assert registry.registration_status("plugin.echo")["generation"] == 1
@@ -103,6 +106,10 @@ def create_tool():
     )
     assert len(report.errors) == 1
     assert "create_tool" in report.errors[0].error
+    assert (
+        "Tool discovery complete: package sample_tools; "
+        "successfully registered tools: plugin.echo" in output
+    )
     stored = repository.get("plugin.echo", "1.2.3")
     assert stored["implementation_ref"].endswith(":PluginTool")
 

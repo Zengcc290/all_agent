@@ -12,20 +12,18 @@ from core import (
 from tool.search import SearchTool
 
 
-def test_catalog_returns_summary_and_full_schema():
+def test_catalog_exposes_permissioned_tools_without_context_permissions():
     registry = ToolRegistry()
     search = SearchTool(base_url="https://example.invalid")
     registry.register(search)
     catalog = ToolCatalogTool(registry)
-    context = ExecutionContext(permissions=frozenset({"network.read"}))
-
     candidates = catalog.execute(
-        CatalogInput(action="search", intent="search web", limit=5), context
+        CatalogInput(action="search", intent="search web", limit=5)
     )
     assert candidates.candidates[0]["tool_name"] == "web.search"
 
     spec = catalog.execute(
-        CatalogInput(action="get_spec", tool_name="web.search"), context
+        CatalogInput(action="get_spec", tool_name="web.search")
     )
     assert spec.spec["input_schema"]["properties"]["query"]["type"] == "string"
     assert spec.spec["schema_hash"] == search.spec.schema_hash
@@ -42,6 +40,31 @@ def test_catalog_resolve_requires_a_matching_intent():
 
     with pytest.raises(ValueError, match="intent is required"):
         catalog.execute(CatalogInput(action="resolve"))
+
+
+def test_catalog_resolve_returns_all_matching_specs():
+    registry = ToolRegistry()
+    first = SearchTool(base_url="https://example.invalid")
+
+    # Reuse the registry with two contracts whose descriptions share distinct
+    # capability terms; resolve should return both in one response.
+    registry.register(first)
+    from tool.current_time import CurrentTimeTool
+
+    current_time = CurrentTimeTool()
+    registry.register(current_time)
+    catalog = ToolCatalogTool(registry)
+
+    result = catalog.execute(
+        CatalogInput(action="resolve", intent="web search current time", limit=20)
+    )
+
+    assert result.spec is not None
+    assert {item["tool_name"] for item in result.specs} == {
+        "web.search",
+        "system.current_time",
+    }
+    assert all(item["input_schema"] for item in result.specs)
 
 
 @pytest.mark.asyncio

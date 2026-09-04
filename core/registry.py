@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .activity_log import log_tool_registration
 from .models import ToolSpec
 
 
@@ -43,6 +44,9 @@ class ToolRegistry:
                 raise ValueError(f"tool '{name}' is already registered")
             self._tools[name] = tool
             self._generations[name] = self._generations.get(name, 0) + 1
+            generation = self._generations[name]
+            registered_names = tuple(self._tools)
+        log_tool_registration(name, generation, registered_names)
 
     def confirmation_key(self, name: str) -> str:
         """Return a key invalidated whenever the registered implementation changes."""

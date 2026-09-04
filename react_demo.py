@@ -47,24 +47,21 @@ def extract_message(response):
 def main() -> None:
     agent = ReActAgent("react-demo", llm=LLM())
 
-    # ---------- 0. 工具发现与权限视图 ----------
+    # ---------- 0. 工具发现与访问视图 ----------
     banner("[0] 工具自动发现报告")
     for rec in agent.tool_discovery_report.records:
         print(" ", json.dumps(rec.as_dict(), ensure_ascii=False))
 
     update_log_key = agent.tools.confirmation_key("system.update_log")
     context = ExecutionContext(
-        permissions=frozenset({"network.read", "database.write"}),
         confirmed_side_effects=frozenset({update_log_key}),
     )
     print("\n  update_log 确认 key =", update_log_key)
-    print("  context.permissions =", sorted(context.permissions))
-    print("  可见工具(权限过滤后):")
+    print("  可见工具（权限检查已禁用）：")
     for name, (tool, generation) in agent.tools.snapshot().items():
-        needed = set(tool.spec.permissions)
         print(
-            f"    - {name:<22} 需要权限={sorted(needed) or '无'} "
-            f"可见={needed.issubset(context.permissions)} generation={generation}"
+            f"    - {name:<22} 权限元数据={list(tool.spec.permissions) or '无'} "
+            f"可见=True generation={generation}"
         )
 
     # ---------- 1. 强约束系统提示（防编造） ----------

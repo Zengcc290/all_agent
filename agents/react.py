@@ -18,6 +18,7 @@ import importlib
 import inspect
 import json
 import re
+import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -31,6 +32,16 @@ from core import (
     ToolSpecRepository,
     ToolRegistry,
     discover_tools as discover_tool_modules,
+)
+from core.activity_log import (
+    log_model_completed,
+    log_react_final_answer,
+    log_react_parse_issue,
+    log_react_round_started,
+    log_react_thought,
+    log_tool_call_completed,
+    log_tool_call_started,
+    log_tool_registration,
 )
 from core.registry import BaseTool
 from core.parser import parse_openai_tool_calls
@@ -253,7 +264,12 @@ class ReActAgent(Agent):
         "`web search`; after the Observation returns the complete schema, call "
         "the resolved search tool and put the user's words in its `query` field. "
         "Do not claim that a tool is unavailable merely because a catalog lookup "
-        "failed; correct the capability intent and retry the catalog lookup."
+        "failed; correct the capability intent and retry the catalog lookup. "
+        "When a task may require more than one capability, resolve them together "
+        "in one catalog call with a combined intent (for example `current time "
+        "and web search`) and use `limit: 20`. The catalog response may contain "
+        "multiple complete tool schemas in `specs`; use every relevant tool from "
+        "that list instead of making one catalog call per tool."
     )
 
     def __init__(
@@ -347,6 +363,11 @@ class ReActAgent(Agent):
             implementation_ref=implementation_ref,
             replace=replace,
         )
+        log_tool_registration(
+            tool.spec.name,
+            None,
+            self.repository.active_tool_names(),
+        )
 
     def is_tool_registered(
         self,
@@ -427,7 +448,7 @@ class ReActAgent(Agent):
         messages: str | Sequence[Mapping[str, Any]],
         context: ExecutionContext | None = None,
         *,
-        max_rounds: int = 8,
+        max_rounds: int = 100,
         model: str | None = None,
         temperature: float = 0.7,
         timeout: float = 60,
@@ -456,7 +477,7 @@ class ReActAgent(Agent):
         messages: str | Sequence[Mapping[str, Any]],
         context: ExecutionContext | None = None,
         *,
-        max_rounds: int = 8,
+        max_rounds: int = 100,
         model: str | None = None,
         temperature: float = 0.7,
         timeout: float = 60,
@@ -505,12 +526,10 @@ class ReActAgent(Agent):
         catalog_intent_hint = self._infer_catalog_intent(request_messages)
 
         initial_snapshot = self.tools.snapshot()
-        visible_order = [
-            name
-            for name, (tool, _) in initial_snapshot.items()
-            if set(tool.spec.permissions).issubset(context.permissions)
-        ]
-        visible_names = set(visible_order)
+        # Tool permissions are intentionally disabled for this deployment:
+        # every registered tool is exposed to every execution context.
+        loaded_tool_schemas: dict[str, dict[str, Any]] = {}
+        visible_order = list(initial_snapshot)
         if tool_names is not None:
             if not isinstance(tool_names, (list, tuple)) or not all(
                 isinstance(name, str) and name for name in tool_names
@@ -525,18 +544,6 @@ class ReActAgent(Agent):
             }
             if unknown:
                 raise ValueError("unknown tool name(s): " + ", ".join(sorted(unknown)))
-            forbidden = set(requested_order) - visible_names
-            if self.lazy_tools and self.repository is not None:
-                forbidden = {
-                    name
-                    for name in forbidden
-                    if (stored := self.repository.get(name)) is not None
-                    and not set(stored["permissions"]).issubset(context.permissions)
-                }
-            if forbidden:
-                raise PermissionError(
-                    "tool permission is missing for: " + ", ".join(sorted(forbidden))
-                )
             loaded_order = (
                 [self.catalog_tool.spec.name, *requested_order]
                 if self.lazy_tools
@@ -551,6 +558,7 @@ class ReActAgent(Agent):
             requested_names = None
 
         for round_number in range(1, max_rounds + 1):
+            log_react_round_started(round_number, max_rounds)
             if self.lazy_tools:
                 for name in loaded_order:
                     if name != self.catalog_tool.spec.name and name not in self.tools:
@@ -560,12 +568,11 @@ class ReActAgent(Agent):
                 name: current_snapshot[name]
                 for name in loaded_order
                 if name in current_snapshot
-                and set(current_snapshot[name][0].spec.permissions).issubset(
-                    context.permissions
-                )
             }
+            for name, (tool, _) in registrations.items():
+                loaded_tool_schemas.setdefault(name, tool.spec.input_schema)
             conversation_for_request = self._with_tool_instructions(
-                conversation, registrations
+                conversation, registrations, loaded_tool_schemas
             )
             options: dict[str, Any] = {
                 "model": selected_model,
@@ -573,12 +580,14 @@ class ReActAgent(Agent):
                 "timeout": timeout,
                 "stream": False,
             }
+            model_started_at = time.perf_counter()
             response = await asyncio.to_thread(
                 self._complete_text_or_response,
                 completion_llm,
                 conversation_for_request,
                 options,
             )
+            log_model_completed(round_number, time.perf_counter() - model_started_at)
             if isinstance(response, str):
                 message = None
                 content = response
@@ -599,13 +608,18 @@ class ReActAgent(Agent):
                     current_snapshot,
                     registrations,
                     context,
+                    round_number=round_number,
                     intent_hint=catalog_intent_hint,
+                    loaded_tool_schemas=loaded_tool_schemas,
                 )
                 conversation.extend(observations)
                 if (defer_tool_loading or self.lazy_tools) and requested_names is None:
                     for observation in observations:
                         self._load_catalog_observation(
-                            observation, loaded_order, context
+                            observation,
+                            loaded_order,
+                            context,
+                            loaded_tool_schemas,
                         )
                 continue
 
@@ -615,11 +629,15 @@ class ReActAgent(Agent):
                 content = str(content)
             parsed = parse_react_response(content)
             conversation.append({"role": "assistant", "content": content})
+            if parsed.thought is not None:
+                log_react_thought(round_number, parsed.thought)
             if parsed.is_final:
+                log_react_final_answer(round_number, parsed.final_answer or "")
                 self.history = [dict(item) for item in conversation]
                 return parsed.final_answer or ""
 
             if parsed.error is not None and not parsed.has_action:
+                log_react_parse_issue(round_number, parsed.error)
                 conversation.append(
                     {
                         "role": "user",
@@ -631,6 +649,7 @@ class ReActAgent(Agent):
             if not parsed.has_action:
                 # A plain text response is already interpreted as a final
                 # answer by the parser; this branch is defensive only.
+                log_react_final_answer(round_number, content.strip())
                 self.history = [dict(item) for item in conversation]
                 return content.strip()
 
@@ -641,6 +660,7 @@ class ReActAgent(Agent):
                 context,
                 call_number=round_number,
                 intent_hint=catalog_intent_hint,
+                loaded_tool_schemas=loaded_tool_schemas,
             )
             if catalog_intent_hint is not None:
                 recovered = await self._recover_catalog_lookup(
@@ -661,7 +681,9 @@ class ReActAgent(Agent):
                 }
             )
             if (defer_tool_loading or self.lazy_tools) and requested_names is None:
-                self._load_catalog_result(result, loaded_order, context)
+                self._load_catalog_result(
+                    result, loaded_order, context, loaded_tool_schemas
+                )
 
         raise RuntimeError("maximum ReAct rounds exceeded")
 
@@ -673,7 +695,7 @@ class ReActAgent(Agent):
 
         This intentionally recognizes only search wording. It never exposes a
         tool list or bypasses the catalog; the retry below still executes
-        ``system.tool_catalog`` and applies the normal permission checks.
+        ``system.tool_catalog`` and applies the normal catalog checks.
         """
 
         text_parts = [
@@ -764,6 +786,7 @@ class ReActAgent(Agent):
         self,
         conversation: list[dict[str, Any]],
         registrations: Mapping[str, tuple[Any, int]],
+        loaded_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         if self.lazy_tools:
             registrations = {
@@ -771,7 +794,17 @@ class ReActAgent(Agent):
                 for name, registration in registrations.items()
                 if name == self.catalog_tool.spec.name
             }
-        lines = [self.REACT_INSTRUCTIONS, "", "Available tools:"]
+        all_tool_names = set(self.tools.snapshot())
+        if self.repository is not None:
+            all_tool_names.update(self.repository.active_tool_names())
+        inventory = ", ".join(sorted(all_tool_names)) or "(none)"
+        lines = [
+            self.REACT_INSTRUCTIONS,
+            "",
+            "All registered tool names: " + inventory,
+            "",
+            "Available tools:",
+        ]
         if not registrations:
             lines.append("(No tools are currently available; answer directly.)")
         else:
@@ -780,6 +813,16 @@ class ReActAgent(Agent):
                 lines.append(f"- {name}: {tool.spec.description}")
                 lines.append(
                     "  Action Input schema: "
+                    + json.dumps(schema, ensure_ascii=False, sort_keys=True)
+                )
+        if loaded_tool_schemas:
+            lines.extend(("", "Loaded tool input schemas:"))
+            for name in sorted(loaded_tool_schemas):
+                schema = self._strict_react_schema(
+                    dict(loaded_tool_schemas[name])
+                )
+                lines.append(
+                    f"- {name}: "
                     + json.dumps(schema, ensure_ascii=False, sort_keys=True)
                 )
         instruction = {"role": "system", "content": "\n".join(lines)}
@@ -826,32 +869,44 @@ class ReActAgent(Agent):
         result: ToolResult,
         loaded_order: list[str],
         context: ExecutionContext,
+        loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Queue a repository-only catalog result for lazy loading."""
 
         if not result.ok or result.tool_name != self.catalog_tool.spec.name:
             return
         data = result.data if isinstance(result.data, Mapping) else {}
+        raw_specs = data.get("specs")
+        if not isinstance(raw_specs, list):
+            raw_specs = []
+        # Keep compatibility with older catalog responses that only have one
+        # ``spec`` field.
         raw_spec = data.get("spec")
-        if not isinstance(raw_spec, Mapping):
-            return
-        tool_name = raw_spec.get("tool_name")
-        if not isinstance(tool_name, str) or not tool_name:
-            return
-        if self.repository is not None:
-            stored = self.repository.get(tool_name, raw_spec.get("version"))
-            if stored is None or not set(stored["permissions"]).issubset(
-                context.permissions
-            ):
-                return
-        if tool_name not in loaded_order:
-            loaded_order.append(tool_name)
+        if isinstance(raw_spec, Mapping) and raw_spec not in raw_specs:
+            raw_specs.insert(0, raw_spec)
+        for candidate in raw_specs:
+            if not isinstance(candidate, Mapping):
+                continue
+            tool_name = candidate.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name:
+                continue
+            if self.repository is not None:
+                stored = self.repository.get(tool_name, candidate.get("version"))
+                if stored is None:
+                    continue
+            if loaded_tool_schemas is not None:
+                input_schema = candidate.get("input_schema")
+                if isinstance(input_schema, Mapping):
+                    loaded_tool_schemas[tool_name] = dict(input_schema)
+            if tool_name not in loaded_order:
+                loaded_order.append(tool_name)
 
     def _load_catalog_observation(
         self,
         observation: Mapping[str, Any],
         loaded_order: list[str],
         context: ExecutionContext,
+        loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Load a catalog result encoded in a native-call observation."""
 
@@ -863,7 +918,9 @@ class ReActAgent(Agent):
             result = ToolResult.model_validate(payload, strict=True)
         except (TypeError, ValueError, json.JSONDecodeError):
             return
-        self._load_catalog_result(result, loaded_order, context)
+        self._load_catalog_result(
+            result, loaded_order, context, loaded_tool_schemas
+        )
 
     @staticmethod
     def _complete_text_or_response(
@@ -923,11 +980,39 @@ class ReActAgent(Agent):
         *,
         call_number: int,
         intent_hint: str | None = None,
+        loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
     ) -> ToolResult:
         assert parsed.action is not None
         parsed = self._normalize_catalog_action(parsed, context, intent_hint)
         action_name = self._canonical_action_name(parsed.action, current_snapshot)
         call_id = f"react-call-{call_number}"
+        if action_name not in current_snapshot:
+            # A model may call a known lazy tool directly after seeing the
+            # inventory, without first resolving it through the catalog. Load
+            # that repository entry on demand so it is not reported as an
+            # unregistered tool merely because it was not in this snapshot.
+            lazy_name = action_name
+            if isinstance(lazy_name, str) and "__" in lazy_name:
+                lazy_name = lazy_name.replace("__", ".")
+            if self.lazy_tools and self.repository is not None:
+                stored = (
+                    self.repository.get(lazy_name)
+                    if isinstance(lazy_name, str)
+                    else None
+                )
+                if stored is not None:
+                    self._ensure_tool_loaded(lazy_name)
+                    refreshed = self.tools.snapshot()
+                    if lazy_name in refreshed:
+                        current_snapshot = refreshed
+                        registrations = dict(registrations)
+                        registrations[lazy_name] = refreshed[lazy_name]
+                        action_name = lazy_name
+                        if loaded_tool_schemas is not None:
+                            loaded_tool_schemas[lazy_name] = refreshed[
+                                lazy_name
+                            ][0].spec.input_schema
+
         if action_name not in current_snapshot:
             return ToolResult(
                 call_id=call_id,
@@ -943,7 +1028,8 @@ class ReActAgent(Agent):
                 tool_name=_safe_tool_name(action_name),
                 ok=False,
                 error=ToolError(
-                    code="FORBIDDEN", message="tool permission is missing"
+                    code="TOOL_NOT_EXPOSED",
+                    message="tool was not included in the current model request",
                 ),
             )
         if parsed.error is not None:
@@ -962,7 +1048,16 @@ class ReActAgent(Agent):
             registry_generation=generation,
             arguments=parsed.arguments or {},
         )
-        batch = await self.execute_tool_calls([call], context)
+        log_tool_call_started(call_number, (action_name,))
+        tool_started_at = time.perf_counter()
+        try:
+            batch = await self.execute_tool_calls([call], context)
+        finally:
+            log_tool_call_completed(
+                call_number,
+                (action_name,),
+                time.perf_counter() - tool_started_at,
+            )
         return batch.results[0]
 
     def _normalize_catalog_action(
@@ -987,15 +1082,11 @@ class ReActAgent(Agent):
         intent = parsed.arguments.get("intent")
         if not isinstance(intent, str) or not intent.strip() or len(intent) > 500:
             return parsed
-        records = [
-            item
-            for item in self.repository.search(intent, 20)
-            if set(item["permissions"]).issubset(context.permissions)
-        ]
+        records = self.repository.search(intent, 20)
         if records:
             return parsed
         arguments = dict(parsed.arguments)
-        arguments.update(action="resolve", intent=intent_hint, limit=5)
+        arguments.update(action="resolve", intent=intent_hint, limit=20)
         return ParsedReActResponse(
             raw=parsed.raw,
             thought=parsed.thought,
@@ -1010,10 +1101,38 @@ class ReActAgent(Agent):
         registrations: Mapping[str, tuple[Any, int]],
         context: ExecutionContext,
         *,
+        round_number: int,
         intent_hint: str | None = None,
+        loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         # Native calls are accepted as a compatibility fallback.  They use the
         # exact parser and execution path of Agent.run_with_tools.
+        current_snapshot = dict(current_snapshot)
+        registrations = dict(registrations)
+        # Native providers use dotted names converted to ``__``.  Resolve and
+        # load a repository-backed implementation before parsing the call so a
+        # direct call to a discovered lazy tool is accepted.
+        for native_call in native_calls:
+            function = _field(native_call, "function")
+            provider_name = _field(function, "name")
+            if not isinstance(provider_name, str) or not provider_name.strip():
+                continue
+            canonical = self._canonical_action_name(provider_name, current_snapshot)
+            if canonical in current_snapshot:
+                continue
+            lazy_name = canonical.replace("__", ".")
+            if not self.lazy_tools or self.repository is None:
+                continue
+            if self.repository.get(lazy_name) is None:
+                continue
+            self._ensure_tool_loaded(lazy_name)
+            current_snapshot = self.tools.snapshot()
+            if lazy_name in current_snapshot:
+                registrations[lazy_name] = current_snapshot[lazy_name]
+                if loaded_tool_schemas is not None:
+                    loaded_tool_schemas[lazy_name] = current_snapshot[lazy_name][
+                        0
+                    ].spec.input_schema
         name_map = {
             self._openai_tool_name(tool.spec.name): name
             for name, (tool, _) in registrations.items()
@@ -1038,7 +1157,7 @@ class ReActAgent(Agent):
                 )[0]
             except (TypeError, ValueError) as exc:
                 code = (
-                    "FORBIDDEN"
+                    "TOOL_NOT_EXPOSED"
                     if isinstance(canonical, str)
                     and canonical in current_snapshot
                     and canonical not in registrations
@@ -1054,7 +1173,17 @@ class ReActAgent(Agent):
             calls.append(call)
             positions.append(position)
         if calls:
-            batch = await self.execute_tool_calls(calls, context)
+            tool_names = tuple(call.tool_name for call in calls)
+            log_tool_call_started(round_number, tool_names)
+            tool_started_at = time.perf_counter()
+            try:
+                batch = await self.execute_tool_calls(calls, context)
+            finally:
+                log_tool_call_completed(
+                    round_number,
+                    tool_names,
+                    time.perf_counter() - tool_started_at,
+                )
             for position, result in zip(positions, batch.results, strict=True):
                 results[position] = result
         if intent_hint is not None:
@@ -1091,7 +1220,7 @@ class ReActAgent(Agent):
                     current_snapshot,
                     registrations,
                     context,
-                    call_number=position + 1,
+                    call_number=round_number,
                     intent_hint=intent_hint,
                 )
                 if recovered is not None:

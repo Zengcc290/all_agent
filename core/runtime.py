@@ -112,11 +112,10 @@ class ToolExecutionManager:
                     message="tool registration, schema version or hash is stale",
                 )
                 continue
-            if not set(spec.permissions).issubset(context.permissions):
-                errors[index] = ToolError(
-                    code="FORBIDDEN", message="required tool permission is missing"
-                )
-                continue
+            # Tool permissions are currently informational metadata.  Runtime
+            # execution is deliberately unrestricted so every caller can use
+            # every registered tool; keep the metadata for cataloging and a
+            # possible future authorization policy.
             confirmation_key = self.registry.confirmation_key(spec.name)
             if (
                 spec.side_effect != "read"

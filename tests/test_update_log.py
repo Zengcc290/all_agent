@@ -74,7 +74,7 @@ def test_update_log_tool_is_auto_discoverable(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_log_tool_requires_write_permission_and_generation_confirmation():
+async def test_update_log_tool_requires_only_generation_confirmation():
     repository = UpdateLogRepository(":memory:")
     tool = UpdateLogTool(repository)
     registry = ToolRegistry()
@@ -95,7 +95,6 @@ async def test_update_log_tool_requires_write_permission_and_generation_confirma
     assert denied.results[0].error.code == "CONFIRMATION_REQUIRED"
 
     context = ExecutionContext(
-        permissions=frozenset({"database.write"}),
         confirmed_side_effects=frozenset({registry.confirmation_key(tool.spec.name)}),
     )
     allowed = await manager.execute_batch([call], context)

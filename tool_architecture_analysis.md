@@ -10,9 +10,9 @@
 - `tool`：`BaseTool` 兼容导出、单文件工具模板与 `SearchTool` 具体实现。
 - `agents`：OpenAI 兼容客户端以及模型—工具多轮编排。
 
-当前实现以 Pydantic 输入/输出模型作为唯一 Schema 来源，执行前检查注册代次、版本、哈希、权限和副作用确认，支持依赖分层、并发限制及同步/异步超时。Agent 默认扫描受信任的 `tool/` 包，根据 `TOOL_ENABLED` 和 `create_tool()` 协议自动注册单文件工具，并保留结构化发现报告。Agent 还支持原生工具调用、严格函数 Schema、结构化错误恢复，以及可选的 `defer_tool_loading=True` 按需目录加载。
+当前实现以 Pydantic 输入/输出模型作为唯一 Schema 来源，执行前检查注册代次、版本、哈希和副作用确认，支持依赖分层、并发限制及同步/异步超时。权限声明仍会保存在工具元数据中，但当前不参与可见性或执行拦截。Agent 默认扫描受信任的 `tool/` 包，根据 `TOOL_ENABLED` 和 `create_tool()` 协议自动注册单文件工具，并保留结构化发现报告。Agent 还支持原生工具调用、严格函数 Schema、结构化错误恢复，以及可选的 `defer_tool_loading=True` 按需目录加载。
 
-SQLite Repository 可由 Agent 注入并随工具注册同步；Catalog 只返回当前 Registry 中确实可执行且调用者有权限看到的条目。`.env`、`.venv`、缓存和构建产物均已被 `.gitignore` 排除。
+SQLite Repository 可由 Agent 注入并随工具注册同步；Catalog 返回当前 Registry 中确实可执行的条目，不按调用者权限过滤。`.env`、`.venv`、缓存和构建产物均已被 `.gitignore` 排除。
 
 ## 你的方案的优点
 
@@ -566,7 +566,7 @@ tool_name → BaseTool 实例或执行端点
 1. 数据库中存在并启用。
 2. 当前进程中存在对应执行器。
 3. 执行器声明的 Schema 哈希与数据库一致。
-4. 当前调用者拥有权限。
+4. 当前权限策略允许调用（目前该策略始终放行）。
 
 否则可能出现“数据库里有工具，但实际代码没有加载”或者“数据库 Schema 是新版，运行中的代码还是旧版”。
 

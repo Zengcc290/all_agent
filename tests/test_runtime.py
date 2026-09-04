@@ -38,6 +38,29 @@ class EchoTool(BaseTool):
         return EchoOutput(value=arguments.value)
 
 
+class PermissionedEchoTool(EchoTool):
+    spec = ToolSpec(
+        name="test.permissioned_echo",
+        description="echo with informational permission metadata",
+        version="1.0",
+        input_model=EchoInput,
+        output_model=EchoOutput,
+        permissions=("test.restricted",),
+    )
+
+
+def test_successful_registration_logs_all_active_tool_names(capsys):
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    registry.register(PermissionedEchoTool())
+
+    output = capsys.readouterr().out
+
+    assert "Tool registered: test.echo" in output
+    assert "Tool registered: test.permissioned_echo" in output
+    assert "Current registered tools: test.echo, test.permissioned_echo" in output
+
+
 class DelayTool(EchoTool):
     spec = ToolSpec(
         name="test.delay",
@@ -111,6 +134,7 @@ def call_for(tool, call_id, value, depends_on=None):
 def registry():
     registry = ToolRegistry()
     registry.register(EchoTool())
+    registry.register(PermissionedEchoTool())
     registry.register(DelayTool())
     registry.register(TimeoutTool())
     registry.register(BlockingTimeoutTool())
@@ -157,6 +181,17 @@ async def test_schema_mismatch_is_rejected(registry):
     call.schema_hash = "stale"
     result = await manager.execute_batch([call])
     assert result.results[0].error.code == "SCHEMA_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_permissioned_tool_executes_without_context_permissions(registry):
+    manager = ToolExecutionManager(registry)
+    tool = registry.get("test.permissioned_echo")
+
+    result = await manager.execute_batch([call_for(tool, "unrestricted", 1)])
+
+    assert result.results[0].ok
+    assert result.results[0].data == {"value": 1}
 
 
 @pytest.mark.asyncio

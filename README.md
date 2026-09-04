@@ -11,16 +11,28 @@ Discovery outcomes and registration state are queryable from the Agent. See the
 [Chinese tool guide](tool/README.md) for the complete template rules and the
 function-level LLM/tool call chain.
 
+## Runtime logs
+
+The runtime prints timestamped activity logs to the console. Each successful
+tool registration includes the tool name and the complete current registry;
+each ReAct round prints its number, model and tool durations, parsed Thought,
+tool names being called, and the final answer. Raw tool arguments and return
+values are omitted to keep the output readable.
+
+Every model request also includes a system message listing all registered tool
+names. This includes repository-only tools that have not yet had their schemas
+loaded for lazy execution.
+
 ## Tool execution
 
-Tools declare their input and output Pydantic models in `ToolSpec`. Both models must use `ConfigDict(extra="forbid")`; this prevents unknown fields from being silently discarded. The runtime validates every call before execution, checks the registration generation and schema version/hash, applies permissions and confirmation rules, and returns one result per call.
+Tools declare their input and output Pydantic models in `ToolSpec`. Both models must use `ConfigDict(extra="forbid")`; this prevents unknown fields from being silently discarded. The runtime validates every call before execution, checks the registration generation and schema version/hash, applies side-effect confirmation rules, and returns one result per call. Permission declarations are retained as metadata but are currently not enforced, so every caller can access every registered tool.
 
 Independent calls can run concurrently. Calls with `depends_on` are executed in dependency layers. Tools marked `parallel_safe=False` are isolated into single-call layers.
 
 ```python
 import asyncio
 
-from core import ExecutionContext, ToolCall, ToolExecutionManager, ToolRegistry
+from core import ToolCall, ToolExecutionManager, ToolRegistry
 from tool.search import SearchTool
 
 
@@ -46,7 +58,6 @@ async def main():
             call("search-python", "Python 3.12"),
             call("search-pydantic", "Pydantic 2"),
         ],
-        ExecutionContext(permissions=frozenset({"network.read"})),
     )
     print(result.model_dump())
 
@@ -58,12 +69,13 @@ asyncio.run(main())
 
 Project changes are recorded compactly in SQLite by the auto-discovered
 `system.update_log` tool. Read [update_log_readme_first.md](update_log_readme_first.md)
-before making changes. After every actual modification, grant the tool
-`database.write` permission plus its generation-bound confirmation and call it
-once; the guide stores only the last/next numeric ID, while full structured
+before making changes. After every actual modification, provide the tool's
+generation-bound confirmation and call it once; `database.write` remains
+informational metadata while permission enforcement is disabled. The guide
+stores only the last/next numeric ID, while full structured
 entries remain in `update_log.sqlite3`.
 
-OpenAI function definitions are generated in strict mode. Malformed, forbidden, or stale native calls are returned to the model as structured tool errors so it can correct the request without executing unvalidated input. Configured Agent prompts are applied automatically; previous `history` can be included explicitly with `use_history=True`. Registered providers can be selected with `provider_name=` or a `provider:model` global model value.
+OpenAI function definitions are generated in strict mode. Malformed, unknown, or stale native calls are returned to the model as structured tool errors so it can correct the request without executing unvalidated input. Configured Agent prompts are applied automatically; previous `history` can be included explicitly with `use_history=True`. Registered providers can be selected with `provider_name=` or a `provider:model` global model value.
 
 Install development dependencies and run tests with:
 

@@ -25,17 +25,6 @@ def test_search_implements_the_discovery_protocol():
     assert isinstance(create_tool(), SearchTool)
 
 
-@pytest.mark.asyncio
-async def test_search_requires_network_permission():
-    registry = ToolRegistry()
-    tool = SearchTool(base_url="https://example.invalid")
-    registry.register(tool)
-
-    result = await ToolExecutionManager(registry).execute_batch([search_call(tool)])
-
-    assert result.results[0].error.code == "FORBIDDEN"
-
-
 def test_search_timeout_updates_the_runtime_contract():
     tool = SearchTool(base_url="https://example.invalid", timeout=1.25)
     assert tool.timeout == 1.25

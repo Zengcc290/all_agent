@@ -46,6 +46,17 @@ class ReplacementEchoTool(EchoTool):
         return Output(value=arguments.value + 1)
 
 
+class PermissionedEchoTool(EchoTool):
+    spec = ToolSpec(
+        name="test.permissioned_agent_echo",
+        description="Echo a value with informational permission metadata",
+        version="1.0",
+        input_model=Input,
+        output_model=Output,
+        permissions=("test.restricted",),
+    )
+
+
 class FakeLLM:
     model = "fake-model"
 
@@ -92,6 +103,40 @@ async def test_run_with_tools_executes_and_returns_final_answer():
     assert llm.requests[1][-1]["role"] == "tool"
     assert '"value": 7' in llm.requests[1][-1]["content"]
     assert llm.options[0]["tools"][0]["function"]["name"] == "system__tool_catalog"
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_exposes_and_executes_permissioned_tools_by_default():
+    tool = PermissionedEchoTool()
+    llm = FakeLLM(tool.spec.name, tool.spec.schema_hash)
+    agent = DemoAgent("test", llm=llm)
+    agent.register_tool(tool)
+
+    answer = await agent.run_with_tools([{"role": "user", "content": "echo 7"}])
+
+    assert answer == "done"
+    assert any(
+        definition["function"]["name"] == "test__permissioned_agent_echo"
+        for definition in llm.options[0]["tools"]
+    )
+    assert '"value": 7' in llm.requests[1][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_every_model_request_includes_all_registered_tool_names():
+    tool = EchoTool()
+    llm = FakeLLM(tool.spec.name, tool.spec.schema_hash)
+    agent = DemoAgent("test", llm=llm)
+    agent.register_tool(tool)
+
+    await agent.run_with_tools([{"role": "user", "content": "echo 7"}])
+
+    expected_inventory = "All registered tool names: " + ", ".join(
+        sorted(agent.tools.snapshot())
+    )
+    for request in llm.requests:
+        inventory = request[0]
+        assert inventory == {"role": "system", "content": expected_inventory}
 
 
 def test_tool_definitions_are_schema_driven():

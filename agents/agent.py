@@ -229,12 +229,9 @@ class Agent(ABC):
         conversation = prefix + [dict(message) for message in messages]
 
         initial_snapshot = self.tools.snapshot()
-        visible_order = [
-            name
-            for name, (tool, _) in initial_snapshot.items()
-            if set(tool.spec.permissions).issubset(context.permissions)
-        ]
-        visible_names = set(visible_order)
+        # Tool permissions are intentionally disabled for this deployment:
+        # every registered tool is exposed to every execution context.
+        visible_order = list(initial_snapshot)
         if tool_names is not None:
             if not isinstance(tool_names, (list, tuple)) or not all(
                 isinstance(name, str) and name for name in tool_names
@@ -245,11 +242,6 @@ class Agent(ABC):
             if unknown:
                 raise ValueError("unknown tool name(s): " + ", ".join(sorted(unknown)))
             requested_names = set(requested_order)
-            forbidden = requested_names - visible_names
-            if forbidden:
-                raise PermissionError(
-                    "tool permission is missing for: " + ", ".join(sorted(forbidden))
-                )
             loaded_order = requested_order
         elif defer_tool_loading:
             requested_names = None
@@ -264,9 +256,6 @@ class Agent(ABC):
                 name: current_snapshot[name]
                 for name in loaded_order
                 if name in current_snapshot
-                and set(current_snapshot[name][0].spec.permissions).issubset(
-                    context.permissions
-                )
             }
             tool_definitions, name_map = self._definitions_for_registrations(
                 registrations
@@ -281,7 +270,7 @@ class Agent(ABC):
                 completion_options["tools"] = tool_definitions
             response = await asyncio.to_thread(
                 completion_llm.complete,
-                conversation,
+                self._with_registered_tool_names(conversation),
                 **completion_options,
             )
             choices = _field(response, "choices")
@@ -330,7 +319,7 @@ class Agent(ABC):
                     )[0]
                 except (TypeError, ValueError) as exc:
                     code = (
-                        "FORBIDDEN"
+                        "TOOL_NOT_EXPOSED"
                         if isinstance(canonical_name, str)
                         and canonical_name in current_snapshot
                         and canonical_name not in registrations
@@ -376,18 +365,23 @@ class Agent(ABC):
         if not result.ok or result.tool_name != self.catalog_tool.spec.name:
             return
         data = result.data if isinstance(result.data, Mapping) else {}
+        raw_specs = data.get("specs")
+        if not isinstance(raw_specs, list):
+            raw_specs = []
         raw_spec = data.get("spec")
-        if not isinstance(raw_spec, Mapping):
-            return
-        tool_name = raw_spec.get("tool_name")
-        registration = self.tools.maybe_resolve(tool_name)
-        if registration is None:
-            return
-        tool, _ = registration
-        if not set(tool.spec.permissions).issubset(context.permissions):
-            return
-        if tool_name not in loaded_order:
-            loaded_order.append(tool_name)
+        if isinstance(raw_spec, Mapping) and raw_spec not in raw_specs:
+            raw_specs.insert(0, raw_spec)
+        for candidate in raw_specs:
+            if not isinstance(candidate, Mapping):
+                continue
+            tool_name = candidate.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name:
+                continue
+            registration = self.tools.maybe_resolve(tool_name)
+            if registration is None:
+                continue
+            if tool_name not in loaded_order:
+                loaded_order.append(tool_name)
 
     def _configured_prompt_messages(self) -> list[dict[str, Any]]:
         messages = [
@@ -403,6 +397,28 @@ class Agent(ABC):
                 }
             )
         return messages
+
+    def _with_registered_tool_names(
+        self, conversation: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Add all known tool names to every model request.
+
+        The inventory intentionally includes repository-only tools used by
+        lazy loading, even when their full schemas are not yet supplied in the
+        provider's tool definitions.
+        """
+
+        names = set(self.tools.snapshot())
+        if self.repository is not None:
+            names.update(self.repository.active_tool_names())
+        inventory = ", ".join(sorted(names)) or "(none)"
+        return [
+            {
+                "role": "system",
+                "content": "All registered tool names: " + inventory,
+            },
+            *conversation,
+        ]
 
     def _completion_target(
         self,

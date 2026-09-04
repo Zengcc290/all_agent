@@ -190,6 +190,16 @@ class ToolSpecRepository:
         ranked.sort(key=lambda pair: (-pair[0], pair[1]["tool_name"]))
         return [item for score, item in ranked if score > 0][:limit]
 
+    def active_tool_names(self) -> list[str]:
+        """Return every enabled tool name without the catalog search limit."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT tool_name FROM tool_specs "
+                "WHERE enabled = 1 ORDER BY tool_name"
+            ).fetchall()
+        return [str(row["tool_name"]) for row in rows]
+
     @staticmethod
     def _version_key(version: str) -> tuple[object, object]:
         """Sort numeric versions naturally while keeping pre-releases older.

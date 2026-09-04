@@ -93,7 +93,8 @@ read，也不能虚构 API、字段或权限。
 ``permissions``
     执行所需能力的元组，例如 ``("network.read",)``、``("files.read",)`` 或
     ``("database.write",)``。没有权限写 ``()``；单元素元组必须保留逗号。
-    Agent 只向拥有全部权限的 ExecutionContext 暴露工具，Runtime 执行前再检查。
+    当前它只是目录和审计用元数据：Agent 与 Runtime 不会据此限制工具访问，所有
+    调用者均可使用已注册工具。恢复权限策略时可重新把它作为过滤依据。
 ``timeout_seconds``
     有限正数，是单次实际执行的 Runtime 截止时间。网络客户端、数据库客户端也
     应配置不大于此值的内部超时。同步线程超时后 Python 无法强制终止线程，所以
@@ -151,12 +152,12 @@ read，也不能虚构 API、字段或权限。
 
 ``Agent`` 发现模块 -> 检查开关 -> 调用工厂 -> Registry 注册 -> Input 生成工具
 Schema -> LLM 返回 tool_call -> Parser 绑定版本/Schema 哈希/注册代次 -> Runtime
-检查权限与确认并验证 Input -> ``execute()`` -> Runtime 验证 Output -> ToolResult
+检查副作用确认并验证 Input -> ``execute()`` -> Runtime 验证 Output -> ToolResult
 返回 LLM。
 
 完成后的最低验收：模块可导入；发现报告无 error；工具状态 registered；合法
-Input 得到合法 Output；缺字段、错类型、多余字段被拒绝；权限不足和未确认写操作
-不会执行；异常、超时和非法外部响应能安全失败；代码通过 Ruff 和 pytest。
+Input 得到合法 Output；缺字段、错类型、多余字段被拒绝；未确认写操作不会执行；
+权限元数据不限制访问；异常、超时和非法外部响应能安全失败；代码通过 Ruff 和 pytest。
 
 下面的示例实现是完整可执行的。生成真实工具时保留协议结构，替换示例领域逻辑。
 """

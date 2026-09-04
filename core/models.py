@@ -209,11 +209,12 @@ class ToolSpec:
 
 @dataclass(frozen=True)
 class ExecutionContext:
-    """Authorization context for one execution request.
+    """Execution context for one tool request.
 
     Entries in ``confirmed_side_effects`` should be the registry's
     generation-bound confirmation keys, so a replacement implementation cannot
-    reuse an old confirmation.
+    reuse an old confirmation. ``permissions`` remains available as tool
+    metadata, but is not currently enforced by the runtime or agents.
     """
 
     subject: str = "default"

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal
 
+from .activity_log import log_discovery_summary
 from .models import ToolSpec
 from .registry import BaseTool, ToolRegistry
 from .repository import ToolSpecRepository
@@ -277,6 +278,10 @@ def discover_tools(
             records.append(record)
 
     report = ToolDiscoveryReport(package_name, tuple(records))
+    log_discovery_summary(
+        package_name,
+        (record.tool_name for record in report.registered if record.tool_name),
+    )
     if strict and report.errors:
         raise ToolDiscoveryError(report)
     return report

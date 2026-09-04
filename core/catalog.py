@@ -16,7 +16,10 @@ class CatalogInput(BaseModel):
     intent: str | None = Field(default=None, max_length=500)
     tool_name: str | None = Field(default=None, max_length=200)
     version: str | None = Field(default=None, max_length=32)
-    limit: int = Field(default=5, ge=1, le=20)
+    # Resolve/search can return a complete set of matching capabilities in one
+    # call.  Callers may still lower this explicitly when they need a smaller
+    # result set.
+    limit: int = Field(default=20, ge=1, le=20)
 
     @model_validator(mode="after")
     def validate_action_arguments(self) -> CatalogInput:
@@ -32,14 +35,21 @@ class CatalogOutput(BaseModel):
 
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     spec: dict[str, Any] | None = None
+    # ``spec`` remains for callers that expect one resolved tool.  ``specs``
+    # contains every matching complete contract for a resolve/get_spec call.
+    specs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ToolCatalogTool(BaseTool):
-    """A constrained, read-only catalog facade; it never accepts raw SQL."""
+    """A constrained, read-only catalog facade; it never accepts raw SQL.
+
+    ``resolve`` returns all matching complete tool contracts in ``specs`` so a
+    caller can discover and load several capabilities in one catalog request.
+    """
 
     spec = ToolSpec(
         name="system.tool_catalog",
-        description="Find available tools or load one tool's complete versioned schema.",
+        description="Find available tools or load complete versioned schemas for one or more matching tools.",
         version="1.0",
         input_model=CatalogInput,
         output_model=CatalogOutput,
@@ -89,37 +99,32 @@ class ToolCatalogTool(BaseTool):
                     raise ValueError(
                         f"tool '{arguments.tool_name}' is not registered"
                     )
-                if not set(stored["permissions"]).issubset(context.permissions):
-                    raise ValueError(
-                        f"tool '{arguments.tool_name}' is not available"
-                    )
-                return CatalogOutput(spec=self._full_stored_spec(stored, 0))
+                full_spec = self._full_stored_spec(stored, 0)
+                return CatalogOutput(spec=full_spec, specs=[full_spec])
             tool, generation = registration
-            if not set(tool.spec.permissions).issubset(context.permissions):
-                raise ValueError(f"tool '{arguments.tool_name}' is not available")
             if arguments.version and arguments.version != tool.spec.version:
                 raise ValueError("requested tool version is not active")
             if self.repository is not None:
                 stored = self.repository.get(tool.spec.name, tool.spec.version)
                 if stored is None or stored["schema_hash"] != tool.spec.schema_hash:
                     raise ValueError("active tool metadata is not synchronized")
-            return CatalogOutput(spec=self._full_spec(tool.spec, generation))
+            full_spec = self._full_spec(tool.spec, generation)
+            return CatalogOutput(spec=full_spec, specs=[full_spec])
 
         if self.repository is not None and (
             self.repository_only or not self._has_loaded_tools()
         ):
-            selected_records = [
-                item
-                for item in self.repository.search(arguments.intent or "", arguments.limit)
-                if set(item["permissions"]).issubset(context.permissions)
-            ]
+            # Permission declarations remain catalog metadata, but must not
+            # hide tools while authorization is disabled project-wide.
+            selected_records = self.repository.search(
+                arguments.intent or "", arguments.limit
+            )
             if arguments.action == "resolve" and selected_records:
-                record = selected_records[0]
-                return CatalogOutput(
-                    spec=self._full_stored_spec(
-                        record, self._stored_generation(record)
-                    )
-                )
+                specs = [
+                    self._full_stored_spec(record, self._stored_generation(record))
+                    for record in selected_records
+                ]
+                return CatalogOutput(spec=specs[0], specs=specs)
             if arguments.action == "resolve":
                 raise ValueError("no matching tool found")
             return CatalogOutput(
@@ -140,9 +145,11 @@ class ToolCatalogTool(BaseTool):
 
         selected = self._search_specs(arguments.intent or "", arguments.limit, context)
         if arguments.action == "resolve" and selected:
-            spec = selected[0]
-            generation = self._active_generation(spec)
-            return CatalogOutput(spec=self._full_spec(spec, generation))
+            specs = [
+                self._full_spec(spec, self._active_generation(spec))
+                for spec in selected
+            ]
+            return CatalogOutput(spec=specs[0], specs=specs)
         if arguments.action == "resolve":
             raise ValueError("no matching tool found")
         candidates = []
@@ -185,7 +192,7 @@ class ToolCatalogTool(BaseTool):
         self,
         intent: str,
         limit: int,
-        context: ExecutionContext,
+        _context: ExecutionContext,
     ) -> list[ToolSpec]:
         active = {spec.name: spec for spec in self.registry.specs()}
         if self.repository is not None:
@@ -200,8 +207,6 @@ class ToolCatalogTool(BaseTool):
         terms = set(normalized_intent.replace(".", " ").split())
         ranked = []
         for spec in active.values():
-            if not set(spec.permissions).issubset(context.permissions):
-                continue
             haystack = " ".join((spec.name, spec.description, *spec.tags)).casefold()
             score = sum(term in haystack for term in terms) if terms else 0
             ranked.append((score, spec))
