@@ -25,7 +25,7 @@ whose schemas have not yet been loaded.
 
 ## Tool execution
 
-Tools declare their input and output Pydantic models in `ToolSpec`. Both models must use `ConfigDict(extra="forbid")`; this prevents unknown fields from being silently discarded. The runtime validates every call before execution, checks the registration generation and schema version/hash, applies side-effect confirmation rules, and returns one result per call. Permission declarations are optional compatibility metadata and are not enforced, so every caller can access every registered tool.
+Tools declare their input and output Pydantic models in `ToolSpec`. Both models must use `ConfigDict(extra="forbid")`; this prevents unknown fields from being silently discarded. `recommended_before_tools` can list namespaced tools that are useful before this tool; it is advisory metadata included in the model-facing description and catalog responses, never an execution dependency or runtime gate. The runtime validates every call before execution, checks the registration generation and schema version/hash, applies side-effect confirmation rules, and returns one result per call. Permission declarations are optional compatibility metadata and are not enforced, so every caller can access every registered tool.
 
 Independent calls can run concurrently. Calls with `depends_on` are executed in dependency layers. Tools marked `parallel_safe=False` are isolated into single-call layers.
 
@@ -67,7 +67,7 @@ asyncio.run(main())
 
 `ToolCatalogTool` is available as `system.tool_catalog` for summary search and versioned schema loading. It exposes fixed operations and does not execute arbitrary SQL. Tools are eagerly discovered, instantiated, and registered before the first model request by default. ReAct runs use catalog-first schema exposure by default: the first request contains every registered tool name and only the complete schema for `system.tool_catalog`; the model resolves a needed capability before invoking it. This is schema retrieval, not registration or permission checking. Pass `defer_tool_loading=False` to `run_with_react(...)` for a one-round full-schema ReAct prompt. Pass a `ToolSpecRepository` to persist the active catalog; `lazy_tools=True` remains a separate implementation-loading optimization.
 
-For time-sensitive ReAct requests containing relative/current terms such as `latest`, `today`, `最新`, or `最近`, a successful `system.current_time` Observation is required before `web.search` can execute. If a model attempts search first, it receives `TEMPORAL_CONTEXT_REQUIRED` and must obtain the current time in an earlier round. This keeps date windows anchored to the runtime clock instead of the model's remembered date.
+When a tool declares `recommended_before_tools`, ReAct and native function-calling expose that list as a non-binding hint. The model may follow the recommendations when they improve accuracy, but the runtime never requires a preceding call and does not reject a direct call.
 
 Project changes are recorded compactly in SQLite by the auto-discovered
 `system.update_log` tool. Read [update_log_readme_first.md](update_log_readme_first.md)

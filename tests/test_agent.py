@@ -163,6 +163,31 @@ def test_tool_definitions_are_schema_driven():
     assert parameters["additionalProperties"] is False
 
 
+def test_tool_definition_includes_advisory_preceding_tools():
+    class RecommendedTool(EchoTool):
+        spec = ToolSpec(
+            name="test.recommended_echo",
+            description="Echo a value after useful context is available.",
+            version="1.0",
+            input_model=Input,
+            output_model=Output,
+            recommended_before_tools=("system.clock",),
+        )
+
+    agent = DemoAgent("test", llm=object())
+    tool = RecommendedTool()
+    agent.register_tool(tool)
+
+    definition = next(
+        item
+        for item in agent.tool_definitions()
+        if item["function"]["name"] == "test__recommended_echo"
+    )
+    description = definition["function"]["description"]
+    assert "system.clock" in description
+    assert "advisory only; not enforced" in description
+
+
 @pytest.mark.asyncio
 async def test_tool_call_is_bound_to_the_definition_snapshot():
     tool = EchoTool()

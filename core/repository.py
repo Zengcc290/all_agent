@@ -74,6 +74,7 @@ class ToolSpecRepository:
                     parallel_safe INTEGER NOT NULL,
                     max_concurrency INTEGER,
                     tags TEXT NOT NULL,
+                    recommended_before_tools TEXT NOT NULL DEFAULT '[]',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     implementation_ref TEXT,
                     PRIMARY KEY (tool_name, version)
@@ -86,6 +87,11 @@ class ToolSpecRepository:
             if "max_concurrency" not in columns:
                 connection.execute(
                     "ALTER TABLE tool_specs ADD COLUMN max_concurrency INTEGER"
+                )
+            if "recommended_before_tools" not in columns:
+                connection.execute(
+                    "ALTER TABLE tool_specs ADD COLUMN recommended_before_tools "
+                    "TEXT NOT NULL DEFAULT '[]'"
                 )
 
     def save(
@@ -108,8 +114,9 @@ class ToolSpecRepository:
                 {statement} INTO tool_specs (
                     tool_name, version, description, schema_hash, input_schema, output_schema,
                     side_effect, permissions, timeout_seconds, idempotent, parallel_safe,
-                    max_concurrency, tags, enabled, implementation_ref
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    max_concurrency, tags, recommended_before_tools, enabled,
+                    implementation_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     spec.name,
@@ -125,6 +132,7 @@ class ToolSpecRepository:
                     int(spec.parallel_safe),
                     spec.max_concurrency,
                     json.dumps(list(spec.tags)),
+                    json.dumps(list(spec.recommended_before_tools)),
                     implementation_ref,
                 ),
             )
@@ -224,7 +232,13 @@ class ToolSpecRepository:
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        for key in ("input_schema", "output_schema", "permissions", "tags"):
+        for key in (
+            "input_schema",
+            "output_schema",
+            "permissions",
+            "tags",
+            "recommended_before_tools",
+        ):
             item[key] = json.loads(item[key])
         item["enabled"] = bool(item["enabled"])
         item["idempotent"] = bool(item["idempotent"])

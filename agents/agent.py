@@ -189,7 +189,7 @@ class Agent(ABC):
                     "type": "function",
                     "function": {
                         "name": alias,
-                        "description": spec.description,
+                        "description": spec.model_description,
                         "parameters": _strict_function_schema(spec.input_schema),
                         "strict": True,
                     },

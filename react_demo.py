@@ -18,6 +18,22 @@ if hasattr(sys.stdout, "reconfigure"):
 STATE = {"llm_rounds": 0, "executed_tools": 0}
 
 
+def find_tool_name(agent: ReActAgent, required_tag: str) -> str:
+    """Find a discovered tool by capability metadata, not by a fixed name."""
+
+    matches = [
+        tool.spec.name
+        for tool, _ in agent.tools.snapshot().values()
+        if required_tag in tool.spec.tags
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one discovered tool tagged {required_tag!r}; "
+            f"found {', '.join(sorted(matches)) or '(none)'}"
+        )
+    return matches[0]
+
+
 def dump(obj) -> str:
     try:
         if hasattr(obj, "model_dump"):
@@ -45,13 +61,16 @@ def extract_message(response):
 
 def main() -> None:
     agent = ReActAgent("react-demo")
+    catalog_name = agent.catalog_tool.spec.name
+    search_name = find_tool_name(agent, "search")
+    update_log_name = find_tool_name(agent, "update-log")
 
     # ---------- 0. 工具发现与访问视图 ----------
     banner("[0] 工具自动发现报告")
     for rec in agent.tool_discovery_report.records:
         print(" ", json.dumps(rec.as_dict(), ensure_ascii=False))
 
-    update_log_key = agent.tools.confirmation_key("system.update_log")
+    update_log_key = agent.tools.confirmation_key(update_log_name)
     context = ExecutionContext(
         confirmed_side_effects=frozenset({update_log_key}),
     )
@@ -70,22 +89,23 @@ def main() -> None:
         "2. 绝对禁止自己编造 Observation、搜索结果或 JSON 数据块；"
         "Observation 只能等待系统回传。\n"
         "3. 在收到至少一个 Observation 之前，禁止输出 'Final Answer'。\n"
-        "4. 每轮只输出一个 Action，然后停下等待 Observation。按顺序完成：\n"
-        "   a) 用 system.tool_catalog 检索工具："
+        "4. 每轮只输出一个 Action，然后停下等待 Observation。先用目录工具确认"
+        "能力契约，再根据工具描述中的建议决定是否需要上下文工具：\n"
+        f"   a) 用 {catalog_name} 检索工具："
         '{"action": "search", "intent": "web search", "tool_name": null, '
         '"version": null, "limit": 5}\n'
-        "   b) 用 web.search 真实搜索（query 必须以 ' 校验码ZK7QF' 结尾）。\n"
-        "   c) 用 system.update_log 记录本次演示，Action Input 按此模板补全：\n"
+        f"   b) 用 {search_name} 真实搜索（query 必须以 ' 校验码ZK7QF' 结尾）。\n"
+        f"   c) 用 {update_log_name} 记录本次演示，Action Input 按此模板补全：\n"
         '      {"executor": "deepseek-v4-pro ReAct demo", "update_type": "demo", '
         '"title": "ReAct 全链路演示运行", "task_background": "用户要求完整复现 '
-        'ReAct 问答链路", "update_details": "依次真实执行了 tool_catalog 检索、'
-        'web.search 搜索、update_log 写入", "added_features": "none", "files": '
+        'ReAct 问答链路", "update_details": "依次真实执行了目录检索、'
+        '搜索和更新日志写入", "added_features": "none", "files": '
         '[{"path": "react_demo.py", "action": "modified", "description": "演示'
         '脚本新增工具调用日志"}], "behavior_impact": "none", "validation": "真实'
-        '调用了 web.search 和 tool_catalog", "risks": "none", "follow_up": "none"}\n'
+        '调用了目录、搜索和更新日志工具", "risks": "none", "follow_up": "none"}\n'
         "   三个 Observation 全部收到后，才输出 Final Answer：用中文总结搜索到的"
         " function calling 与 ReAct 的区别（必须引用至少 2 条搜索结果的标题和 URL），"
-        "并附上 update_log 返回的 update_id。如果搜索结果为空，如实说明。"
+        "并附上更新日志工具返回的 update_id。如果搜索结果为空，如实说明。"
     )
 
     # ---------- 2. 拦截 LLM.complete ----------
@@ -144,8 +164,8 @@ def main() -> None:
 
     # ---------- 4. 运行 ----------
     query = (
-        "请按系统提示的顺序，依次调用 system.tool_catalog、web.search、"
-        "system.update_log 三个工具，完成后给出中文总结。"
+        f"请使用目录工具发现并调用搜索能力（{search_name}），再调用日志能力"
+        f"（{update_log_name}）记录本次演示，完成后给出中文总结。"
     )
     banner("[开始 ReAct 问答]")
     print("  用户问题:", query)

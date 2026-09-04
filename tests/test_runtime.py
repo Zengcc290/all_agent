@@ -400,3 +400,23 @@ def test_tool_spec_rejects_invalid_metadata():
             input_model=PermissiveInput,
             output_model=EchoOutput,
         )
+
+    with pytest.raises(TypeError, match="namespaced tool names"):
+        ToolSpec(
+            name="test.recommended",
+            description="bad recommendation",
+            version="1",
+            input_model=EchoInput,
+            output_model=EchoOutput,
+            recommended_before_tools=("system-clock",),
+        )
+
+    with pytest.raises(ValueError, match="cannot recommend itself"):
+        ToolSpec(
+            name="test.recommended",
+            description="self recommendation",
+            version="1",
+            input_model=EchoInput,
+            output_model=EchoOutput,
+            recommended_before_tools=("test.recommended",),
+        )

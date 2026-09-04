@@ -22,6 +22,7 @@ def test_repository_persists_versioned_metadata(tmp_path):
     stored = repository.get(search.spec.name, search.spec.version)
     assert stored["schema_hash"] == search.spec.schema_hash
     assert stored["input_schema"]["properties"]["query"]["type"] == "string"
+    assert stored["recommended_before_tools"] == ["system.current_time"]
     assert repository.search("web search")[0]["tool_name"] == "web.search"
     assert repository.active_tool_names() == ["web.search"]
 

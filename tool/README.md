@@ -21,7 +21,7 @@ class XxxTool(BaseTool):
         name="namespace.tool_name",
         input_model=XxxInput,
         output_model=XxxOutput,
-        # version、权限、副作用、超时、并发策略等
+        # version、权限、副作用、超时、并发策略、建议前置工具等
     )
 
     def execute(self, arguments: XxxInput) -> XxxOutput: ...
@@ -39,6 +39,9 @@ def create_tool() -> BaseTool:
 - 工具名必须带命名空间，例如 `web.search`；运行时会为 OpenAI 兼容接口映射成 `web__search`。
 - 输入和输出模型都必须配置 `ConfigDict(extra="forbid", strict=True)`。Pydantic 模型是 Schema、模型定义和运行时校验的唯一真相。
 - `execute()` 只接收已经验证过的输入。外部 API 的原始响应也必须归一化为输出模型。
+- 可选的 `recommended_before_tools` 使用命名空间工具名元组（例如
+  `("system.clock",)`），表示调用当前工具前可能有帮助的工具。它只会作为
+  模型提示和 Catalog 元数据展示，不会形成运行时依赖，也不会阻止模型直接调用当前工具。
 - 模块被导入时不能访问网络、写文件、启动线程或执行其他业务动作。依赖和配置应在 `create_tool()`/构造器中创建，实际工作放在 `execute()` 中。
 
 ## 项目更新日志工具
@@ -182,7 +185,7 @@ record = agent.tool_discovery_report.for_tool("web.search")
 
 工具实例默认在 Agent 构造阶段完成发现、实例化和注册。ReAct 默认采用“目录优先”的 Schema 暴露策略：首轮仅显示全部已注册工具的名称以及 `system.tool_catalog` 的完整 Schema；模型根据名称推断所需能力，再用目录工具取得目标工具 Schema 后调用。目录查询只是取得契约，不是注册、权限或访问申请；名称已列出的工具均已注册且可用。传入 `defer_tool_loading=False` 可显式改为首轮发送全部已注册工具的完整 Schema。`lazy_tools=True` 仍是独立的实现按需加载优化。
 
-对于包含“最新、最近、今天、当前、实时”或 `latest/recent/today/current` 等相对时间词的 ReAct 请求，运行时要求先获得一次成功的 `system.current_time` Observation，之后才允许执行 `web.search`。若模型先搜索，运行时返回 `TEMPORAL_CONTEXT_REQUIRED`，提示它在前一轮先读取当前时间；同一批次同时调用时间和搜索也不会绕过该顺序。
+如果工具的 `ToolSpec` 声明了 `recommended_before_tools`，ReAct 和原生函数调用会把它附加到工具描述中，明确标注为“仅供参考，不强制执行”。是否调用建议工具、调用顺序以及是否直接调用目标工具，均由模型自行决定。
 
 ## 自动发现的内部链路
 

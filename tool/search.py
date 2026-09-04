@@ -187,8 +187,8 @@ class SearchTool(BaseTool):
         name="web.search",
         description=(
             "Search public web content with AnySearch and return normalized title, "
-            "URL and snippet items. For latest, recent, today, or other relative-date "
-            "requests, first obtain the current date from system.current_time."
+            "URL and snippet items. Use it when current public web information is "
+            "needed."
         ),
         version="1.1",
         input_model=SearchInput,
@@ -202,6 +202,7 @@ class SearchTool(BaseTool):
         parallel_safe=True,
         max_concurrency=8,
         tags=("web", "search"),
+        recommended_before_tools=("system.current_time",),
     )
 
     def __init__(

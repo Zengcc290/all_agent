@@ -80,7 +80,12 @@ class BatchToolResult(StrictModel):
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Static metadata. Pydantic input/output models are the source of truth."""
+    """Static metadata. Pydantic input/output models are the source of truth.
+
+    ``recommended_before_tools`` is advisory metadata for the model.  It is
+    deliberately not an executable dependency graph and is never enforced by
+    the runtime.
+    """
 
     name: str
     description: str
@@ -94,6 +99,7 @@ class ToolSpec:
     parallel_safe: bool = True
     max_concurrency: int | None = None
     tags: tuple[str, ...] = ()
+    recommended_before_tools: tuple[str, ...] = ()
     _schema_hash: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -161,6 +167,16 @@ class ToolSpec:
             isinstance(item, str) and item for item in self.tags
         ):
             raise TypeError("tags must be a tuple of non-empty strings")
+        if not isinstance(self.recommended_before_tools, tuple) or not all(
+            isinstance(item, str)
+            and re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", item)
+            for item in self.recommended_before_tools
+        ):
+            raise TypeError(
+                "recommended_before_tools must be a tuple of namespaced tool names"
+            )
+        if self.name in self.recommended_before_tools:
+            raise ValueError("a tool cannot recommend itself as a preceding tool")
         if self.max_concurrency is not None and (
             isinstance(self.max_concurrency, bool)
             or not isinstance(self.max_concurrency, int)
@@ -204,7 +220,21 @@ class ToolSpec:
             "side_effect": self.side_effect,
             "max_concurrency": self.max_concurrency,
             "tags": list(self.tags),
+            "recommended_before_tools": list(self.recommended_before_tools),
         }
+
+    @property
+    def model_description(self) -> str:
+        """Return the description plus non-enforcing usage guidance."""
+
+        if not self.recommended_before_tools:
+            return self.description
+        tools = ", ".join(self.recommended_before_tools)
+        return (
+            f"{self.description}\n"
+            "Recommended preceding tools (advisory only; not enforced): "
+            f"{tools}."
+        )
 
 
 @dataclass(frozen=True)

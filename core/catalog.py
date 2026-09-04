@@ -137,6 +137,9 @@ class ToolCatalogTool(BaseTool):
                         "side_effect": item["side_effect"],
                         "max_concurrency": item["max_concurrency"],
                         "tags": list(item["tags"]),
+                        "recommended_before_tools": list(
+                            item["recommended_before_tools"]
+                        ),
                         "registry_generation": self._stored_generation(item),
                     }
                     for item in selected_records
@@ -225,6 +228,7 @@ class ToolCatalogTool(BaseTool):
             "side_effect": stored["side_effect"],
             "max_concurrency": stored["max_concurrency"],
             "tags": list(stored["tags"]),
+            "recommended_before_tools": list(stored["recommended_before_tools"]),
             "registry_generation": generation,
             "input_schema": stored["input_schema"],
             "output_schema": stored["output_schema"],

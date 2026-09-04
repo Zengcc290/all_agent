@@ -261,15 +261,15 @@ class ReActAgent(Agent):
         "Observation in your own response. Use only the listed tool names and "
         "JSON object inputs. Do not output placeholder text such as <answer>.\n\n"
         "Use a listed tool directly when its complete schema is available. The "
-        "system.tool_catalog tool is optional in that mode."
+        "catalog/discovery tool is optional in that mode."
     )
 
     CATALOG_FIRST_REACT_INSTRUCTIONS = (
         "Every name in `All registered tool names` is already registered and usable. "
         "That list is a capability index; a name without an Action Input schema in "
         "this request is not unavailable or blocked. Before calling any listed tool "
-        "other than system.tool_catalog whose schema has not been provided, first "
-        "call system.tool_catalog with `action`: `resolve` and an `intent` describing "
+        "other than the catalog/discovery tool whose schema has not been provided, "
+        "first call the catalog/discovery tool with `action`: `resolve` and an `intent` describing "
         "the capability you need (for example `web search`, `read a file`, or `send "
         "email`), never the user's actual subject/query. Catalog resolution only "
         "retrieves a tool contract; it is not a registration, permission, or access "
@@ -281,19 +281,6 @@ class ReActAgent(Agent):
     # Keep the old public constant as a compatibility alias for callers that
     # customized the previous lazy-loading prompt.
     LAZY_REACT_INSTRUCTIONS = CATALOG_FIRST_REACT_INSTRUCTIONS
-
-    TEMPORAL_REACT_INSTRUCTIONS = (
-        "This request is time-sensitive or uses a relative date. Before any "
-        "web.search call, you MUST obtain a successful Observation from "
-        "system.current_time in an earlier step. If its schema is not loaded, "
-        "resolve system.current_time through system.tool_catalog first. Wait for "
-        "the current-time Observation, use its date/time to anchor the search, and "
-        "only then call web.search. Never call web.search before system.current_time "
-        "or in the same native-call batch. When both schemas are missing, resolve "
-        "the `current time and web search` capabilities together."
-    )
-    CURRENT_TIME_TOOL_NAME = "system.current_time"
-    WEB_SEARCH_TOOL_NAME = "web.search"
 
     def __init__(
         self,
@@ -368,7 +355,7 @@ class ReActAgent(Agent):
             metadata_only=True,
         )
         # Drop the temporary registry and all factory-created instances. The
-        # active registry intentionally retains only system.tool_catalog.
+        # The active registry intentionally retains only the catalog tool.
         scratch_registry = None
         self.tool_discovery_report = report
         return report
@@ -548,25 +535,7 @@ class ReActAgent(Agent):
         conversation = self._initial_conversation(
             request_messages, use_history=use_history, history_key=history_key
         )
-        # A provider can still occasionally copy the user's subject into the
-        # catalog ``intent`` despite the explicit protocol instructions. Keep
-        # a narrow, read-only recovery hint for common search wording so that
-        # such a malformed lookup does not make the model conclude that no
-        # search tool exists.
-        catalog_intent_hint = self._infer_catalog_intent(request_messages)
         initial_snapshot = self.tools.snapshot()
-        current_time_available = self.CURRENT_TIME_TOOL_NAME in initial_snapshot or (
-            self.repository is not None
-            and self.repository.get(self.CURRENT_TIME_TOOL_NAME) is not None
-        )
-        web_search_available = self.WEB_SEARCH_TOOL_NAME in initial_snapshot or (
-            self.repository is not None
-            and self.repository.get(self.WEB_SEARCH_TOOL_NAME) is not None
-        )
-        time_sensitive_request = self._requires_current_time_before_search(
-            request_messages
-        )
-        current_time_observed = False
         # Permission metadata is retained for compatibility and audit output,
         # but it is not an authorization filter in this deployment.
         loaded_tool_schemas: dict[str, dict[str, Any]] = {}
@@ -597,22 +566,6 @@ class ReActAgent(Agent):
         else:
             loaded_order = visible_order
             requested_names = None
-        require_current_time_before_search = (
-            time_sensitive_request
-            and current_time_available
-            and web_search_available
-            and (requested_names is None or self.WEB_SEARCH_TOOL_NAME in requested_names)
-        )
-        if (
-            require_current_time_before_search
-            and requested_names is not None
-            and self.CURRENT_TIME_TOOL_NAME not in requested_names
-        ):
-            raise ValueError(
-                "time-sensitive web.search requests require "
-                "system.current_time in tool_names"
-            )
-
         for round_number in range(1, max_rounds + 1):
             log_react_round_started(round_number, max_rounds)
             if self.lazy_tools:
@@ -632,7 +585,6 @@ class ReActAgent(Agent):
                 registrations,
                 loaded_tool_schemas,
                 catalog_first=defer_tool_loading or self.lazy_tools,
-                require_current_time_before_search=require_current_time_before_search,
             )
             options: dict[str, Any] = {
                 "model": selected_model,
@@ -669,16 +621,9 @@ class ReActAgent(Agent):
                     registrations,
                     context,
                     round_number=round_number,
-                    intent_hint=catalog_intent_hint,
                     loaded_tool_schemas=loaded_tool_schemas,
-                    require_current_time_before_search=require_current_time_before_search,
-                    current_time_observed=current_time_observed,
                 )
                 conversation.extend(observations)
-                if self._observations_include_successful_tool(
-                    observations, self.CURRENT_TIME_TOOL_NAME
-                ):
-                    current_time_observed = True
                 if (defer_tool_loading or self.lazy_tools) and requested_names is None:
                     for observation in observations:
                         self._load_catalog_observation(
@@ -744,26 +689,8 @@ class ReActAgent(Agent):
                 registrations,
                 context,
                 call_number=round_number,
-                intent_hint=catalog_intent_hint,
                 loaded_tool_schemas=loaded_tool_schemas,
-                require_current_time_before_search=require_current_time_before_search,
-                current_time_observed=current_time_observed,
             )
-            recovered = None
-            if catalog_intent_hint is not None:
-                recovered = await self._recover_catalog_lookup(
-                    parsed,
-                    result,
-                    current_snapshot,
-                    registrations,
-                    context,
-                    call_number=round_number,
-                    intent_hint=catalog_intent_hint,
-                )
-            if recovered is not None:
-                result = recovered
-            if result.ok and result.tool_name == self.CURRENT_TIME_TOOL_NAME:
-                current_time_observed = True
             conversation.append(
                 {
                     "role": "user",
@@ -817,201 +744,6 @@ class ReActAgent(Agent):
             )
         )
 
-    @staticmethod
-    def _requires_current_time_before_search(
-        request_messages: Sequence[Mapping[str, Any]],
-    ) -> bool:
-        """Detect requests where search results must be anchored to now.
-
-        The guard is intentionally based on relative/current-time language,
-        rather than on a particular user phrasing such as "news".  If the model
-        nevertheless decides to use ``web.search`` for such a request, the
-        runtime can require a fresh ``system.current_time`` observation first.
-        """
-
-        text = " ".join(
-            str(message.get("content", ""))
-            for message in request_messages
-            if message.get("role") == "user"
-        ).casefold()
-        return any(
-            marker in text
-            for marker in (
-                "最新",
-                "最近",
-                "近期",
-                "近两天",
-                "近两日",
-                "近几天",
-                "最近两日",
-                "近24小时",
-                "最近24小时",
-                "过去一天",
-                "过去两天",
-                "过去两日",
-                "最后两天",
-                "今天",
-                "今日",
-                "当前",
-                "现在",
-                "实时",
-                "截至",
-                "截至目前",
-                "刚刚",
-                "本周",
-                "本月",
-                "昨天",
-                "前天",
-                "latest",
-                "recent",
-                "today",
-                "current",
-                "right now",
-                "real-time",
-                "realtime",
-                "as of",
-                "last 24 hours",
-                "last two days",
-                "last 2 days",
-                "past day",
-                "past two days",
-                "past 2 days",
-            )
-        )
-
-    @staticmethod
-    def _infer_catalog_intent(
-        request_messages: Sequence[Mapping[str, Any]],
-    ) -> str | None:
-        """Infer a capability hint for recovering an accidental bad lookup.
-
-        It never exposes a tool list or bypasses the catalog; the retry below
-        still executes ``system.tool_catalog`` and applies the normal catalog
-        checks. Time-sensitive requests include both capabilities so a recovery
-        lookup can load the clock and search contracts together.
-        """
-
-        text_parts = [
-            str(message.get("content", ""))
-            for message in request_messages
-            if message.get("role") == "user"
-        ]
-        text = " ".join(text_parts).casefold()
-        has_search_intent = any(
-            marker in text
-            for marker in (
-                "search",
-                "搜索",
-                "查找",
-                "查询",
-                "检索",
-                "网页",
-                "网络资料",
-                "新闻",
-                "消息",
-                "资讯",
-                "动态",
-                "天气",
-                "运势",
-                "news",
-                "weather",
-                "web search",
-            )
-        )
-        if (
-            has_search_intent
-            and ReActAgent._requires_current_time_before_search(request_messages)
-        ):
-            return "current time and web search"
-        if has_search_intent:
-            return "web search"
-        if any(
-            marker in text
-            for marker in (
-                "时间",
-                "几点",
-                "日期",
-                "现在",
-                "当前时间",
-                "current time",
-                "what time",
-                "today's date",
-            )
-        ):
-            return "current time"
-        return None
-
-    @staticmethod
-    def _observations_include_successful_tool(
-        observations: Sequence[Mapping[str, Any]],
-        tool_name: str,
-    ) -> bool:
-        """Return whether native observations contain a successful tool result."""
-
-        for observation in observations:
-            content = observation.get("content")
-            if not isinstance(content, str) or not content.startswith("Observation: "):
-                continue
-            try:
-                result = ToolResult.model_validate(
-                    json.loads(content[len("Observation: ") :]), strict=True
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if result.ok and result.tool_name == tool_name:
-                return True
-        return False
-
-    async def _recover_catalog_lookup(
-        self,
-        parsed: ParsedReActResponse,
-        result: ToolResult,
-        current_snapshot: Mapping[str, tuple[Any, int]],
-        registrations: Mapping[str, tuple[Any, int]],
-        context: ExecutionContext,
-        *,
-        call_number: int,
-        intent_hint: str,
-    ) -> ToolResult | None:
-        """Retry a failed/empty search catalog lookup using a capability hint."""
-
-        if parsed.action is None or parsed.arguments is None:
-            return None
-        if self._canonical_action_name(parsed.action, current_snapshot) != self.catalog_tool.spec.name:
-            return None
-        action = parsed.arguments.get("action")
-        if action not in {"resolve", "search"}:
-            return None
-        empty_success = result.ok and isinstance(result.data, Mapping) and not (
-            result.data.get("spec") or result.data.get("candidates")
-        )
-        failed_lookup = (
-            not result.ok
-            and result.error is not None
-            and result.error.code in {"EXECUTION_ERROR", "INVALID_ARGUMENTS"}
-        )
-        if not (empty_success or failed_lookup):
-            return None
-        fallback = ParsedReActResponse(
-            raw="",
-            action=self.catalog_tool.spec.name,
-            arguments={
-                "action": "resolve",
-                "intent": intent_hint,
-                "tool_name": None,
-                "version": None,
-                "limit": 5,
-            },
-        )
-        recovered = await self._execute_action(
-            fallback,
-            current_snapshot,
-            registrations,
-            context,
-            call_number=call_number,
-        )
-        return recovered if recovered.ok else None
-
     def _initial_conversation(
         self,
         request_messages: list[dict[str, Any]],
@@ -1032,7 +764,6 @@ class ReActAgent(Agent):
         loaded_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
         *,
         catalog_first: bool = False,
-        require_current_time_before_search: bool = False,
     ) -> list[dict[str, Any]]:
         if self.lazy_tools:
             registrations = {
@@ -1052,15 +783,13 @@ class ReActAgent(Agent):
         ]
         if catalog_first:
             lines.extend((self.CATALOG_FIRST_REACT_INSTRUCTIONS, ""))
-        if require_current_time_before_search:
-            lines.extend((self.TEMPORAL_REACT_INSTRUCTIONS, ""))
         lines.append("Available tools:")
         if not registrations:
             lines.append("(No tools are currently available; answer directly.)")
         else:
             for name, (tool, _) in registrations.items():
                 schema = self._strict_react_schema(tool.spec.input_schema)
-                lines.append(f"- {name}: {tool.spec.description}")
+                lines.append(f"- {name}: {tool.spec.model_description}")
                 lines.append(
                     "  Action Input schema: "
                     + json.dumps(schema, ensure_ascii=False, sort_keys=True)
@@ -1234,13 +963,9 @@ class ReActAgent(Agent):
         context: ExecutionContext,
         *,
         call_number: int,
-        intent_hint: str | None = None,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
-        require_current_time_before_search: bool = False,
-        current_time_observed: bool = False,
     ) -> ToolResult:
         assert parsed.action is not None
-        parsed = self._normalize_catalog_action(parsed, context, intent_hint)
         action_name = self._canonical_action_name(parsed.action, current_snapshot)
         call_id = f"react-call-{call_number}"
         if action_name not in current_snapshot:
@@ -1279,25 +1004,6 @@ class ReActAgent(Agent):
                     code="UNKNOWN_TOOL", message=f"tool '{parsed.action}' is not registered"
                 ),
             )
-        if (
-            require_current_time_before_search
-            and action_name == self.WEB_SEARCH_TOOL_NAME
-            and not current_time_observed
-        ):
-            return ToolResult(
-                call_id=call_id,
-                tool_name=action_name,
-                ok=False,
-                error=ToolError(
-                    code="TEMPORAL_CONTEXT_REQUIRED",
-                    message=(
-                        "web.search is registered and usable, but this request is "
-                        "time-sensitive. Call system.current_time and wait for a "
-                        "successful Observation before calling web.search; do not "
-                        "combine them in one batch."
-                    ),
-                ),
-            )
         if action_name not in registrations:
             return ToolResult(
                 call_id=call_id,
@@ -1307,7 +1013,7 @@ class ReActAgent(Agent):
                     code="TOOL_SCHEMA_REQUIRED",
                     message=(
                         f"tool '{_safe_tool_name(action_name)}' is registered and "
-                        "usable; first call system.tool_catalog with action "
+                        f"usable; first call {self.catalog_tool.spec.name} with action "
                         "'resolve' to load its Action Input schema"
                     ),
                 ),
@@ -1340,53 +1046,6 @@ class ReActAgent(Agent):
             )
         return batch.results[0]
 
-    def _normalize_catalog_action(
-        self,
-        parsed: ParsedReActResponse,
-        context: ExecutionContext,
-        intent_hint: str | None,
-    ) -> ParsedReActResponse:
-        """Correct an unmatched search capability intent before execution."""
-
-        if (
-            intent_hint is None
-            or parsed.arguments is None
-            or self._canonical_action_name(
-                parsed.action or "", self.tools.snapshot()
-            )
-            != self.catalog_tool.spec.name
-            or parsed.arguments.get("action") not in {"resolve", "search"}
-        ):
-            return parsed
-        intent = parsed.arguments.get("intent")
-        if not isinstance(intent, str) or not intent.strip() or len(intent) > 500:
-            return parsed
-        if intent_hint == "current time and web search" and not any(
-            marker in intent.casefold()
-            for marker in ("current time", "clock", "date", "时间", "日期")
-        ):
-            arguments = dict(parsed.arguments)
-            arguments.update(action="resolve", intent=intent_hint, limit=20)
-            return ParsedReActResponse(
-                raw=parsed.raw,
-                thought=parsed.thought,
-                action=parsed.action,
-                arguments=arguments,
-            )
-        if self.repository is None:
-            return parsed
-        records = self.repository.search(intent, 20)
-        if records:
-            return parsed
-        arguments = dict(parsed.arguments)
-        arguments.update(action="resolve", intent=intent_hint, limit=20)
-        return ParsedReActResponse(
-            raw=parsed.raw,
-            thought=parsed.thought,
-            action=parsed.action,
-            arguments=arguments,
-        )
-
     async def _execute_native_calls(
         self,
         native_calls: Sequence[Any],
@@ -1395,10 +1054,7 @@ class ReActAgent(Agent):
         context: ExecutionContext,
         *,
         round_number: int,
-        intent_hint: str | None = None,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
-        require_current_time_before_search: bool = False,
-        current_time_observed: bool = False,
     ) -> list[dict[str, Any]]:
         # Native calls are accepted as a compatibility fallback.  They use the
         # exact parser and execution path of Agent.run_with_tools.
@@ -1446,26 +1102,6 @@ class ReActAgent(Agent):
             function = _field(native_call, "function")
             provider_name = _field(function, "name", "unknown.tool")
             canonical = aliases.get(provider_name, provider_name)
-            if (
-                require_current_time_before_search
-                and canonical == self.WEB_SEARCH_TOOL_NAME
-                and not current_time_observed
-            ):
-                results[position] = ToolResult(
-                    call_id=call_id,
-                    tool_name=canonical,
-                    ok=False,
-                    error=ToolError(
-                        code="TEMPORAL_CONTEXT_REQUIRED",
-                        message=(
-                            "web.search is registered and usable, but this request "
-                            "is time-sensitive. Call system.current_time and wait "
-                            "for a successful Observation before calling web.search; "
-                            "do not combine them in one batch."
-                        ),
-                    ),
-                )
-                continue
             try:
                 call = parse_openai_tool_calls(
                     [native_call], self.tools, name_map, registrations
@@ -1480,7 +1116,7 @@ class ReActAgent(Agent):
                 )
                 message = (
                     f"tool '{_safe_tool_name(canonical)}' is registered and usable; "
-                    "first call system.tool_catalog with action 'resolve' to load "
+                    f"first call {self.catalog_tool.spec.name} with action 'resolve' to load "
                     "its Action Input schema"
                     if code == "TOOL_SCHEMA_REQUIRED"
                     else _safe_tool_call_error(exc)
@@ -1508,45 +1144,6 @@ class ReActAgent(Agent):
                 )
             for position, result in zip(positions, batch.results, strict=True):
                 results[position] = result
-        if intent_hint is not None:
-            for position, native_call in enumerate(native_calls):
-                result = results[position]
-                # Empty catalog searches are recoverable too. Decode only this
-                # trusted provider payload; malformed payloads already have an
-                # INVALID_TOOL_CALL result and are left untouched.
-                function = _field(native_call, "function")
-                provider_name = _field(function, "name")
-                canonical = (
-                    self._canonical_action_name(provider_name, current_snapshot)
-                    if isinstance(provider_name, str)
-                    else provider_name
-                )
-                if canonical != self.catalog_tool.spec.name:
-                    continue
-                raw_arguments = _field(function, "arguments")
-                if isinstance(raw_arguments, str):
-                    try:
-                        raw_arguments = json.loads(raw_arguments)
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        continue
-                if not isinstance(raw_arguments, Mapping):
-                    continue
-                parsed = ParsedReActResponse(
-                    raw="",
-                    action=canonical,
-                    arguments=dict(raw_arguments),
-                )
-                recovered = await self._recover_catalog_lookup(
-                    parsed,
-                    result,
-                    current_snapshot,
-                    registrations,
-                    context,
-                    call_number=round_number,
-                    intent_hint=intent_hint,
-                )
-                if recovered is not None:
-                    results[position] = recovered
         observations = []
         for position, native_call in enumerate(native_calls):
             call_id = _field(native_call, "id") or f"react-native-call-{position + 1}"

@@ -56,6 +56,7 @@ class SearchProbeTool(BaseTool):
         version="1.0",
         input_model=SearchProbeInput,
         output_model=SearchProbeOutput,
+        recommended_before_tools=("system.current_time",),
     )
 
     def __init__(self) -> None:
@@ -297,15 +298,6 @@ def test_lazy_registration_logs_all_persisted_tool_names(capsys):
     repository.close()
 
 
-def test_catalog_intent_separates_time_only_from_time_sensitive_search():
-    assert ReActAgent._infer_catalog_intent(
-        [{"role": "user", "content": "现在几点？"}]
-    ) == "current time"
-    assert ReActAgent._infer_catalog_intent(
-        [{"role": "user", "content": "最近两天的模型新闻"}]
-    ) == "current time and web search"
-
-
 @pytest.mark.asyncio
 async def test_lazy_catalog_loads_all_resolved_specs_and_sends_schemas():
     repository = ToolSpecRepository(":memory:")
@@ -444,7 +436,7 @@ async def test_catalog_first_direct_call_requests_schema_without_denying_tool():
 
 
 @pytest.mark.asyncio
-async def test_time_sensitive_search_requires_current_time_observation_first():
+async def test_recommended_preceding_tool_is_advisory_only():
     llm = SearchBeforeTimeLLM()
     search = SearchProbeTool()
     agent = ReActAgent(
@@ -462,16 +454,19 @@ async def test_time_sensitive_search_requires_current_time_observation_first():
     )
 
     assert answer == "done"
-    assert search.queries == ["model news in the last two days"]
+    assert search.queries == [
+        "latest model news",
+        "model news in the last two days",
+    ]
     first_instruction = llm.requests[0][0]["content"]
-    assert "MUST obtain a successful Observation from system.current_time" in first_instruction
+    assert "Recommended preceding tools (advisory only; not enforced): system.current_time." in first_instruction
     first_observation = llm.requests[1][-1]["content"]
-    assert "TEMPORAL_CONTEXT_REQUIRED" in first_observation
-    assert "system.current_time" in first_observation
+    assert '"ok": true' in first_observation
+    assert "TEMPORAL_CONTEXT_REQUIRED" not in first_observation
 
 
 @pytest.mark.asyncio
-async def test_time_sensitive_catalog_lookup_adds_current_time_schema():
+async def test_catalog_lookup_does_not_inject_tools_from_user_wording():
     llm = TemporalCatalogOmitsTimeLLM()
     agent = ReActAgent(
         "time-aware-catalog-test",
@@ -485,8 +480,9 @@ async def test_time_sensitive_catalog_lookup_adds_current_time_schema():
 
     assert answer == "done"
     second_instruction = llm.requests[1][0]["content"]
-    assert "system.current_time:" in second_instruction
     assert "web.search:" in second_instruction
+    assert "Recommended preceding tools (advisory only; not enforced): system.current_time." in second_instruction
+    assert "system.current_time:" not in second_instruction
 
 
 @pytest.mark.asyncio

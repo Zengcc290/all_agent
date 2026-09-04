@@ -41,7 +41,9 @@ read，也不能虚构 API、字段或权限。
 1. 理清工具的单一职责、输入来源、稳定输出、外部依赖、权限和副作用。
 2. 重命名文件、Input/Output/Tool 类、工具名和环境变量名。
 3. 用 Pydantic 定义所有输入和输出；为字段补充 description、范围和长度限制。
-4. 完整填写 ``ToolSpec``。Schema 或可观察语义改变时必须升级 version。
+4. 完整填写 ``ToolSpec``。如有可选的上下文准备工具，填写
+   ``recommended_before_tools``；它只用于提示模型，不是运行时依赖。Schema 或
+   可观察语义改变时必须升级 version。
 5. 在 ``execute()`` 中只使用已经验证的 Input，清洗外部数据并返回 Output。
 6. 在 ``create_tool()`` 中读取配置、创建客户端或注入依赖，然后返回工具实例。
 7. 将复制后文件中的 ``TOOL_ENABLED`` 设为 ``True``，再检查发现报告与注册状态。
@@ -109,6 +111,10 @@ read，也不能虚构 API、字段或权限。
     时填写正整数。``parallel_safe=False`` 时实际并发会被限制为 1。
 ``tags``
     供 Catalog 搜索的稳定关键词元组，不参与授权，也不要塞入大段说明。
+``recommended_before_tools``
+    可选的命名空间工具名元组，用于提示调用当前工具前可能有帮助的工具。该字段
+    只会出现在模型描述和 Catalog 元数据中；运行时不会自动调用、检查顺序或强制
+    任何前置工具。工具之间应保持可插拔，不要在 Agent/ReAct 代码中写死具体名称。
 
 五、execute() 实现规则
 =======================

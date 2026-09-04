@@ -27,6 +27,7 @@ def test_catalog_exposes_permissioned_tools_without_context_permissions():
     )
     assert spec.spec["input_schema"]["properties"]["query"]["type"] == "string"
     assert spec.spec["schema_hash"] == search.spec.schema_hash
+    assert spec.spec["recommended_before_tools"] == ["system.current_time"]
     assert spec.spec["registry_generation"] == registry.resolve("web.search")[1]
 
 

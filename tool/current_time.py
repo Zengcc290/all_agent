@@ -44,9 +44,7 @@ class CurrentTimeTool(BaseTool):
         name="system.current_time",
         description=(
             "Get the current system local date and time. Use this when the agent "
-            "needs the actual current time. For latest, recent, today, or other "
-            "relative-date web searches, call this before web.search and anchor "
-            "the search window to its result. It accepts no arguments and performs "
+            "needs the actual current time. It accepts no arguments and performs "
             "no writes."
         ),
         version="1.0.0",
