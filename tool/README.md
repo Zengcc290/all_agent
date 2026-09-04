@@ -182,6 +182,8 @@ record = agent.tool_discovery_report.for_tool("web.search")
 
 工具实例默认在 Agent 构造阶段完成发现、实例化和注册。ReAct 默认采用“目录优先”的 Schema 暴露策略：首轮仅显示全部已注册工具的名称以及 `system.tool_catalog` 的完整 Schema；模型根据名称推断所需能力，再用目录工具取得目标工具 Schema 后调用。目录查询只是取得契约，不是注册、权限或访问申请；名称已列出的工具均已注册且可用。传入 `defer_tool_loading=False` 可显式改为首轮发送全部已注册工具的完整 Schema。`lazy_tools=True` 仍是独立的实现按需加载优化。
 
+对于包含“最新、最近、今天、当前、实时”或 `latest/recent/today/current` 等相对时间词的 ReAct 请求，运行时要求先获得一次成功的 `system.current_time` Observation，之后才允许执行 `web.search`。若模型先搜索，运行时返回 `TEMPORAL_CONTEXT_REQUIRED`，提示它在前一轮先读取当前时间；同一批次同时调用时间和搜索也不会绕过该顺序。
+
 ## 自动发现的内部链路
 
 ```text

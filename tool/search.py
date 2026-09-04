@@ -185,7 +185,11 @@ class SearchTool(BaseTool):
 
     spec = ToolSpec(
         name="web.search",
-        description="Search public web content with AnySearch and return normalized title, URL and snippet items.",
+        description=(
+            "Search public web content with AnySearch and return normalized title, "
+            "URL and snippet items. For latest, recent, today, or other relative-date "
+            "requests, first obtain the current date from system.current_time."
+        ),
         version="1.1",
         input_model=SearchInput,
         output_model=SearchOutput,

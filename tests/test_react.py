@@ -37,6 +37,35 @@ class EchoTool(BaseTool):
         return EchoOutput(value=arguments.value)
 
 
+class SearchProbeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: str
+
+
+class SearchProbeOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: str
+
+
+class SearchProbeTool(BaseTool):
+    spec = ToolSpec(
+        name="web.search",
+        description="Record a web search query for ReAct ordering tests.",
+        version="1.0",
+        input_model=SearchProbeInput,
+        output_model=SearchProbeOutput,
+    )
+
+    def __init__(self) -> None:
+        self.queries = []
+
+    def execute(self, arguments: SearchProbeInput) -> SearchProbeOutput:
+        self.queries.append(arguments.query)
+        return SearchProbeOutput(query=arguments.query)
+
+
 class ReActLoggingLLM:
     model = "test-model"
 
@@ -193,6 +222,56 @@ class UnmarkedToolIntentLLM:
         return "Final Answer: done"
 
 
+class SearchBeforeTimeLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests = []
+
+    def complete(self, messages, **_options):
+        self.requests.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: search immediately\n"
+                "Action: web.search\n"
+                'Action Input: {"query":"latest model news"}'
+            )
+        if self.calls == 2:
+            return (
+                "Thought: establish the current date first\n"
+                "Action: system.current_time\n"
+                "Action Input: {}"
+            )
+        if self.calls == 3:
+            return (
+                "Thought: search using the observed date\n"
+                "Action: web.search\n"
+                'Action Input: {"query":"model news in the last two days"}'
+            )
+        return "Final Answer: done"
+
+
+class TemporalCatalogOmitsTimeLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests = []
+
+    def complete(self, messages, **_options):
+        self.requests.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: resolve web search\n"
+                "Action: system.tool_catalog\n"
+                'Action Input: {"action":"resolve","intent":"web search"}'
+            )
+        return "Final Answer: done"
+
+
 def test_lazy_registration_logs_all_persisted_tool_names(capsys):
     repository = ToolSpecRepository(":memory:")
     agent = ReActAgent(
@@ -216,6 +295,15 @@ def test_lazy_registration_logs_all_persisted_tool_names(capsys):
         in instruction[0]["content"]
     )
     repository.close()
+
+
+def test_catalog_intent_separates_time_only_from_time_sensitive_search():
+    assert ReActAgent._infer_catalog_intent(
+        [{"role": "user", "content": "现在几点？"}]
+    ) == "current time"
+    assert ReActAgent._infer_catalog_intent(
+        [{"role": "user", "content": "最近两天的模型新闻"}]
+    ) == "current time and web search"
 
 
 @pytest.mark.asyncio
@@ -353,6 +441,52 @@ async def test_catalog_first_direct_call_requests_schema_without_denying_tool():
     first_observation = llm.requests[1][-1]["content"]
     assert "TOOL_SCHEMA_REQUIRED" in first_observation
     assert "registered and usable" in first_observation
+
+
+@pytest.mark.asyncio
+async def test_time_sensitive_search_requires_current_time_observation_first():
+    llm = SearchBeforeTimeLLM()
+    search = SearchProbeTool()
+    agent = ReActAgent(
+        "time-before-search-test",
+        llm=llm,
+        auto_discover_tools=False,
+    )
+    agent.register_tool(CurrentTimeTool())
+    agent.register_tool(search)
+
+    answer = await agent.run_with_react(
+        "Give me the latest model news from the last two days",
+        max_rounds=5,
+        defer_tool_loading=False,
+    )
+
+    assert answer == "done"
+    assert search.queries == ["model news in the last two days"]
+    first_instruction = llm.requests[0][0]["content"]
+    assert "MUST obtain a successful Observation from system.current_time" in first_instruction
+    first_observation = llm.requests[1][-1]["content"]
+    assert "TEMPORAL_CONTEXT_REQUIRED" in first_observation
+    assert "system.current_time" in first_observation
+
+
+@pytest.mark.asyncio
+async def test_time_sensitive_catalog_lookup_adds_current_time_schema():
+    llm = TemporalCatalogOmitsTimeLLM()
+    agent = ReActAgent(
+        "time-aware-catalog-test",
+        llm=llm,
+        auto_discover_tools=False,
+    )
+    agent.register_tool(CurrentTimeTool())
+    agent.register_tool(SearchProbeTool())
+
+    answer = await agent.run_with_react("latest model news", max_rounds=3)
+
+    assert answer == "done"
+    second_instruction = llm.requests[1][0]["content"]
+    assert "system.current_time:" in second_instruction
+    assert "web.search:" in second_instruction
 
 
 @pytest.mark.asyncio

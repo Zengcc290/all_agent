@@ -67,6 +67,8 @@ asyncio.run(main())
 
 `ToolCatalogTool` is available as `system.tool_catalog` for summary search and versioned schema loading. It exposes fixed operations and does not execute arbitrary SQL. Tools are eagerly discovered, instantiated, and registered before the first model request by default. ReAct runs use catalog-first schema exposure by default: the first request contains every registered tool name and only the complete schema for `system.tool_catalog`; the model resolves a needed capability before invoking it. This is schema retrieval, not registration or permission checking. Pass `defer_tool_loading=False` to `run_with_react(...)` for a one-round full-schema ReAct prompt. Pass a `ToolSpecRepository` to persist the active catalog; `lazy_tools=True` remains a separate implementation-loading optimization.
 
+For time-sensitive ReAct requests containing relative/current terms such as `latest`, `today`, `最新`, or `最近`, a successful `system.current_time` Observation is required before `web.search` can execute. If a model attempts search first, it receives `TEMPORAL_CONTEXT_REQUIRED` and must obtain the current time in an earlier round. This keeps date windows anchored to the runtime clock instead of the model's remembered date.
+
 Project changes are recorded compactly in SQLite by the auto-discovered
 `system.update_log` tool. Read [update_log_readme_first.md](update_log_readme_first.md)
 before making changes. After every actual modification, provide the tool's
