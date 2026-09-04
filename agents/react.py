@@ -72,6 +72,9 @@ _ACTION_INPUT_RE = re.compile(
     re.DOTALL,
 )
 _XML_ANSWER_RE = re.compile(r"(?is)^\s*<answer>\s*(.*?)\s*</answer>\s*$")
+_EXPLICIT_FINAL_RE = re.compile(
+    r"(?im)^\s*(?:\*\*)?final\s+answer(?:\*\*)?\s*:"
+)
 
 
 @dataclass(frozen=True)
@@ -641,6 +644,23 @@ class ReActAgent(Agent):
             if parsed.thought is not None:
                 log_react_thought(round_number, parsed.thought)
             if parsed.is_final:
+                if (
+                    not _EXPLICIT_FINAL_RE.search(content)
+                    and not _XML_ANSWER_RE.fullmatch(content)
+                    and self._should_require_tool_action(request_messages, registrations)
+                ):
+                    protocol_error = (
+                        "You returned an unmarked answer before using the available "
+                        "tools. This request requires tool evidence. Do not answer "
+                        "from memory. First respond with exactly one Thought, Action, "
+                        "and Action Input for the most relevant listed tool; wait "
+                        "for its Observation before giving Final Answer."
+                    )
+                    log_react_parse_issue(round_number, protocol_error)
+                    conversation.append(
+                        {"role": "user", "content": "Observation: " + protocol_error}
+                    )
+                    continue
                 log_react_final_answer(round_number, parsed.final_answer or "")
                 self._profile_histories[history_key] = [dict(item) for item in conversation]
                 self.history = [dict(item) for item in conversation]
@@ -697,6 +717,46 @@ class ReActAgent(Agent):
                 )
 
         raise RuntimeError("maximum ReAct rounds exceeded")
+
+    @staticmethod
+    def _should_require_tool_action(
+        request_messages: Sequence[Mapping[str, Any]],
+        registrations: Mapping[str, tuple[Any, int]],
+    ) -> bool:
+        """Decide whether an unmarked plain-text answer should be retried.
+
+        This is intentionally conservative: only requests containing common
+        real-time/search/tool-intent terms are gated, so normal small-talk can
+        still use the provider's plain-text fallback.
+        """
+
+        if not registrations:
+            return False
+        text = " ".join(
+            str(message.get("content", ""))
+            for message in request_messages
+            if message.get("role") == "user"
+        ).casefold()
+        return any(
+            marker in text
+            for marker in (
+                "现在",
+                "当前时间",
+                "今天",
+                "实时",
+                "查询",
+                "搜索",
+                "查找",
+                "检索",
+                "运势",
+                "天气",
+                "search",
+                "look up",
+                "current time",
+                "latest",
+                "today",
+            )
+        )
 
     @staticmethod
     def _infer_catalog_intent(

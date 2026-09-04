@@ -124,6 +124,25 @@ class DirectCurrentTimeLLM:
         return "Final Answer: done"
 
 
+class UnmarkedToolIntentLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, _messages, **_options):
+        self.calls += 1
+        if self.calls == 1:
+            return "我无法读取当前时间，也无法查询今日运势。"
+        if self.calls == 2:
+            return (
+                "Thought: use the clock tool\n"
+                "Action: system.current_time\n"
+                'Action Input: {}'
+            )
+        return "Final Answer: done"
+
+
 def test_lazy_registration_logs_all_persisted_tool_names(capsys):
     repository = ToolSpecRepository(":memory:")
     agent = ReActAgent(
@@ -192,6 +211,21 @@ async def test_lazy_react_direct_call_loads_cataloged_current_time():
     assert answer == "done"
     assert "system.current_time" in agent.tools
     repository.close()
+
+
+@pytest.mark.asyncio
+async def test_unmarked_tool_intent_is_retried_instead_of_being_final_answer():
+    agent = ReActAgent(
+        "unmarked-tool-intent-test",
+        llm=UnmarkedToolIntentLLM(),
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(CurrentTimeTool())
+
+    answer = await agent.run_with_react("现在是什么时候", max_rounds=4, defer_tool_loading=False)
+
+    assert answer == "done"
 
 
 @pytest.mark.asyncio
