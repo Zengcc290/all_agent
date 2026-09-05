@@ -881,8 +881,9 @@ class ReActAgent(Agent):
                         "unmarked answer retry limit reached; accepting the answer",
                     )
                 log_react_final_answer(round_number, parsed.final_answer or "")
-                self._profile_histories[history_key] = [dict(item) for item in conversation]
-                self.history = [dict(item) for item in conversation]
+                self._save_history(
+                    history_key, conversation
+                )
                 return parsed.final_answer or ""
 
             if parsed.error is not None and not parsed.has_action:
@@ -907,8 +908,7 @@ class ReActAgent(Agent):
                 # A plain text response is already interpreted as a final
                 # answer by the parser; this branch is defensive only.
                 log_react_final_answer(round_number, content.strip())
-                self._profile_histories[history_key] = [dict(item) for item in conversation]
-                self.history = [dict(item) for item in conversation]
+                self._save_history(history_key, conversation)
                 return content.strip()
 
             # A provider can get stuck emitting the exact same action forever

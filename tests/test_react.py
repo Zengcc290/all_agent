@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agents.react import ReActAgent, parse_react_response
 from core import ToolSpec, ToolSpecRepository
@@ -621,3 +621,118 @@ async def test_react_accepts_unlimited_rounds_when_max_rounds_is_none():
     )
 
     assert answer == "done"
+
+
+class BigResultInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    filler: str = Field(default="x", max_length=1)
+
+
+class BigResultOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    blob: str
+
+
+class BigResultTool(BaseTool):
+    spec = ToolSpec(
+        name="test.big_result",
+        description="Return one oversized blob for history compression tests.",
+        version="1.0",
+        input_model=BigResultInput,
+        output_model=BigResultOutput,
+    )
+
+    def execute(self, arguments: BigResultInput) -> BigResultOutput:
+        return BigResultOutput(blob="A" * 40_000)
+
+
+class HistoryLLM:
+    model = "history-model"
+
+    def __init__(self, action: str = "test.big_result") -> None:
+        self.calls = 0
+        self.action = action
+        self.second_request_messages: list[dict] | None = None
+
+    def complete(self, messages, **options):
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: need the blob\n"
+                f"Action: {self.action}\n"
+                'Action Input: {"filler": "x"}'
+            )
+        self.second_request_messages = [dict(m) for m in messages]
+        return "Final Answer: done"
+
+
+@pytest.mark.asyncio
+async def test_large_observations_are_compressed_in_saved_history():
+    llm = HistoryLLM()
+    agent = ReActAgent(
+        "history-compress-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(BigResultTool())
+
+    answer = await agent.run_with_react(
+        "get the blob", use_history=False, max_rounds=4, defer_tool_loading=False
+    )
+
+    assert answer == "done"
+    saved = agent._profile_histories["__injected__"]
+    # user, assistant, observation, assistant(final)
+    assert len(saved) == 4
+    observation = saved[2]
+    assert observation["role"] == "user"
+    stub = observation["content"]
+    assert stub.startswith("Observation: [已压缩的历史工具结果")
+    assert "40,131" in stub
+    # Inside the same run the model still saw the complete payload.
+    joined = "\n".join(
+        str(m.get("content", "")) for m in llm.second_request_messages
+    )
+    assert "A" * 100 in joined
+
+
+class SmallResultTool(BaseTool):
+    spec = ToolSpec(
+        name="test.small_result",
+        description="Return one small blob for verbatim-history tests.",
+        version="1.0",
+        input_model=BigResultInput,
+        output_model=BigResultOutput,
+    )
+
+    def execute(self, arguments: BigResultInput) -> BigResultOutput:
+        return BigResultOutput(blob="small")
+
+
+@pytest.mark.asyncio
+async def test_small_observations_are_saved_verbatim():
+    llm = HistoryLLM(action="test.small_result")
+    agent = ReActAgent(
+        "history-small-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(SmallResultTool())
+
+    answer = await agent.run_with_react(
+        "get the blob",
+        use_history=False,
+        max_rounds=4,
+        defer_tool_loading=False,
+    )
+
+    assert answer == "done"
+    saved = agent._profile_histories["__injected__"]
+    observation = saved[2]["content"]
+    assert observation.startswith("Observation: ")
+    assert '"blob": "small"' in observation
+    assert "[已压缩的历史工具结果" not in observation

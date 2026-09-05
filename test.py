@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""持久对话入口：按 provider.toml 的 tool_mode 自动选择协议。
+
+模型思考阶段没有流式输出，读大工具结果后的请求体也较大，
+等待数十秒属于正常现象，不是程序卡死。
+"""
+
 import asyncio
 
 from agents.react import ReActAgent
@@ -8,7 +15,8 @@ async def main():
     agent = ReActAgent("persistent-chat")
 
     print("持久对话已启动")
-    print("输入 /clear 清空历史，输入 /exit 退出\n")
+    print("输入 /clear 清空历史，输入 /exit 退出")
+    print("（模型思考无流式输出，大工具结果回传后请求体较大，请耐心等待响应）\n")
 
     while True:
         try:

@@ -62,6 +62,13 @@ class Agent(ABC):
         protocol = self.TOOL_MODE_PROTOCOLS.get(profile.tool_mode, "native")
         return protocol
 
+    def _save_history(self, history_key: str, conversation: list[dict[str, Any]]) -> None:
+        """Persist the conversation with oversized tool payloads compressed."""
+
+        compressed = compress_saved_history(conversation)
+        self._profile_histories[history_key] = compressed
+        self.history = [dict(item) for item in compressed]
+
     async def run_auto(
         self,
         messages: str | list[dict[str, Any]],
@@ -400,8 +407,7 @@ class Agent(ABC):
             assistant_message = _message_dict(message)
             conversation.append(assistant_message)
             if not native_calls:
-                self._profile_histories[history_key] = [dict(item) for item in conversation]
-                self.history = [dict(item) for item in conversation]
+                self._save_history(history_key, conversation)
                 return _field(message, "content") or ""
 
             calls: list[ToolCall] = []
@@ -838,6 +844,55 @@ def _result_json(result: Any) -> str:
     except Exception:  # noqa: BLE001
         payload = result.model_dump()
     return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+# Observations larger than this are compressed when a conversation is saved
+# into the profile history. Inside the running turn the full payload is kept.
+OBSERVATION_COMPRESS_THRESHOLD = 12_000
+OBSERVATION_STUB_PREFIX = "[已压缩的历史工具结果"
+OBSERVATION_PREVIEW_CHARS = 400
+
+
+def compress_saved_history(
+    conversation: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return a copy of ``conversation`` with oversized tool payloads stubbed.
+
+    Read tools legitimately return tens of kilobytes per call. Persisting the
+    raw payload pins it into every future request of the same profile until
+    providers stall or exceed their context window; the stub keeps the tool
+    name, the original size, a short preview and a re-query hint instead.
+    """
+
+    compressed: list[dict[str, Any]] = []
+    for message in conversation:
+        content = message.get("content")
+        if (
+            message.get("role") == "user"
+            and isinstance(content, str)
+            and content.startswith("Observation: ")
+            and len(content) > OBSERVATION_COMPRESS_THRESHOLD
+            and not content.startswith(f"Observation: {OBSERVATION_STUB_PREFIX}")
+        ):
+            payload = content[len("Observation: ") :]
+            compressed.append({**message, "content": "Observation: " + _observation_stub(payload)})
+        elif (
+            message.get("role") == "tool"
+            and isinstance(content, str)
+            and len(content) > OBSERVATION_COMPRESS_THRESHOLD
+        ):
+            compressed.append({**message, "content": _observation_stub(content)})
+        else:
+            compressed.append(dict(message))
+    return compressed
+
+
+def _observation_stub(payload: str) -> str:
+    preview = payload[:OBSERVATION_PREVIEW_CHARS]
+    return (
+        f"{OBSERVATION_STUB_PREFIX} | 原始大小: {len(payload):,} 字符 | "
+        f"预览: {preview}... | 如需完整数据请让 AI 重新调用同一工具查询。]"
+    )
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
