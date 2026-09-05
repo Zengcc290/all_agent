@@ -183,6 +183,8 @@ record = agent.tool_discovery_report.for_tool("web.search")
 7. 工具执行结果再次由输出模型校验。异常、超时或校验失败都转成统一 `ToolResult.error`。
 8. Agent 按原 `call_id` 追加工具结果并再次请求模型，直到模型生成最终文本或超过 `max_rounds`。
 
+ReAct 和原生 function calling 共用 `core.tool_loop.ToolLoop` 管理轮次、无界调用的安全上限和重复调用检测；协议解析仍由各自适配器负责。无论模型采用哪种协议，实际工具执行都统一进入 `ToolExecutionManager`，工具不需要实现两套执行逻辑。
+
 工具实例默认在 Agent 构造阶段完成发现、实例化和注册。ReAct 默认采用“目录优先”的 Schema 暴露策略：首轮仅显示全部已注册工具的名称以及 `system.tool_catalog` 的完整 Schema；模型根据名称推断所需能力，再用目录工具取得目标工具 Schema 后调用。目录查询只是取得契约，不是注册、权限或访问申请；名称已列出的工具均已注册且可用。传入 `defer_tool_loading=False` 可显式改为首轮发送全部已注册工具的完整 Schema。`lazy_tools=True` 仍是独立的实现按需加载优化。
 
 如果工具的 `ToolSpec` 声明了 `recommended_before_tools`，ReAct 和原生函数调用会把它附加到工具描述中，明确标注为“仅供参考，不强制执行”。是否调用建议工具、调用顺序以及是否直接调用目标工具，均由模型自行决定。

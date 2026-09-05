@@ -81,16 +81,35 @@ class ReadUpdateLogsTool(BaseTool):
         if not isinstance(arguments, ReadUpdateLogsInput):
             raise TypeError("arguments must be a ReadUpdateLogsInput instance")
         latest_update_id = self.repository.latest_id()
+        if latest_update_id < arguments.start_id:
+            raise LookupError(
+                f"update log entry {arguments.start_id} was not found; "
+                f"latest update ID is {latest_update_id}"
+            )
         end_id = arguments.end_id if arguments.end_id is not None else latest_update_id
         if end_id > latest_update_id:
             raise LookupError(
                 f"update log range ends at {end_id}, but latest update ID is {latest_update_id}"
             )
+        if hasattr(self.repository, "get_range"):
+            raw_records = self.repository.get_range(arguments.start_id, end_id)
+        else:  # compatibility with lightweight repository doubles
+            raw_records = [
+                self.repository.get(update_id)
+                for update_id in range(arguments.start_id, end_id + 1)
+            ]
+            raw_records = [record for record in raw_records if record is not None]
+        expected_count = end_id - arguments.start_id + 1
+        if len(raw_records) != expected_count:
+            present = {record["update_id"] for record in raw_records}
+            missing = next(
+                update_id
+                for update_id in range(arguments.start_id, end_id + 1)
+                if update_id not in present
+            )
+            raise LookupError(f"update log entry {missing} was not found")
         records: list[ReadUpdateLogOutput] = []
-        for update_id in range(arguments.start_id, end_id + 1):
-            record = self.repository.get(update_id)
-            if record is None:
-                raise LookupError(f"update log entry {update_id} was not found")
+        for record in raw_records:
             record["latest_update_id"] = latest_update_id
             records.append(ReadUpdateLogOutput(**record))
         return ReadUpdateLogsOutput(

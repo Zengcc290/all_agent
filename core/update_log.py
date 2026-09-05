@@ -211,6 +211,30 @@ class UpdateLogRepository:
             row = connection.execute("SELECT MAX(update_id) AS value FROM update_logs").fetchone()
         return int(row["value"] or 0)
 
+    def get_range(self, start_id: int, end_id: int) -> list[dict[str, Any]]:
+        """Return a contiguous range using one SQLite connection/query.
+
+        The old caller pattern opened a connection for every ID.  That made a
+        full audit progressively slow and could look stuck when a model asked
+        for the same range repeatedly.
+        """
+        if (
+            isinstance(start_id, bool)
+            or not isinstance(start_id, int)
+            or start_id < 1
+            or isinstance(end_id, bool)
+            or not isinstance(end_id, int)
+            or end_id < start_id
+        ):
+            raise ValueError("start_id and end_id must be positive integers")
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM update_logs WHERE update_id BETWEEN ? AND ? "
+                "ORDER BY update_id ASC",
+                (start_id, end_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)

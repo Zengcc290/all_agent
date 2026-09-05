@@ -19,6 +19,7 @@ from core import (
     ToolRegistry,
     ToolResult,
     ToolSpecRepository,
+    ToolLoop,
     parse_openai_tool_calls,
 )
 from core import discover_tools as discover_tool_modules
@@ -33,6 +34,10 @@ PROMPT_CACHE_KEY_VERSION = "pc-v1"
 
 class Agent(ABC):
     """Agent shell with provider management and centralized tool execution."""
+
+    # An omitted max_rounds should not allow a malfunctioning provider to keep
+    # making requests forever.
+    UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
 
     def __init__(
         self,
@@ -225,7 +230,7 @@ class Agent(ABC):
         tool_names: list[str] | None = None,
         profile_name: str | None = None,
         provider_name: str | None = None,
-        use_history: bool = False,
+        use_history: bool = True,
         defer_tool_loading: bool = False,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
@@ -299,9 +304,11 @@ class Agent(ABC):
                 mode="native",
             )
 
-        round_number = 0
-        while max_rounds is None or round_number < max_rounds:
-            round_number += 1
+        round_loop = ToolLoop(
+            max_rounds,
+            safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
+        )
+        for round_number in round_loop.rounds():
             current_snapshot = self.tools.snapshot()
             registrations = {
                 name: current_snapshot[name]

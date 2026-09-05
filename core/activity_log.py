@@ -44,7 +44,9 @@ def log_react_round_started(round_number: int, max_rounds: int | None) -> None:
 
 
 def log_model_completed(round_number: int, elapsed_seconds: float) -> None:
-    """Model latency is intentionally omitted from the activity stream."""
+    """Display the model round latency in a compact, human-readable form."""
+
+    LOGGER.info("模型思考耗时：第%d轮 %.3f秒", round_number, max(0.0, elapsed_seconds))
 
 
 def log_react_thought(round_number: int, thought: str) -> None:
@@ -65,7 +67,15 @@ def log_tool_call_completed(
     tool_names: Iterable[str],
     elapsed_seconds: float,
 ) -> None:
-    """Tool latency and return values are intentionally omitted."""
+    """Display tool latency without dumping potentially large tool results."""
+
+    names = _tool_names(tool_names)
+    LOGGER.info(
+        "调用工具耗时：第%d轮 %s %.3f秒",
+        round_number,
+        ", ".join(names) or "无",
+        max(0.0, elapsed_seconds),
+    )
 
 
 def log_react_final_answer(round_number: int, answer: str) -> None:
@@ -73,7 +83,9 @@ def log_react_final_answer(round_number: int, answer: str) -> None:
 
 
 def log_react_parse_issue(round_number: int, issue: str) -> None:
-    """Protocol recovery details are intentionally omitted."""
+    """Show protocol errors so a stuck tool call is diagnosable."""
+
+    LOGGER.warning("工具调用格式问题：第%d轮 %s", round_number, _clean_text(issue))
 
 
 def _tool_names(names: Iterable[str]) -> list[str]:

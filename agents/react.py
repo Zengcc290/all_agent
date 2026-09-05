@@ -32,6 +32,7 @@ from core import (
     ToolResult,
     ToolSpecRepository,
     ToolRegistry,
+    ToolLoop,
     discover_tools as discover_tool_modules,
 )
 from core.activity_log import (
@@ -274,6 +275,10 @@ class ReActAgent(Agent):
     # Keep the old public constant as a compatibility alias for callers that
     # customized the previous lazy-loading prompt.
     LAZY_REACT_INSTRUCTIONS = CATALOG_FIRST_REACT_INSTRUCTIONS
+    # ``max_rounds=None`` means the caller does not want to tune the limit,
+    # but a provider must still be prevented from keeping the process alive
+    # forever when it repeats a failing tool request.
+    UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
 
     def __init__(
         self,
@@ -460,7 +465,7 @@ class ReActAgent(Agent):
         tool_names: list[str] | None = None,
         profile_name: str | None = None,
         provider_name: str | None = None,
-        use_history: bool = False,
+        use_history: bool = True,
         defer_tool_loading: bool = True,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
@@ -497,7 +502,7 @@ class ReActAgent(Agent):
         tool_names: list[str] | None = None,
         profile_name: str | None = None,
         provider_name: str | None = None,
-        use_history: bool = False,
+        use_history: bool = True,
         defer_tool_loading: bool = True,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
@@ -581,9 +586,11 @@ class ReActAgent(Agent):
                 selected_model or getattr(completion_llm, "model", None),
                 mode="react",
             )
-        round_number = 0
-        while max_rounds is None or round_number < max_rounds:
-            round_number += 1
+        round_loop = ToolLoop(
+            max_rounds,
+            safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
+        )
+        for round_number in round_loop.rounds():
             log_react_round_started(round_number, max_rounds)
             if self.lazy_tools:
                 for name in loaded_order:
@@ -641,6 +648,11 @@ class ReActAgent(Agent):
                 else {"role": "assistant", "content": content or ""}
             )
             if native_calls:
+                for native_call in native_calls:
+                    function = _field(native_call, "function")
+                    native_name = _field(function, "name", "unknown.tool")
+                    raw_args = _field(function, "arguments", "{}")
+                    round_loop.record_call(native_name, raw_args)
                 conversation.append(assistant_message)
                 observations = await self._execute_native_calls(
                     native_calls,
@@ -710,6 +722,10 @@ class ReActAgent(Agent):
                 self.history = [dict(item) for item in conversation]
                 return content.strip()
 
+            # A provider can get stuck emitting the exact same action forever
+            # (read-update-log queries are a common example). Feed it a clear
+            # observation first, then stop the unbounded loop if it ignores it.
+            round_loop.record_call(parsed.action, parsed.arguments or {})
             result = await self._execute_action(
                 parsed,
                 current_snapshot,
@@ -1076,13 +1092,23 @@ class ReActAgent(Agent):
                 error=ToolError(code="INVALID_TOOL_CALL", message=parsed.error),
             )
         tool, generation = registrations[action_name]
+        arguments = dict(parsed.arguments or {})
+        # Providers occasionally serialize numeric IDs as strings even when
+        # the schema says integer. These two read-only log tools are safe to
+        # normalize at the protocol boundary; all other tool inputs remain
+        # strictly validated as declared.
+        if action_name in {"system.read_update_log", "system.read_update_logs"}:
+            for key in ("update_id", "start_id", "end_id"):
+                value = arguments.get(key)
+                if isinstance(value, str) and value.strip().isdigit():
+                    arguments[key] = int(value.strip())
         call = ToolCall(
             call_id=call_id,
             tool_name=action_name,
             schema_version=tool.spec.version,
             schema_hash=tool.spec.schema_hash,
             registry_generation=generation,
-            arguments=parsed.arguments or {},
+            arguments=arguments,
         )
         log_tool_call_started(call_number, (action_name,))
         tool_started_at = time.perf_counter()
