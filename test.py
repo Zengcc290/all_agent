@@ -48,8 +48,10 @@ async def main():
                 # 避免模型先猜目录意图而在中文查询上反复重试。
                 defer_tool_loading=False,
                 prompt_cache_retention="24h",
+                # 终端实时回显：工具轮静默，最终答案逐字流出。
+                stream_echo=True,
             )
-            print(f"AI：{answer}\n")
+            print()  # 答案已逐字回显，这里只补一个换行
         except Exception as exc:
             print(f"请求失败：{type(exc).__name__}: {exc}\n")
 

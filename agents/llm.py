@@ -2,17 +2,93 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import sys
 import time
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 LOGGER = logging.getLogger(__name__)
+
+# Line-start final-answer markers shared by the ReAct text protocol. The live
+# echo stays silent until one of these appears, then streams the remainder.
+_FINAL_ANSWER_MARKER_RE = re.compile(
+    r"(?im)^(?:\*\*)?(?:final\s+answer|最终答案|最终回答|最终回复)(?:\*\*)?\s*[：:]"
+)
+
+EchoMode = Literal["react_final", "content"]
+
+
+def _default_echo_write(text: str) -> None:
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+class _FinalAnswerEchoer:
+    """Terminal echo controller for one streamed completion.
+
+    ``content`` mode forwards every delta immediately (native tool rounds
+    normally carry no content, so this effectively streams only answer text).
+    ``react_final`` mode buffers silently until a final-answer marker shows
+    up, then streams everything after the marker; rounds that end in a tool
+    call never echo anything.
+    """
+
+    def __init__(
+        self,
+        mode: EchoMode,
+        write: Callable[[str], None] | None,
+        prefix: str = "\nAI：",
+    ) -> None:
+        self._mode = mode
+        self._write = write or _default_echo_write
+        self._prefix = prefix
+        self._buffer = ""
+        self._live = mode == "content"
+        self.echoed = False
+
+    def feed(self, piece: str) -> None:
+        if not piece:
+            return
+        if self._live:
+            self._emit(piece)
+            return
+        self._buffer += piece
+        match = _FINAL_ANSWER_MARKER_RE.search(self._buffer)
+        if match is not None:
+            tail = self._buffer[match.end() :]
+            self._buffer = ""
+            self._live = True
+            if tail:
+                self._emit(tail)
+
+    def flush(self) -> None:
+        """Close the echo line once anything was written to the terminal."""
+
+        if self.echoed:
+            self._write("\n")
+
+    def _emit(self, text: str) -> None:
+        if not text:
+            return
+        if not self.echoed and self._prefix:
+            try:
+                self._write(self._prefix)
+            except Exception:  # noqa: BLE001 - echo must never break assembly
+                LOGGER.debug("stream echo write failed", exc_info=True)
+        self.echoed = True
+        try:
+            self._write(text)
+        except Exception:  # noqa: BLE001 - echo must never break assembly
+            LOGGER.debug("stream echo write failed", exc_info=True)
 
 
 def _assemble_streaming_response(
     stream: Iterable[Any],
     *,
     on_first_chunk: Callable[[], None] | None = None,
+    echo_mode: EchoMode | None = None,
+    echo_write: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Consume one streamed completion and rebuild the response envelope.
 
@@ -21,12 +97,16 @@ def _assemble_streaming_response(
     ``function.name`` and ``function.arguments`` strings). The returned
     mapping matches the non-streaming response shape, so message extraction
     helpers need no branching.
+
+    ``echo_mode`` optionally mirrors content pieces to the terminal while the
+    stream is still running; see :class:`_FinalAnswerEchoer`.
     """
 
     content_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     first_chunk_seen = False
+    echoer = _FinalAnswerEchoer(echo_mode, echo_write) if echo_mode else None
     try:
         for chunk in stream:
             choices = _field(chunk, "choices")
@@ -47,6 +127,8 @@ def _assemble_streaming_response(
                 continue
             if (piece := _field(delta, "content")):
                 content_parts.append(piece)
+                if echoer is not None:
+                    echoer.feed(piece)
             raw_fragments = _field(delta, "tool_calls")
             if not raw_fragments:
                 continue
@@ -68,6 +150,8 @@ def _assemble_streaming_response(
                 if (arguments := _field(function, "arguments")):
                     entry["function"]["arguments"] += arguments
     finally:
+        if echoer is not None:
+            echoer.flush()
         close = getattr(stream, "close", None)
         if callable(close):
             try:
@@ -91,6 +175,10 @@ def _assemble_streaming_response(
             }
         ]
     }
+    if echoer is not None:
+        # Callers use this to detect answers that never reached the terminal
+        # (no final-answer marker) and need a one-shot fallback echo.
+        response["stream_echoed"] = echoer.echoed
     return response
 
 
@@ -162,6 +250,8 @@ class LLM:
         temperature: float = 0.7,
         timeout: float = 60,
         on_first_chunk: Callable[[], None] | None = None,
+        echo_mode: EchoMode | None = None,
+        echo_write: Callable[[str], None] | None = None,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
         **kwargs: Any,
@@ -196,7 +286,12 @@ class LLM:
         if prompt_cache_retention is not None:
             options["prompt_cache_retention"] = prompt_cache_retention
         stream = self.client.chat.completions.create(**options, **kwargs)
-        return _assemble_streaming_response(stream, on_first_chunk=on_first_chunk)
+        return _assemble_streaming_response(
+            stream,
+            on_first_chunk=on_first_chunk,
+            echo_mode=echo_mode,
+            echo_write=echo_write,
+        )
 
     def think(
         self,

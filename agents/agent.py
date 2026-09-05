@@ -28,7 +28,7 @@ from core import discover_tools as discover_tool_modules
 from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
 
-from .llm import LLM
+from .llm import EchoMode, LLM
 from .providers import ProviderProfile, ProviderRegistry
 
 MAX_RETRIES = 3
@@ -79,6 +79,7 @@ class Agent(ABC):
         options: dict[str, Any],
         *,
         round_number: int,
+        echo_mode: EchoMode | None = None,
     ) -> Any:
         """Run one model request, preferring a streaming transport.
 
@@ -106,6 +107,7 @@ class Agent(ABC):
             response = stream_method(
                 messages,
                 on_first_chunk=_log_first_chunk,
+                echo_mode=echo_mode,
                 **streaming_options,
             )
             if first_chunk_at:
@@ -373,6 +375,7 @@ class Agent(ABC):
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
         enable_prompt_cache: bool = True,
+        stream_echo: bool = False,
     ) -> str:
         """Run the model/tool protocol until the model emits a final answer."""
         if max_rounds is not None and (
@@ -395,10 +398,13 @@ class Agent(ABC):
             raise TypeError("use_history and defer_tool_loading must be booleans")
         if not isinstance(enable_prompt_cache, bool):
             raise TypeError("enable_prompt_cache must be a boolean")
+        if not isinstance(stream_echo, bool):
+            raise TypeError("stream_echo must be a boolean")
         prompt_cache_key = self._validate_prompt_cache_key(prompt_cache_key)
         prompt_cache_retention = self._validate_prompt_cache_retention(
             prompt_cache_retention
         )
+        echo_mode: EchoMode | None = "content" if stream_echo else None
 
         completion_llm, selected_model, history_key = self._completion_target(
             profile_name, model, provider_name=provider_name
@@ -474,6 +480,7 @@ class Agent(ABC):
                 self._with_registered_tool_names(conversation),
                 completion_options,
                 round_number=round_number,
+                echo_mode=echo_mode,
             )
             choices = _field(response, "choices")
             if not choices:

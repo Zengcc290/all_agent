@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from agents.llm import LLM, _assemble_streaming_response
+from agents.llm import _FinalAnswerEchoer
 
 
 def bare_llm(client=None):
@@ -217,3 +218,127 @@ def test_complete_streaming_forwards_options_and_streams():
     assert recorded["timeout"] == 9
     assert recorded["prompt_cache_key"] == "cache-1"
     assert response["choices"][0]["message"]["content"] == "ok"
+
+
+def _chunk(delta: dict) -> dict:
+    return {"choices": [{"delta": delta}]}
+
+
+def test_react_final_echo_stays_silent_until_marker_then_streams():
+    pieces: list[str] = []
+    echoer = _FinalAnswerEchoer("react_final", pieces.append, prefix="")
+
+    echoer.feed("Thought: I need time\nAction: system.current_time\n")
+    assert pieces == []  # tool-round text must not echo
+
+    echoer.feed("Action Input: {}\n")
+    assert pieces == []
+
+    echoer.feed("Final Answer: It is ")
+    echoer.feed("12:00.")
+    echoer.flush()
+
+    assert "".join(pieces) == " It is 12:00.\n"
+    assert echoer.echoed
+
+
+def test_react_final_echo_supports_chinese_marker_and_fullwidth_colon():
+    pieces: list[str] = []
+    echoer = _FinalAnswerEchoer("react_final", pieces.append, prefix="")
+
+    echoer.feed("思考：需要时间\n行动：system.current_time\n")
+    echoer.feed("最终答案：现在是")
+    echoer.feed("12点")
+    echoer.flush()
+
+    assert "".join(pieces) == "现在是12点\n"
+
+
+def test_content_echo_mode_forwards_every_delta_immediately():
+    pieces: list[str] = []
+    echoer = _FinalAnswerEchoer("content", pieces.append, prefix="")
+
+    echoer.feed("hel")
+    echoer.feed("lo")
+    echoer.flush()
+
+    assert pieces == ["hel", "lo", "\n"]
+
+
+def test_silent_round_leaves_terminal_untouched():
+    pieces: list[str] = []
+    echoer = _FinalAnswerEchoer("react_final", pieces.append)
+
+    echoer.feed("Thought: call the tool\nAction: web.search\n")
+    echoer.feed('Action Input: {"query": "python"}')
+    echoer.flush()
+
+    assert pieces == []
+    assert echoer.echoed is False
+
+
+def test_streaming_response_echoes_content_during_assembly():
+    captured: list[str] = []
+    stream = iter(
+        [
+            _chunk({"content": "Thought: t\nAction: x\n"}),
+            _chunk({"content": "Final Answer: done"}),
+        ]
+    )
+    response = _assemble_streaming_response(
+        stream, echo_mode="react_final", echo_write=captured.append
+    )
+
+    assert response["choices"][0]["message"]["content"] == (
+        "Thought: t\nAction: x\nFinal Answer: done"
+    )
+    assert response["stream_echoed"] is True
+    # default prefix is emitted exactly once before the tail
+    assert "".join(captured) == "\nAI： done\n"
+
+
+def test_streaming_response_reports_unechoed_final_answers():
+    captured: list[str] = []
+    stream = iter(
+        [
+            _chunk({"content": "plain answer without marker"}),
+        ]
+    )
+    response = _assemble_streaming_response(
+        stream, echo_mode="react_final", echo_write=captured.append
+    )
+
+    assert response["stream_echoed"] is False
+    assert captured == []
+
+
+def test_complete_streaming_passes_echo_mode_to_assembler():
+    recorded = {}
+
+    class Completions:
+        def create(self, **kwargs):
+            recorded.update(kwargs)
+
+            class Chunk:
+                def __init__(self, delta):
+                    self.choices = [SimpleNamespace(delta=delta)]
+
+            return iter(
+                [
+                    Chunk(SimpleNamespace(content="Final Answer: hi")),
+                ]
+            )
+
+    llm = LLM.__new__(LLM)
+    llm.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    llm.model = "m"
+    pieces: list[str] = []
+
+    response = llm.complete_streaming(
+        [{"role": "user", "content": "hi"}],
+        echo_mode="react_final",
+        echo_write=pieces.append,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "Final Answer: hi"
+    assert "".join(pieces) == "\nAI： hi\n"

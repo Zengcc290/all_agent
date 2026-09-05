@@ -57,6 +57,7 @@ from .agent import (
     _safe_tool_call_error,
     _safe_tool_name,
 )
+from .llm import EchoMode
 
 
 # Marker names accepted at the start of a ReAct line.  Chinese aliases cover
@@ -640,6 +641,7 @@ class ReActAgent(Agent):
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
         enable_prompt_cache: bool = True,
+        stream_echo: bool = False,
     ) -> str:
         """Run one textual ReAct conversation to a final answer."""
 
@@ -658,6 +660,7 @@ class ReActAgent(Agent):
             prompt_cache_key=prompt_cache_key,
             prompt_cache_retention=prompt_cache_retention,
             enable_prompt_cache=enable_prompt_cache,
+            stream_echo=stream_echo,
         )
 
     async def run_with_react(
@@ -677,6 +680,7 @@ class ReActAgent(Agent):
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
         enable_prompt_cache: bool = True,
+        stream_echo: bool = False,
     ) -> str:
         if isinstance(messages, str):
             if not messages.strip():
@@ -707,10 +711,13 @@ class ReActAgent(Agent):
             raise TypeError("use_history and defer_tool_loading must be booleans")
         if not isinstance(enable_prompt_cache, bool):
             raise TypeError("enable_prompt_cache must be a boolean")
+        if not isinstance(stream_echo, bool):
+            raise TypeError("stream_echo must be a boolean")
         prompt_cache_key = self._validate_prompt_cache_key(prompt_cache_key)
         prompt_cache_retention = self._validate_prompt_cache_retention(
             prompt_cache_retention
         )
+        echo_mode: EchoMode | None = "react_final" if stream_echo else None
 
         completion_llm, selected_model, history_key = self._completion_target(
             profile_name, model, provider_name=provider_name
@@ -804,6 +811,7 @@ class ReActAgent(Agent):
                 conversation_for_request,
                 options,
                 round_number=round_number,
+                echo_mode=echo_mode,
             )
             if isinstance(response, str):
                 message = None
@@ -850,7 +858,9 @@ class ReActAgent(Agent):
                 content = str(content)
             parsed = parse_react_response(content)
             conversation.append({"role": "assistant", "content": content})
-            if parsed.thought is not None:
+            if parsed.thought is not None and not (stream_echo and parsed.is_final):
+                # The final answer just streamed live to the terminal; repeating
+                # the closing thought after it would only add noise.
                 log_react_thought(round_number, parsed.thought)
             if parsed.is_final:
                 if (
@@ -880,6 +890,11 @@ class ReActAgent(Agent):
                         "unmarked answer retry limit reached; accepting the answer",
                     )
                 log_react_final_answer(round_number, parsed.final_answer or "")
+                if stream_echo and not _field(response, "stream_echoed", False):
+                    # The answer reached the retry-acceptance path without a
+                    # final-answer marker, so nothing was echoed live; print
+                    # it once here to keep the terminal complete.
+                    print(f"\nAI：{parsed.final_answer or ''}", flush=True)
                 self._save_history(
                     history_key, conversation
                 )
@@ -907,6 +922,8 @@ class ReActAgent(Agent):
                 # A plain text response is already interpreted as a final
                 # answer by the parser; this branch is defensive only.
                 log_react_final_answer(round_number, content.strip())
+                if stream_echo and not _field(response, "stream_echoed", False):
+                    print(f"\nAI：{content.strip()}", flush=True)
                 self._save_history(history_key, conversation)
                 return content.strip()
 
