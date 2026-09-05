@@ -358,3 +358,136 @@ async def test_registered_provider_is_used_for_completion(monkeypatch):
     assert answer == "provider answer"
     assert created[0]["base_url"] == "https://example.invalid/v1"
     assert created[0]["model"] == "model-a"
+
+
+def _write_tool_mode_config(path, mode: str) -> str:
+    path.write_text(
+        "[defaults]\n"
+        'active_profile = "local"\n'
+        "\n"
+        "[profiles.local]\n"
+        'api_url = "http://localhost:8000/v1"\n'
+        'api_key = "secret"\n'
+        'default_model = "local-model"\n'
+        'models = ["local-model"]\n'
+        f'tool_mode = "{mode}"\n',
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def test_default_tool_protocol_maps_every_declared_mode(tmp_path):
+    from agents.providers import ProviderProfile
+
+    for mode, expected in Agent.TOOL_MODE_PROTOCOLS.items():
+        profile = ProviderProfile(
+            name="local",
+            base_url="http://localhost:8000/v1",
+            api_key="secret",
+            default_model="local-model",
+            models=("local-model",),
+            tool_mode=mode,
+        )
+        agent = DemoAgent("proto-test", llm=None)
+        agent.provider_registry._profiles = {profile.name: profile}
+        agent.active_profile = profile.name
+        assert agent.default_tool_protocol() == expected, mode
+
+
+def test_default_tool_protocol_reads_active_profile_mode(tmp_path):
+    from agents.providers import ProviderRegistry
+
+    agent = DemoAgent(
+        "profile-mode-test",
+        provider_config=_write_tool_mode_config(
+            tmp_path / "mode.toml", "text_react"
+        ),
+    )
+    assert isinstance(agent.provider_registry, ProviderRegistry)
+    assert agent.default_tool_protocol() == "react"
+
+
+@pytest.mark.asyncio
+async def test_run_auto_uses_native_protocol_for_native_strict(tmp_path):
+    calls = []
+
+    class NativeLLM:
+        model = "fake"
+
+        def complete(self, messages, **options):
+            calls.append(dict(options))
+            if len(calls) == 1:
+                function = SimpleNamespace(
+                    name="test__agent_echo", arguments='{"value": 7}'
+                )
+                call = SimpleNamespace(id="auto-1", function=function)
+                message = SimpleNamespace(
+                    role="assistant", content=None, tool_calls=[call]
+                )
+            else:
+                message = SimpleNamespace(
+                    role="assistant", content="done", tool_calls=[]
+                )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    agent = DemoAgent(
+        "auto-native-test",
+        provider_config=_write_tool_mode_config(
+            tmp_path / "native.toml", "native_strict"
+        ),
+    )
+    agent.register_tool(EchoTool())
+    agent.llm = NativeLLM()
+
+    answer = await agent.run_auto("echo 7", use_history=False)
+
+    assert answer == "done"
+    assert "tools" in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_run_auto_dispatches_text_react_to_react_agent(tmp_path):
+    from agents.react import ReActAgent
+
+    calls = []
+
+    class TextLLM:
+        model = "fake"
+
+        def complete(self, messages, **options):
+            calls.append(dict(options))
+            if len(calls) == 1:
+                return (
+                    "Thought: use echo\n"
+                    "Action: test.agent_echo\n"
+                    'Action Input: {"value": 7}'
+                )
+            return "Final Answer: done"
+
+    agent = ReActAgent(
+        "auto-react-test",
+        provider_config=_write_tool_mode_config(tmp_path / "react.toml", "text_react"),
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(EchoTool())
+    agent.llm = TextLLM()
+
+    answer = await agent.run_auto(
+        "echo 7", use_history=False, max_rounds=4, defer_tool_loading=False
+    )
+
+    assert answer == "done"
+    assert "tools" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_run_auto_rejects_profiles_with_tool_mode_none(tmp_path):
+    agent = DemoAgent(
+        "auto-none-test",
+        provider_config=_write_tool_mode_config(tmp_path / "none.toml", "none"),
+    )
+    agent.register_tool(EchoTool())
+
+    with pytest.raises(ValueError, match="tool_mode = 'none'"):
+        await agent.run_auto("echo 7")

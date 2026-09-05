@@ -39,6 +39,57 @@ class Agent(ABC):
     # making requests forever.
     UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
 
+    # ``None`` means "use the active profile's tool_mode". Only a profile that
+    # explicitly declares ``tool_mode = "none"`` disables tool support.
+    TOOL_MODE_PROTOCOLS: Mapping[str, str | None] = {
+        "native_strict": "native",
+        "native_loose": "native",
+        "text_react": "react",
+        "none": None,
+    }
+
+    def default_tool_protocol(self) -> str | None:
+        """Resolve the protocol declared by the active provider profile.
+
+        Profiles without a ``tool_mode`` key and legacy setups without any
+        profile fall back to the native function-calling protocol. The mapping
+        covers every value accepted by ProviderProfile validation.
+        """
+
+        profile = self.provider_registry.profiles.get(self.active_profile)
+        if profile is None:
+            return "native"
+        protocol = self.TOOL_MODE_PROTOCOLS.get(profile.tool_mode, "native")
+        return protocol
+
+    async def run_auto(
+        self,
+        messages: str | list[dict[str, Any]],
+        context: ExecutionContext | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Run one conversation with the protocol declared by ``tool_mode``.
+
+        ``native_strict``/``native_loose`` dispatch to :meth:`run_with_tools`;
+        ``text_react`` dispatches to :meth:`run_with_react` (ReActAgent only);
+        ``none`` rejects the request. A plain-string query is wrapped for the
+        native protocol so callers can stay provider-agnostic.
+        """
+
+        protocol = self.default_tool_protocol()
+        if protocol is None:
+            raise ValueError(
+                "the active provider profile disables tool use (tool_mode = 'none')"
+            )
+        if protocol == "react":
+            react_runner = getattr(self, "run_with_react", None)
+            if not callable(react_runner):
+                raise TypeError("tool_mode 'text_react' requires a ReActAgent instance")
+            return await react_runner(messages, context, **kwargs)
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        return await self.run_with_tools(messages, context, **kwargs)
+
     def __init__(
         self,
         name: str,
@@ -361,15 +412,6 @@ class Agent(ABC):
                 for name, (tool, _) in current_snapshot.items()
             }
             for position, native_call in enumerate(native_calls):
-                call_id = _field(native_call, "id")
-                if (
-                    not isinstance(call_id, str)
-                    or not call_id.strip()
-                    or len(call_id) > 128
-                ):
-                    raise RuntimeError(
-                        "LLM returned a tool call without a usable call ID"
-                    )
                 function = _field(native_call, "function")
                 provider_tool_name = _field(function, "name", "unknown.tool")
                 canonical_name = (
@@ -377,6 +419,11 @@ class Agent(ABC):
                     if isinstance(provider_tool_name, str)
                     else provider_tool_name
                 )
+                call_id = _field(native_call, "id")
+                if not isinstance(call_id, str) or not call_id.strip():
+                    # parse_openai_tool_calls generates a stable fallback for
+                    # gateways that omit call IDs.
+                    call_id = f"native-call-{position + 1}"
                 try:
                     call = parse_openai_tool_calls(
                         [native_call],

@@ -14,6 +14,7 @@ metadata and are not used as an authorization gate.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
 import inspect
@@ -58,25 +59,38 @@ from .agent import (
 )
 
 
+# Marker names accepted at the start of a ReAct line.  Chinese aliases cover
+# providers that translate the protocol; full-width and ASCII colons are both
+# accepted because Chinese-trained models frequently emit "：".
+_REACT_MARKER_LOOKAHEAD = (
+    r"(?:thought|action\s+input|action|observation|final\s+answer|"
+    r"思考|行动输入|行动|观察|最终答案|最终回答|最终回复|工具)"
+)
 _FINAL_RE = re.compile(
-    r"(?im)^\s*(?:\*\*)?final\s+answer(?:\*\*)?\s*:\s*(.*?)"
-    r"(?=^\s*(?:\*\*)?(?:thought|action|action\s+input|observation|"
-    r"final\s+answer)(?:\*\*)?\s*:|\Z)",
+    r"(?im)^\s*(?:\*\*)?(?:final\s+answer|最终答案|最终回答|最终回复)(?:\*\*)?\s*[：:]\s*(.*?)"
+    r"(?=^\s*(?:\*\*)?"
+    + _REACT_MARKER_LOOKAHEAD
+    + r"(?:\*\*)?\s*[：:]|\Z)",
     re.DOTALL,
 )
 _ACTION_RE = re.compile(
-    r"(?im)^\s*(?:\*\*)?action(?:\*\*)?\s*:\s*([^\r\n]+?)\s*$"
+    r"(?im)^\s*(?:\*\*)?(?:action|行动|工具)(?:\*\*)?\s*[：:]\s*([^\r\n]+?)\s*$"
 )
 _ACTION_INPUT_RE = re.compile(
-    r"(?im)^\s*(?:\*\*)?action\s+input(?:\*\*)?\s*:\s*(.*?)"
-    r"(?=^\s*(?:\*\*)?(?:thought|action|action\s+input|observation|"
-    r"final\s+answer)(?:\*\*)?\s*:|\Z)",
+    r"(?im)^\s*(?:\*\*)?(?:action\s+input|行动输入|行动\s+输入|参数|输入)(?:\*\*)?\s*[：:]\s*(.*?)"
+    r"(?=^\s*(?:\*\*)?"
+    + _REACT_MARKER_LOOKAHEAD
+    + r"(?:\*\*)?\s*[：:]|\Z)",
     re.DOTALL,
 )
 _XML_ANSWER_RE = re.compile(r"(?is)^\s*<answer>\s*(.*?)\s*</answer>\s*$")
 _EXPLICIT_FINAL_RE = re.compile(
-    r"(?im)^\s*(?:\*\*)?final\s+answer(?:\*\*)?\s*:"
+    r"(?im)^\s*(?:\*\*)?(?:final\s+answer|最终答案|最终回答|最终回复)(?:\*\*)?\s*[：:]"
 )
+# A provider that keeps emitting unmarked (or malformed) protocol answers even
+# after repeated corrections must not pin the loop until the round cap.
+_UNMARKED_ANSWER_RETRY_LIMIT = 3
+_MALFORMED_ANSWER_RETRY_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -119,6 +133,10 @@ def parse_react_response(text: str) -> ParsedReActResponse:
     A response without an action marker is treated as a final answer.  JSON
     action inputs must be objects and are decoded with non-finite constants
     disabled, matching the project's native parser.
+
+    The parser tolerates the most common provider drift: Chinese marker names
+    (``思考/行动/行动输入/最终答案``), full-width colons (``：``), JSON objects
+    wrapped in surrounding prose, and Python-style single-quoted literals.
     """
 
     if not isinstance(text, str):
@@ -192,21 +210,13 @@ def parse_react_response(text: str) -> ParsedReActResponse:
             action=action,
             error="Action Input is required and must be a JSON object",
         )
-    try:
-        arguments = json.loads(payload, parse_constant=_reject_json_constant)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    arguments, decode_error = _decode_action_input(payload)
+    if decode_error is not None:
         return ParsedReActResponse(
             raw=raw,
             thought=thought,
             action=action,
-            error=f"Action Input is not valid JSON: {exc}",
-        )
-    if not isinstance(arguments, dict):
-        return ParsedReActResponse(
-            raw=raw,
-            thought=thought,
-            action=action,
-            error="Action Input must be a JSON object",
+            error=decode_error,
         )
     return ParsedReActResponse(
         raw=raw,
@@ -218,9 +228,10 @@ def parse_react_response(text: str) -> ParsedReActResponse:
 
 def _extract_thought(text: str) -> str | None:
     match = re.search(
-        r"(?im)^\s*(?:\*\*)?thought(?:\*\*)?\s*:\s*(.*?)"
-        r"(?=^\s*(?:\*\*)?(?:action|action\s+input|observation|"
-        r"final\s+answer)(?:\*\*)?\s*:|\Z)",
+        r"(?im)^\s*(?:\*\*)?(?:thought|思考|想法)(?:\*\*)?\s*[：:]\s*(.*?)"
+        r"(?=^\s*(?:\*\*)?"
+        + _REACT_MARKER_LOOKAHEAD
+        + r"(?:\*\*)?\s*[：:]|\Z)",
         text,
         re.DOTALL,
     )
@@ -228,6 +239,87 @@ def _extract_thought(text: str) -> str | None:
         return None
     value = match.group(1).strip()
     return value or None
+
+
+def _decode_action_input(payload: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Decode one Action Input payload, tolerating common wrapper noise.
+
+    Decoding tries, in order: the payload as-is, the first balanced ``{...}``
+    block (for models that add prose or preambles around the object), and a
+    Python-style single-quoted literal repair.  Only JSON objects are
+    accepted; anything else returns an actionable correction message.
+    """
+
+    candidates = [payload]
+    stripped = payload.strip()
+    balanced = _balanced_json_substring(stripped)
+    if balanced and balanced != stripped:
+        candidates.append(balanced)
+    repaired = _repair_single_quoted_object(stripped)
+    if repaired:
+        candidates.append(repaired)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            arguments = json.loads(candidate, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(arguments, dict):
+            return arguments, None
+    return None, (
+        "Action Input is not valid JSON. Provide exactly one JSON object with "
+        'double-quoted keys, for example: {"query": "text"}. '
+        "Do not append prose after the object."
+    )
+
+
+def _balanced_json_substring(text: str) -> str:
+    """Return the first balanced ``{...}`` block, or an empty string."""
+
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return ""
+
+
+def _repair_single_quoted_object(payload: str) -> str:
+    """Convert a Python-style ``{'key': 1}`` literal into JSON text."""
+
+    candidate = _balanced_json_substring(payload)
+    if not candidate or "'" not in candidate:
+        return ""
+    try:
+        value = ast.literal_eval(candidate)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return ""
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return ""
+    return ""
 
 
 def _strip_code_fence(value: str) -> str:
@@ -241,6 +333,70 @@ def _strip_code_fence(value: str) -> str:
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _coerce_string_scalars(
+    arguments: dict[str, Any], schema: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Coerce string scalars to the declared schema types at the boundary.
+
+    Text-protocol providers serialize numbers as strings more often than any
+    other argument mistake. Strict Pydantic validation then rejects the whole
+    call with INVALID_ARGUMENTS, the same payload comes back, and the loop
+    burns out. Coercion is schema-driven, so a tool keeps exactly the types it
+    declared; values that cannot be converted are left untouched for the
+    normal validation error path.
+    """
+
+    if not isinstance(schema, Mapping):
+        return arguments
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return arguments
+    for key, value in arguments.items():
+        if not isinstance(value, str):
+            continue
+        subschema = properties.get(key)
+        if not isinstance(subschema, Mapping):
+            continue
+        declared_types = _declared_schema_types(subschema)
+        stripped = value.strip()
+        converted: Any = value
+        if "integer" in declared_types:
+            try:
+                converted = int(stripped)
+            except ValueError:
+                continue
+        elif "number" in declared_types:
+            try:
+                converted = float(stripped)
+            except ValueError:
+                continue
+        elif "boolean" in declared_types and stripped.casefold() in {
+            "true",
+            "false",
+        }:
+            converted = stripped.casefold() == "true"
+        else:
+            continue
+        arguments[key] = converted
+    return arguments
+
+
+def _declared_schema_types(subschema: Mapping[str, Any]) -> frozenset[str]:
+    raw_type = subschema.get("type")
+    if isinstance(raw_type, str):
+        return frozenset({raw_type})
+    if isinstance(raw_type, (list, tuple)):
+        return frozenset(item for item in raw_type if isinstance(item, str))
+    any_of = subschema.get("anyOf")
+    if isinstance(any_of, list):
+        collected: set[str] = set()
+        for item in any_of:
+            if isinstance(item, Mapping) and isinstance(item.get("type"), str):
+                collected.add(item["type"])
+        return frozenset(collected)
+    return frozenset()
 
 
 class ReActAgent(Agent):
@@ -258,7 +414,21 @@ class ReActAgent(Agent):
         "emit Final Answer: followed by the answer. Never invent an Observation, "
         "tool name, or non-object input; never emit placeholders such as <answer>. "
         "Use a listed tool directly when its complete schema is available; the "
-        "catalog/discovery tool is optional in that mode."
+        "catalog/discovery tool is optional in that mode.\n"
+        "\n"
+        "中文标记同样接受（冒号必须有，可以用全角）：\n"
+        "思考：简短理由\n行动：准确的工具名\n行动输入：一个 JSON 对象\n"
+        "必须等待观察（Observation）后才能进行下一步；结束时输出：最终答案：内容\n"
+        "\n"
+        "Example:\n"
+        "Thought: I need the current time\n"
+        "Action: system.current_time\n"
+        "Action Input: {}\n"
+        "(system returns an Observation)\n"
+        "Final Answer: It is 12:00.\n"
+        "\n"
+        "Action Input 必须是一个 JSON 对象（双引号键），例如："
+        '{"query": "python"}；不要在 JSON 后面追加解释文字。'
     )
 
     CATALOG_FIRST_REACT_INSTRUCTIONS = (
@@ -590,6 +760,8 @@ class ReActAgent(Agent):
             max_rounds,
             safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
         )
+        unmarked_answer_retries = 0
+        malformed_answer_retries = 0
         for round_number in round_loop.rounds():
             log_react_round_started(round_number, max_rounds)
             if self.lazy_tools:
@@ -687,32 +859,49 @@ class ReActAgent(Agent):
                     and not _XML_ANSWER_RE.fullmatch(content)
                     and self._should_require_tool_action(request_messages, registrations)
                 ):
-                    protocol_error = (
-                        "You returned an unmarked answer before using the available "
-                        "tools. This request requires tool evidence. Do not answer "
-                        "from memory. First respond with exactly one Thought, Action, "
-                        "and Action Input for the most relevant listed tool; wait "
-                        "for its Observation before giving Final Answer."
+                    unmarked_answer_retries += 1
+                    if unmarked_answer_retries <= _UNMARKED_ANSWER_RETRY_LIMIT:
+                        protocol_error = (
+                            "You returned an unmarked answer before using the available "
+                            "tools. This request requires tool evidence. Do not answer "
+                            "from memory. First respond with exactly one Thought, Action, "
+                            "and Action Input for the most relevant listed tool; wait "
+                            "for its Observation before giving Final Answer."
+                        )
+                        log_react_parse_issue(round_number, protocol_error)
+                        conversation.append(
+                            {"role": "user", "content": "Observation: " + protocol_error}
+                        )
+                        continue
+                    # The provider keeps ignoring the protocol despite the
+                    # retries above; accept the answer instead of burning the
+                    # whole round budget on the same correction.
+                    log_react_parse_issue(
+                        round_number,
+                        "unmarked answer retry limit reached; accepting the answer",
                     )
-                    log_react_parse_issue(round_number, protocol_error)
-                    conversation.append(
-                        {"role": "user", "content": "Observation: " + protocol_error}
-                    )
-                    continue
                 log_react_final_answer(round_number, parsed.final_answer or "")
                 self._profile_histories[history_key] = [dict(item) for item in conversation]
                 self.history = [dict(item) for item in conversation]
                 return parsed.final_answer or ""
 
             if parsed.error is not None and not parsed.has_action:
-                log_react_parse_issue(round_number, parsed.error)
-                conversation.append(
-                    {
-                        "role": "user",
-                        "content": "Observation: " + parsed.error,
-                    }
+                malformed_answer_retries += 1
+                if malformed_answer_retries <= _MALFORMED_ANSWER_RETRY_LIMIT:
+                    log_react_parse_issue(round_number, parsed.error)
+                    conversation.append(
+                        {
+                            "role": "user",
+                            "content": "Observation: " + parsed.error,
+                        }
+                    )
+                    continue
+                # A provider stuck emitting a malformed answer must not pin
+                # the loop until the round cap; report the correction and stop.
+                raise RuntimeError(
+                    "ReAct loop stopped: the model repeatedly returned a malformed "
+                    f"protocol answer ({parsed.error}); last response: {content[:200]!r}"
                 )
-                continue
 
             if not parsed.has_action:
                 # A plain text response is already interpreted as a final
@@ -1092,16 +1281,9 @@ class ReActAgent(Agent):
                 error=ToolError(code="INVALID_TOOL_CALL", message=parsed.error),
             )
         tool, generation = registrations[action_name]
-        arguments = dict(parsed.arguments or {})
-        # Providers occasionally serialize numeric IDs as strings even when
-        # the schema says integer. These two read-only log tools are safe to
-        # normalize at the protocol boundary; all other tool inputs remain
-        # strictly validated as declared.
-        if action_name in {"system.read_update_log", "system.read_update_logs"}:
-            for key in ("update_id", "start_id", "end_id"):
-                value = arguments.get(key)
-                if isinstance(value, str) and value.strip().isdigit():
-                    arguments[key] = int(value.strip())
+        arguments = _coerce_string_scalars(
+            dict(parsed.arguments or {}), tool.spec.input_schema
+        )
         call = ToolCall(
             call_id=call_id,
             tool_name=action_name,
@@ -1249,28 +1431,3 @@ ReactAgent = ReActAgent
 ReAct = ReActAgent
 React = ReActAgent
 react = ReActAgent
-
-
-def _run_sync(awaitable: Any) -> Any:
-    """Run an awaitable from sync code, including when a loop is active."""
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(awaitable)
-
-    # ``asyncio.run`` cannot be nested.  A short-lived worker thread keeps the
-    # synchronous API usable from notebooks and async test functions too.
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, awaitable).result()
-
-
-__all__ = [
-    "ParsedReActResponse",
-    "ReActAgent",
-    "ReAct",
-    "ReactAgent",
-    "React",
-    "parse_react_response",
-    "react",
-]

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from agents.react import ReActAgent
+from agents.react import ReActAgent, parse_react_response
 from core import ToolSpec, ToolSpecRepository
 from core.registry import BaseTool
 from tool.current_time import CurrentTimeTool
@@ -223,6 +223,28 @@ class UnmarkedToolIntentLLM:
         return "Final Answer: done"
 
 
+class AlwaysUnmarkedAnswerLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, _messages, **_options):
+        self.calls += 1
+        return "我直接根据记忆回答：日志共有 40 条。"
+
+
+class AlwaysMalformedActionLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, _messages, **_options):
+        self.calls += 1
+        return "Action: system.current_time\nAction Input: {not json"
+
+
 class SearchBeforeTimeLLM:
     model = "test-model"
 
@@ -354,6 +376,87 @@ async def test_unmarked_tool_intent_is_retried_instead_of_being_final_answer():
     answer = await agent.run_with_react("现在是什么时候", max_rounds=4, defer_tool_loading=False)
 
     assert answer == "done"
+
+
+def test_parse_react_response_accepts_full_width_colons_and_chinese_markers():
+    parsed = parse_react_response(
+        "思考：需要读取时间\n行动：system.current_time\n行动输入：{}"
+    )
+    assert parsed.action == "system.current_time"
+    assert parsed.arguments == {}
+    assert parsed.thought == "需要读取时间"
+    assert not parsed.is_final
+
+    final = parse_react_response("一些推理。\n最终答案：现在是 12:00。")
+    assert final.is_final
+    assert final.final_answer == "现在是 12:00。"
+
+
+def test_parse_react_response_extracts_json_surrounded_by_prose():
+    parsed = parse_react_response(
+        'Thought: search\nAction: web.search\n'
+        'Action Input: The JSON is {"query": "python"} as requested.'
+    )
+    assert parsed.arguments == {"query": "python"}
+    assert parsed.error is None
+
+
+def test_parse_react_response_repairs_single_quoted_python_literals():
+    parsed = parse_react_response(
+        "Thought: search\nAction: web.search\nAction Input: {'query': 'python'}"
+    )
+    assert parsed.arguments == {"query": "python"}
+    assert parsed.error is None
+
+
+def test_parse_react_response_reports_unclosed_json_as_action_error():
+    parsed = parse_react_response(
+        "Thought: search\nAction: web.search\nAction Input: {not json"
+    )
+    assert parsed.action == "web.search"
+    assert parsed.arguments is None
+    assert parsed.error is not None
+    assert "not valid JSON" in parsed.error
+
+
+@pytest.mark.asyncio
+async def test_unmarked_answer_retry_limit_accepts_answer_instead_of_looping():
+    llm = AlwaysUnmarkedAnswerLLM()
+    agent = ReActAgent(
+        "unmarked-limit-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(CurrentTimeTool())
+
+    answer = await agent.run_with_react(
+        "请查询一下更新日志",
+        max_rounds=None,
+        defer_tool_loading=False,
+    )
+
+    assert answer.startswith("我直接根据记忆回答")
+    # 3 protocol corrections, then the answer is accepted on the next round.
+    assert llm.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_malformed_action_repetition_stops_with_repeat_call_guard():
+    agent = ReActAgent(
+        "malformed-limit-test",
+        llm=AlwaysMalformedActionLLM(),
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(CurrentTimeTool())
+
+    with pytest.raises(RuntimeError, match="repeated more than three times"):
+        await agent.run_with_react(
+            "现在是什么时候",
+            max_rounds=None,
+            defer_tool_loading=False,
+        )
 
 
 @pytest.mark.asyncio

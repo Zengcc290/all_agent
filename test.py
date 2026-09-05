@@ -30,7 +30,7 @@ async def main():
             continue
 
         try:
-            answer = await agent.run_with_react(
+            answer = await agent.run_auto(
                 query,
                 # Agent 默认复用同一 profile 的历史；/clear 可显式清空。
                 use_history=True,
