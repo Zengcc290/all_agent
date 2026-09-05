@@ -453,7 +453,7 @@ class ReActAgent(Agent):
         messages: str | Sequence[Mapping[str, Any]],
         context: ExecutionContext | None = None,
         *,
-        max_rounds: int = 100,
+        max_rounds: int | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         timeout: float = 60,
@@ -490,7 +490,7 @@ class ReActAgent(Agent):
         messages: str | Sequence[Mapping[str, Any]],
         context: ExecutionContext | None = None,
         *,
-        max_rounds: int = 100,
+        max_rounds: int | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         timeout: float = 60,
@@ -516,12 +516,12 @@ class ReActAgent(Agent):
         else:
             raise TypeError("messages must be a string or sequence of mappings")
 
-        if (
+        if max_rounds is not None and (
             isinstance(max_rounds, bool)
             or not isinstance(max_rounds, int)
             or max_rounds < 1
         ):
-            raise ValueError("max_rounds must be a positive integer")
+            raise ValueError("max_rounds must be None or a positive integer")
         if context is None:
             context = ExecutionContext()
         elif not isinstance(context, ExecutionContext):
@@ -581,7 +581,9 @@ class ReActAgent(Agent):
                 selected_model or getattr(completion_llm, "model", None),
                 mode="react",
             )
-        for round_number in range(1, max_rounds + 1):
+        round_number = 0
+        while max_rounds is None or round_number < max_rounds:
+            round_number += 1
             log_react_round_started(round_number, max_rounds)
             if self.lazy_tools:
                 for name in loaded_order:

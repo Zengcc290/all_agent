@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -206,8 +207,7 @@ class ToolCatalogTool(BaseTool):
                 and stored["schema_hash"] == spec.schema_hash
             }
 
-        normalized_intent = intent.casefold()
-        terms = set(normalized_intent.replace(".", " ").split())
+        terms = self._intent_terms(intent)
         ranked = []
         for spec in active.values():
             haystack = " ".join((spec.name, spec.description, *spec.tags)).casefold()
@@ -215,6 +215,40 @@ class ToolCatalogTool(BaseTool):
             ranked.append((score, spec))
         ranked.sort(key=lambda item: (-item[0], item[1].name))
         return [spec for score, spec in ranked if not terms or score > 0][:limit]
+
+    @staticmethod
+    def _intent_terms(intent: str) -> set[str]:
+        """Turn English and common Chinese capability wording into search terms.
+
+        Models frequently describe a capability in the user's language while
+        tool contracts are written in English.  Splitting only on ASCII spaces
+        makes a Chinese intent one giant token, so every lookup misses and the
+        model retries the same catalog action.  Keep this deterministic and
+        deliberately small: the aliases describe capability words, not user
+        data or arbitrary SQL.
+        """
+
+        normalized = intent.casefold().replace(".", " ")
+        terms = set(re.findall(r"[a-z0-9_-]+", normalized))
+        aliases = {
+            "日志": ("log", "update-log", "audit"),
+            "记录": ("log", "update-log", "audit"),
+            "读取": ("read", "retrieve", "get"),
+            "查看": ("read", "retrieve", "get"),
+            "查询": ("read", "retrieve", "search", "get"),
+            "参数": ("schema", "spec", "catalog"),
+            "工具": ("tool",),
+            "列表": ("list", "search", "catalog"),
+            "全部": ("all", "bulk"),
+            "时间": ("time", "current"),
+            "搜索": ("search",),
+            "网页": ("web", "search"),
+            "记忆": ("memory", "rag"),
+        }
+        for chinese, expansions in aliases.items():
+            if chinese in normalized:
+                terms.update(expansions)
+        return terms
 
     @staticmethod
     def _full_stored_spec(stored: dict[str, Any], generation: int) -> dict[str, Any]:

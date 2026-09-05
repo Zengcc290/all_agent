@@ -11,6 +11,8 @@ from core import (
     discover_tools,
 )
 from tool.update_log import UpdateLogInput, UpdateLogTool
+from tool.read_update_log import ReadUpdateLogInput, ReadUpdateLogTool
+from tool.read_update_logs import ReadUpdateLogsInput, ReadUpdateLogsTool
 
 
 def _payload() -> dict:
@@ -59,6 +61,34 @@ def test_update_log_tool_returns_compact_acknowledgement():
     assert output.next_update_id == 2
     assert output.recorded is True
     assert repository.get(output.update_id)["executor"] == "test-ai"
+    repository.close()
+
+
+def test_read_update_log_reports_current_highest_id_for_sequential_audits():
+    repository = UpdateLogRepository(":memory:")
+    writer = UpdateLogTool(repository)
+    writer.execute(UpdateLogInput(**_payload()))
+    writer.execute(UpdateLogInput(**_payload()))
+
+    record = ReadUpdateLogTool(repository).execute(ReadUpdateLogInput(update_id=1))
+
+    assert record.update_id == 1
+    assert record.latest_update_id == 2
+    repository.close()
+
+
+def test_read_update_logs_loops_over_a_range_in_one_tool_call():
+    repository = UpdateLogRepository(":memory:")
+    writer = UpdateLogTool(repository)
+    writer.execute(UpdateLogInput(**_payload()))
+    writer.execute(UpdateLogInput(**_payload()))
+
+    result = ReadUpdateLogsTool(repository).execute(
+        ReadUpdateLogsInput(start_id=1, end_id=2)
+    )
+
+    assert [record.update_id for record in result.records] == [1, 2]
+    assert result.latest_update_id == 2
     repository.close()
 
 

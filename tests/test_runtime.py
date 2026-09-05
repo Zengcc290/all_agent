@@ -56,9 +56,7 @@ def test_successful_registration_logs_all_active_tool_names(capsys):
 
     output = capsys.readouterr().out
 
-    assert "Tool registered: test.echo" in output
-    assert "Tool registered: test.permissioned_echo" in output
-    assert "Current registered tools: test.echo, test.permissioned_echo" in output
+    assert output == ""
 
 
 class DelayTool(EchoTool):

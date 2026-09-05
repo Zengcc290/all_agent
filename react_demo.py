@@ -173,7 +173,7 @@ def main() -> None:
     answer = agent.run(
         query,
         context=context,
-        max_rounds=8,
+        max_rounds=None,
         temperature=0.2,
         timeout=120,
     )

@@ -32,59 +32,32 @@ def log_tool_registration(
     generation: int | None,
     registered_names: Iterable[str],
 ) -> None:
-    """Record one successful registration and the complete active name list."""
-
-    names = _tool_names(registered_names)
-    generation_text = str(generation) if generation is not None else "metadata-only"
-    LOGGER.info(
-        "Tool registered: %s (generation: %s). Current registered tools: %s",
-        tool_name,
-        generation_text,
-        ", ".join(names) or "无",
-    )
+    """Keep tool registration silent in the user-facing activity stream."""
 
 
 def log_discovery_summary(package: str, registered_names: Iterable[str]) -> None:
-    """Record all tool names successfully handled by one discovery scan."""
-
-    names = _tool_names(registered_names)
-    if names:
-        LOGGER.info(
-            "Tool discovery complete: package %s; successfully registered tools: %s",
-            package,
-            ", ".join(names),
-        )
+    """Keep discovery details out of the user-facing activity stream."""
 
 
-def log_react_round_started(round_number: int, max_rounds: int) -> None:
-    """Display the ReAct round currently in progress."""
-
-    LOGGER.info("ReAct round %d/%d started.", round_number, max_rounds)
+def log_react_round_started(round_number: int, max_rounds: int | None) -> None:
+    """Rounds are internal control flow and are intentionally not displayed."""
 
 
 def log_model_completed(round_number: int, elapsed_seconds: float) -> None:
-    """Display model latency without logging its raw response."""
-
-    LOGGER.info(
-        "ReAct round %d model completed in %.2fs.", round_number, elapsed_seconds
-    )
+    """Model latency is intentionally omitted from the activity stream."""
 
 
 def log_react_thought(round_number: int, thought: str) -> None:
-    """Display the model's parsed Thought in one readable line."""
+    """Display only the model's current thought."""
 
-    LOGGER.info("ReAct round %d thought: %s", round_number, _clean_text(thought))
+    LOGGER.info("模型思考：%s", _clean_text(thought))
 
 
 def log_tool_call_started(round_number: int, tool_names: Iterable[str]) -> None:
     """Display only the tool names about to be executed."""
 
     names = _tool_names(tool_names)
-    LOGGER.info(
-        "ReAct round %d calling tools: %s.",
-        round_number,
-        ", ".join(names) or "none",
-    )
+    LOGGER.info("调用工具：%s", ", ".join(names) or "无")
 
 
 def log_tool_call_completed(
@@ -92,31 +65,15 @@ def log_tool_call_completed(
     tool_names: Iterable[str],
     elapsed_seconds: float,
 ) -> None:
-    """Display tool latency without logging tool arguments or return values."""
-
-    names = _tool_names(tool_names)
-    LOGGER.info(
-        "ReAct round %d tools completed in %.2fs: %s.",
-        round_number,
-        elapsed_seconds,
-        ", ".join(names) or "none",
-    )
+    """Tool latency and return values are intentionally omitted."""
 
 
 def log_react_final_answer(round_number: int, answer: str) -> None:
-    """Display the final response in one readable line."""
-
-    LOGGER.info(
-        "ReAct round %d final answer: %s", round_number, _clean_text(answer)
-    )
+    """The final answer is already returned to the caller; keep it silent."""
 
 
 def log_react_parse_issue(round_number: int, issue: str) -> None:
-    """Display a concise parse failure so the next round is explainable."""
-
-    LOGGER.info(
-        "ReAct round %d parse issue: %s", round_number, _clean_text(issue)
-    )
+    """Protocol recovery details are intentionally omitted."""
 
 
 def _tool_names(names: Iterable[str]) -> list[str]:

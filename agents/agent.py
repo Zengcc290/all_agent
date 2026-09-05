@@ -218,7 +218,7 @@ class Agent(ABC):
         messages: list[dict[str, Any]],
         context: ExecutionContext | None = None,
         *,
-        max_rounds: int = 8,
+        max_rounds: int | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         timeout: float = 60,
@@ -232,12 +232,12 @@ class Agent(ABC):
         enable_prompt_cache: bool = True,
     ) -> str:
         """Run the model/tool protocol until the model emits a final answer."""
-        if (
+        if max_rounds is not None and (
             isinstance(max_rounds, bool)
             or not isinstance(max_rounds, int)
             or max_rounds < 1
         ):
-            raise ValueError("max_rounds must be a positive integer")
+            raise ValueError("max_rounds must be None or a positive integer")
         if not isinstance(messages, (list, tuple)) or not all(
             isinstance(message, Mapping) for message in messages
         ):
@@ -299,7 +299,9 @@ class Agent(ABC):
                 mode="native",
             )
 
-        for _ in range(max_rounds):
+        round_number = 0
+        while max_rounds is None or round_number < max_rounds:
+            round_number += 1
             current_snapshot = self.tools.snapshot()
             registrations = {
                 name: current_snapshot[name]

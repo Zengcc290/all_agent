@@ -287,9 +287,7 @@ def test_lazy_registration_logs_all_persisted_tool_names(capsys):
     agent.register_tool(EchoTool())
 
     output = capsys.readouterr().out
-    assert (
-        "Current registered tools: system.tool_catalog, test.react_echo" in output
-    )
+    assert output == ""
     instruction = agent._with_tool_instructions([], agent.tools.snapshot())
     assert (
         "All registered tool names: system.tool_catalog, test.react_echo"
@@ -376,13 +374,10 @@ async def test_react_logs_progress_and_each_round_result(capsys):
 
     output = capsys.readouterr().out
     assert answer == "done"
-    assert "ReAct round 1/3 started." in output
-    assert "ReAct round 1 model completed in" in output
-    assert "ReAct round 1 thought: use the echo tool" in output
-    assert "ReAct round 1 calling tools: test.react_echo." in output
-    assert "ReAct round 1 tools completed in" in output
-    assert "ReAct round 2/3 started." in output
-    assert "ReAct round 2 final answer: done" in output
+    assert "模型思考：use the echo tool" in output
+    assert "调用工具：test.react_echo" in output
+    assert "ReAct round" not in output
+    assert "model completed" not in output
     assert "Action Input" not in output
     assert '"value": 7' not in output
     assert all(
@@ -502,6 +497,24 @@ async def test_react_logs_native_tool_names_and_duration(capsys):
 
     output = capsys.readouterr().out
     assert answer == "done"
-    assert "ReAct round 1 calling tools: test.react_echo." in output
-    assert "ReAct round 1 tools completed in" in output
+    assert "调用工具：test.react_echo" in output
+    assert "ReAct round" not in output
     assert '"value": 7' not in output
+
+
+@pytest.mark.asyncio
+async def test_react_accepts_unlimited_rounds_when_max_rounds_is_none():
+    llm = ReActLoggingLLM()
+    agent = ReActAgent(
+        "unlimited-rounds-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(EchoTool())
+
+    answer = await agent.run_with_react(
+        "echo 7", max_rounds=None, defer_tool_loading=False
+    )
+
+    assert answer == "done"

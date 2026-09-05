@@ -59,6 +59,13 @@ class ReadUpdateLogOutput(BaseModel):
     )
     risks: str = Field(min_length=1, max_length=4000, description="Known risks and rollback notes")
     follow_up: str = Field(min_length=1, max_length=4000, description="Remaining work, or none")
+    latest_update_id: int = Field(
+        ge=0,
+        description=(
+            "Current highest stored update ID. Read entries one at a time from 1 "
+            "through this value when auditing the complete history."
+        ),
+    )
 
 
 class ReadUpdateLogTool(BaseTool):
@@ -69,7 +76,8 @@ class ReadUpdateLogTool(BaseTool):
         description=(
             "Retrieve one complete project update-log record by its positive update ID "
             "for targeted audits or troubleshooting. It is read-only and never lists "
-            "or returns the historical log in bulk."
+            "or returns the historical log in bulk. Each result also reports the current "
+            "highest ID so a caller can read entries sequentially from 1 through that ID."
         ),
         version="1.0",
         input_model=ReadUpdateLogInput,
@@ -92,6 +100,7 @@ class ReadUpdateLogTool(BaseTool):
         record = self.repository.get(arguments.update_id)
         if record is None:
             raise LookupError(f"update log entry {arguments.update_id} was not found")
+        record["latest_update_id"] = self.repository.latest_id()
         return ReadUpdateLogOutput(**record)
 
 

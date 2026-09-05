@@ -43,6 +43,23 @@ def test_catalog_resolve_requires_a_matching_intent():
         catalog.execute(CatalogInput(action="resolve"))
 
 
+def test_catalog_resolve_matches_chinese_capability_intent():
+    registry = ToolRegistry()
+    registry.register(SearchTool(base_url="https://example.invalid"))
+    from tool.read_update_log import ReadUpdateLogTool
+
+    registry.register(ReadUpdateLogTool())
+    catalog = ToolCatalogTool(registry)
+
+    result = catalog.execute(
+        CatalogInput(action="resolve", intent="读取日志工具的准确参数")
+    )
+
+    assert result.spec is not None
+    assert result.spec["tool_name"] == "system.read_update_log"
+    assert result.spec["input_schema"]["properties"]["update_id"]["type"] == "integer"
+
+
 def test_catalog_resolve_returns_all_matching_specs():
     registry = ToolRegistry()
     first = SearchTool(base_url="https://example.invalid")

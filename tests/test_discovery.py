@@ -106,10 +106,7 @@ def create_tool():
     )
     assert len(report.errors) == 1
     assert "create_tool" in report.errors[0].error
-    assert (
-        "Tool discovery complete: package sample_tools; "
-        "successfully registered tools: plugin.echo" in output
-    )
+    assert output == ""
     stored = repository.get("plugin.echo", "1.2.3")
     assert stored["implementation_ref"].endswith(":PluginTool")
 
