@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Mapping
 
-from .config import MemoryConfig
-from .embeddings import BaseEmbedding, TFIDFEmbedding
-from .memory_types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
-from .models import MemoryItem, MemorySearchResult, MemoryType
+from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType
+from .embedding import BaseEmbedding, TFIDFEmbedding
 from .storage import BaseDocumentStore, BaseVectorStore, InMemoryVectorStore, Neo4jGraphStore, QdrantVectorStore, SQLiteDocumentStore
+from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
 
 
 class MemoryManager:
@@ -60,7 +58,7 @@ class MemoryManager:
         self.episodic = EpisodicMemory(**common)
         self.semantic = SemanticMemory(graph_store=self.graph_store, **common)
         self.perceptual = PerceptualMemory(**common)
-        self.memories: dict[MemoryType, Any] = {
+        self.memories: dict[MemoryType, BaseMemory] = {
             MemoryType.WORKING: self.working,
             MemoryType.EPISODIC: self.episodic,
             MemoryType.SEMANTIC: self.semantic,
@@ -70,7 +68,7 @@ class MemoryManager:
         for item in self.document_store.list():
             self.vector_store.upsert(item)
 
-    def for_type(self, memory_type: MemoryType | str) -> Any:
+    def for_type(self, memory_type: MemoryType | str) -> BaseMemory:
         try:
             return self.memories[MemoryType(memory_type)]
         except (KeyError, ValueError) as exc:
@@ -114,7 +112,7 @@ class MemoryManager:
         found: list[MemorySearchResult] = []
         for memory in self.memories.values():
             found.extend(memory.search(query, limit=per_type_limit, threshold=threshold, metadata=metadata))
-        found.sort(key=lambda result: (-result.score, result.item.created_at), reverse=False)
+        found.sort(key=lambda result: (-result.score, result.item.created_at))
         return found[:limit]
 
     query = search

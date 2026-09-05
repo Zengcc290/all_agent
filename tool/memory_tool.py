@@ -1,4 +1,9 @@
-"""Built-in Agent tool for storing and retrieving HelloAgents memories."""
+"""Built-in Agent tool for storing and retrieving agent memories.
+
+The default manager persists to ``MEMORY_DB_PATH`` (or ``memory.sqlite3``
+next to the project) so tool memories survive process restarts.  Applications
+that need a different backend can inject their own ``MemoryManager``.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core import BaseTool, ToolSpec
-from memory import MemoryConfig, MemoryManager, MemoryType
+from memory import MemoryConfig, MemoryManager, MemoryType, default_sqlite_path
 
 
 TOOL_ENABLED = True
@@ -66,11 +71,14 @@ class MemoryTool(BaseTool):
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:
-        self.manager = (
-            manager
-            if manager is not None
-            else MemoryManager(MemoryConfig(sqlite_path=":memory:"))
-        )
+        # Created lazily so importing/discovering the tool never opens SQLite.
+        self._manager = manager
+
+    @property
+    def manager(self) -> MemoryManager:
+        if self._manager is None:
+            self._manager = MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path()))
+        return self._manager
 
     def execute(self, arguments: MemoryToolInput) -> MemoryToolOutput:
         action = arguments.action

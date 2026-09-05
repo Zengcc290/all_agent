@@ -1,4 +1,9 @@
-"""Built-in Agent tool for retrieval augmented answers."""
+"""Built-in Agent tool for retrieval augmented answers.
+
+The default pipeline persists ingested documents to ``MEMORY_DB_PATH`` (or
+``memory.sqlite3`` next to the project); inject a custom ``RAGPipeline`` for
+different backends.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from core import BaseTool, ToolSpec
+from memory import MemoryConfig, MemoryManager, default_sqlite_path
 from memory.rag import RAGPipeline
 
 
@@ -51,7 +57,14 @@ class RAGTool(BaseTool):
     )
 
     def __init__(self, pipeline: RAGPipeline | None = None) -> None:
-        self.pipeline = pipeline if pipeline is not None else RAGPipeline()
+        # Created lazily so importing/discovering the tool never opens SQLite.
+        self._pipeline = pipeline
+
+    @property
+    def pipeline(self) -> RAGPipeline:
+        if self._pipeline is None:
+            self._pipeline = RAGPipeline(MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path())))
+        return self._pipeline
 
     def execute(self, arguments: RAGToolInput) -> RAGToolOutput:
         if arguments.action == "ingest":

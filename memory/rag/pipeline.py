@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
+from ..base import MemoryItem, MemorySearchResult, MemoryType
 from ..manager import MemoryManager
-from ..models import MemoryItem, MemorySearchResult, MemoryType
 from .document import Document, DocumentProcessor
 
 
