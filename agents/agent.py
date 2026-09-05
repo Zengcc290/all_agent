@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -27,6 +28,7 @@ from .llm import LLM
 from .providers import ProviderProfile, ProviderRegistry
 
 MAX_RETRIES = 3
+PROMPT_CACHE_KEY_VERSION = "pc-v1"
 
 
 class Agent(ABC):
@@ -171,7 +173,16 @@ class Agent(ABC):
     ) -> tuple[list[dict[str, Any]], dict[str, str]]:
         definitions = []
         aliases: dict[str, str] = {}
-        for tool, _ in registrations.values():
+        # A canonical lexical order keeps the ``tools`` request field byte-for-
+        # byte stable across runs and across agents that discovered modules in
+        # a different filesystem order.  Stable ordering is required for
+        # OpenAI prefix/KV cache reuse because tool definitions are part of the
+        # cached prompt prefix.
+        for name in sorted(
+            registrations,
+            key=lambda item: (item != self.catalog_tool.spec.name, item),
+        ):
+            tool, _ = registrations[name]
             spec = tool.spec
             alias = self._openai_tool_name(spec.name)
             if len(alias) > 64:
@@ -216,6 +227,9 @@ class Agent(ABC):
         provider_name: str | None = None,
         use_history: bool = False,
         defer_tool_loading: bool = False,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        enable_prompt_cache: bool = True,
     ) -> str:
         """Run the model/tool protocol until the model emits a final answer."""
         if (
@@ -236,6 +250,12 @@ class Agent(ABC):
             defer_tool_loading, bool
         ):
             raise TypeError("use_history and defer_tool_loading must be booleans")
+        if not isinstance(enable_prompt_cache, bool):
+            raise TypeError("enable_prompt_cache must be a boolean")
+        prompt_cache_key = self._validate_prompt_cache_key(prompt_cache_key)
+        prompt_cache_retention = self._validate_prompt_cache_retention(
+            prompt_cache_retention
+        )
 
         completion_llm, selected_model, history_key = self._completion_target(
             profile_name, model, provider_name=provider_name
@@ -271,6 +291,14 @@ class Agent(ABC):
             requested_names = None
             loaded_order = visible_order
 
+        cache_key = None
+        if enable_prompt_cache:
+            cache_key = prompt_cache_key or self._default_prompt_cache_key(
+                history_key,
+                selected_model or getattr(completion_llm, "model", None),
+                mode="native",
+            )
+
         for _ in range(max_rounds):
             current_snapshot = self.tools.snapshot()
             registrations = {
@@ -287,6 +315,10 @@ class Agent(ABC):
                 "timeout": timeout,
                 "stream": False,
             }
+            if cache_key is not None:
+                completion_options["prompt_cache_key"] = cache_key
+            if prompt_cache_retention is not None:
+                completion_options["prompt_cache_retention"] = prompt_cache_retention
             if tool_definitions:
                 completion_options["tools"] = tool_definitions
             response = await asyncio.to_thread(
@@ -441,6 +473,75 @@ class Agent(ABC):
             },
             *conversation,
         ]
+
+    @staticmethod
+    def _validate_prompt_cache_key(value: str | None) -> str | None:
+        """Validate an OpenAI prompt-cache routing key.
+
+        OpenAI currently limits this key to 64 characters.  Keeping the
+        validation in the agent as well as :class:`LLM` makes injected/fake
+        clients observe the same contract as the real SDK client.
+        """
+
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip() or len(value) > 64:
+            raise ValueError(
+                "prompt_cache_key must be a non-empty string of at most 64 characters"
+            )
+        return value.strip()
+
+    @staticmethod
+    def _validate_prompt_cache_retention(value: str | None) -> str | None:
+        if value is not None and value not in {"in_memory", "24h"}:
+            raise ValueError(
+                "prompt_cache_retention must be 'in_memory', '24h', or None"
+            )
+        return value
+
+    def _default_prompt_cache_key(
+        self,
+        provider_key: str,
+        model: str | None,
+        *,
+        mode: str,
+    ) -> str:
+        """Build a deterministic key for the stable prompt prefix.
+
+        The key intentionally excludes user text, tool results, and loaded
+        catalog schemas.  Those values belong after the reusable prefix and
+        must not fragment the provider's prefix-cache routing.  Tool names are
+        sorted and repository-backed names are included so lazy loading keeps
+        the same key across rounds.
+        """
+
+        names = set(self.tools.snapshot())
+        if self.repository is not None:
+            names.update(self.repository.active_tool_names())
+        material = {
+            "version": PROMPT_CACHE_KEY_VERSION,
+            "provider": provider_key,
+            "model": model or "",
+            "mode": mode,
+            "configured_prompt": self._configured_prompt_messages(),
+            "tool_names": sorted(names),
+        }
+        # ReAct keeps its protocol instructions in class constants.  Include
+        # them in the digest when present so a prompt-template deployment
+        # change naturally starts a new cache namespace.
+        if mode == "react":
+            material["react_instructions"] = [
+                getattr(self, "REACT_INSTRUCTIONS", ""),
+                getattr(self, "CATALOG_FIRST_REACT_INSTRUCTIONS", ""),
+            ]
+        encoded = json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()[:48]
+        return f"{PROMPT_CACHE_KEY_VERSION}-{digest}"
 
     @property
     def profiles(self) -> Mapping[str, ProviderProfile]:

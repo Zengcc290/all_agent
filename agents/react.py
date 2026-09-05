@@ -251,32 +251,25 @@ class ReActAgent(Agent):
     """
 
     REACT_INSTRUCTIONS = (
-        "You are a ReAct agent. Work in short, explicit steps. When a tool is "
-        "needed, respond exactly with:\n"
-        "Thought: brief reasoning text\n"
-        "Action: exact tool name\n"
-        "Action Input: one JSON object\n"
-        "Wait for an Observation before taking another action. When the task is "
-        "complete, respond with:\nFinal Answer: your final response. Never put an "
-        "Observation in your own response. Use only the listed tool names and "
-        "JSON object inputs. Do not output placeholder text such as <answer>.\n\n"
-        "Use a listed tool directly when its complete schema is available. The "
+        "You are a ReAct agent. Keep each step short. If a tool is needed, emit "
+        "exactly:\nThought: brief reason\nAction: exact tool name\nAction Input: "
+        "one JSON object\nWait for an Observation before the next step. When done, "
+        "emit Final Answer: followed by the answer. Never invent an Observation, "
+        "tool name, or non-object input; never emit placeholders such as <answer>. "
+        "Use a listed tool directly when its complete schema is available; the "
         "catalog/discovery tool is optional in that mode."
     )
 
     CATALOG_FIRST_REACT_INSTRUCTIONS = (
-        "Every name in `All registered tool names` is already registered and usable. "
-        "That list is a capability index; a name without an Action Input schema in "
-        "this request is not unavailable or blocked. Before calling any listed tool "
-        "other than the catalog/discovery tool whose schema has not been provided, "
-        "first call the catalog/discovery tool with `action`: `resolve` and an `intent` describing "
-        "the capability you need (for example `web search`, `read a file`, or `send "
-        "email`), never the user's actual subject/query. Catalog resolution only "
-        "retrieves a tool contract; it is not a registration, permission, or access "
-        "request. After its Observation returns the schema, call the resolved tool "
-        "with the user's words in its input. Do not claim that a tool is unavailable "
-        "merely because a catalog lookup failed; correct the capability intent and "
-        "retry. Resolve multiple capabilities together with `limit`: 20 when possible."
+        "Every name in `All registered tool names` is already registered and usable; "
+        "the list is an index, not a schema. If a needed tool has no Action Input "
+        "schema, first call the catalog/discovery tool with `action`: `resolve` and "
+        "an intent describing the capability (for example `web search`, `read a file`, "
+        "or `send email`), never the user's actual subject/query. Resolution only "
+        "retrieves a contract; it is not registration or permission. After the "
+        "Observation, call the resolved tool with the user's words. If lookup fails, "
+        "correct the capability intent and retry. Resolve multiple capabilities with "
+        "`limit`: 20 when possible."
     )
     # Keep the old public constant as a compatibility alias for callers that
     # customized the previous lazy-loading prompt.
@@ -469,6 +462,9 @@ class ReActAgent(Agent):
         provider_name: str | None = None,
         use_history: bool = False,
         defer_tool_loading: bool = True,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        enable_prompt_cache: bool = True,
     ) -> str:
         """Run one textual ReAct conversation to a final answer."""
 
@@ -484,6 +480,9 @@ class ReActAgent(Agent):
             provider_name=provider_name,
             use_history=use_history,
             defer_tool_loading=defer_tool_loading,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+            enable_prompt_cache=enable_prompt_cache,
         )
 
     async def run_with_react(
@@ -500,6 +499,9 @@ class ReActAgent(Agent):
         provider_name: str | None = None,
         use_history: bool = False,
         defer_tool_loading: bool = True,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        enable_prompt_cache: bool = True,
     ) -> str:
         if isinstance(messages, str):
             if not messages.strip():
@@ -528,6 +530,12 @@ class ReActAgent(Agent):
             defer_tool_loading, bool
         ):
             raise TypeError("use_history and defer_tool_loading must be booleans")
+        if not isinstance(enable_prompt_cache, bool):
+            raise TypeError("enable_prompt_cache must be a boolean")
+        prompt_cache_key = self._validate_prompt_cache_key(prompt_cache_key)
+        prompt_cache_retention = self._validate_prompt_cache_retention(
+            prompt_cache_retention
+        )
 
         completion_llm, selected_model, history_key = self._completion_target(
             profile_name, model, provider_name=provider_name
@@ -566,6 +574,13 @@ class ReActAgent(Agent):
         else:
             loaded_order = visible_order
             requested_names = None
+        cache_key = None
+        if enable_prompt_cache:
+            cache_key = prompt_cache_key or self._default_prompt_cache_key(
+                history_key,
+                selected_model or getattr(completion_llm, "model", None),
+                mode="react",
+            )
         for round_number in range(1, max_rounds + 1):
             log_react_round_started(round_number, max_rounds)
             if self.lazy_tools:
@@ -578,7 +593,13 @@ class ReActAgent(Agent):
                 for name in loaded_order
                 if name in current_snapshot
             }
-            for name, (tool, _) in registrations.items():
+            # Keep schema blocks deterministic; their serialized order is
+            # part of the provider's prefix-cache key.
+            for name in sorted(
+                registrations,
+                key=lambda item: (item != self.catalog_tool.spec.name, item),
+            ):
+                tool, _ = registrations[name]
                 loaded_tool_schemas.setdefault(name, tool.spec.input_schema)
             conversation_for_request = self._with_tool_instructions(
                 conversation,
@@ -592,6 +613,10 @@ class ReActAgent(Agent):
                 "timeout": timeout,
                 "stream": False,
             }
+            if cache_key is not None:
+                options["prompt_cache_key"] = cache_key
+            if prompt_cache_retention is not None:
+                options["prompt_cache_retention"] = prompt_cache_retention
             model_started_at = time.perf_counter()
             response = await asyncio.to_thread(
                 self._complete_text_or_response,
@@ -792,7 +817,12 @@ class ReActAgent(Agent):
                 lines.append(f"- {name}: {tool.spec.model_description}")
                 lines.append(
                     "  Action Input schema: "
-                    + json.dumps(schema, ensure_ascii=False, sort_keys=True)
+                    + json.dumps(
+                        schema,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
                 )
         resolved_schemas = {
             name: schema
@@ -807,7 +837,12 @@ class ReActAgent(Agent):
                 )
                 lines.append(
                     f"- {name}: "
-                    + json.dumps(schema, ensure_ascii=False, sort_keys=True)
+                    + json.dumps(
+                        schema,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
                 )
         instruction = {"role": "system", "content": "\n".join(lines)}
         return [instruction, *conversation]
@@ -923,18 +958,31 @@ class ReActAgent(Agent):
         think_options = {
             key: value
             for key, value in options.items()
-            if key in {"temperature", "timeout"}
+            if key in {
+                "temperature",
+                "timeout",
+                "prompt_cache_key",
+                "prompt_cache_retention",
+            }
         }
         # ``think`` returns collected text for the project's LLM wrapper.
         try:
             parameters = inspect.signature(think).parameters
         except (TypeError, ValueError):
             parameters = {}
-        if "stream_response_bool" in parameters or any(
+        accepts_var_kw = any(
             parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in parameters.values()
-        ):
+        )
+        if "stream_response_bool" in parameters or accepts_var_kw:
             think_options["stream_response_bool"] = False
+        if not accepts_var_kw:
+            # A legacy ``think`` implementation may not accept the cache
+            # hints.  Keep the compatibility path permissive while the
+            # native ``complete`` path remains fully cache-aware.
+            for key in ("prompt_cache_key", "prompt_cache_retention"):
+                if key not in parameters:
+                    think_options.pop(key, None)
         return think(messages, **think_options)
 
     @staticmethod

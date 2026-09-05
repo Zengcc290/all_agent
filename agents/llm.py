@@ -9,7 +9,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 class LLM:
-    """Small OpenAI-compatible client wrapper for one resolved profile."""
+    """Small OpenAI-compatible client wrapper for one resolved profile.
+
+    ``complete`` forwards OpenAI's prompt-cache routing fields when supplied.
+    Callers can therefore keep a stable cache key across turns while older
+    compatible gateways continue to work when the fields are omitted.
+    """
 
     def __init__(
         self,
@@ -69,6 +74,8 @@ class LLM:
         temperature: float = 0.7,
         timeout: float = 60,
         stream_response_bool: bool = True,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
         **kwargs: Any,
     ) -> str:
         response = self.complete(
@@ -76,6 +83,8 @@ class LLM:
             temperature=temperature,
             timeout=timeout,
             stream=stream_response_bool,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
             **kwargs,
         )
         if stream_response_bool:
@@ -90,6 +99,8 @@ class LLM:
         temperature: float = 0.7,
         timeout: float = 60,
         stream: bool = False,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
         **kwargs: Any,
     ) -> Any:
         if (
@@ -107,23 +118,49 @@ class LLM:
             raise ValueError("temperature must be a finite number")
         if not isinstance(stream, bool):
             raise TypeError("stream must be a boolean")
+        if prompt_cache_key is not None:
+            if (
+                not isinstance(prompt_cache_key, str)
+                or not prompt_cache_key.strip()
+                or len(prompt_cache_key) > 64
+            ):
+                raise ValueError(
+                    "prompt_cache_key must be a non-empty string of at most 64 characters"
+                )
+            prompt_cache_key = prompt_cache_key.strip()
+        if prompt_cache_retention is not None:
+            if prompt_cache_retention not in {"in_memory", "24h"}:
+                raise ValueError(
+                    "prompt_cache_retention must be 'in_memory', '24h', or None"
+                )
         reserved = {
             "messages",
             "model",
             "temperature",
             "stream",
             "timeout",
+            "prompt_cache_key",
+            "prompt_cache_retention",
         } & kwargs.keys()
         if reserved:
             raise TypeError(
                 f"reserved completion arguments cannot be overridden: {', '.join(sorted(reserved))}"
             )
+        options: dict[str, Any] = {
+            "model": model or self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": stream,
+            "timeout": timeout,
+        }
+        # These are first-class OpenAI Chat Completions parameters.  Omitting
+        # them when unset keeps older OpenAI-compatible gateways working.
+        if prompt_cache_key is not None:
+            options["prompt_cache_key"] = prompt_cache_key
+        if prompt_cache_retention is not None:
+            options["prompt_cache_retention"] = prompt_cache_retention
         return self.client.chat.completions.create(
-            model=model or self.model,
-            messages=messages,
-            temperature=temperature,
-            stream=stream,
-            timeout=timeout,
+            **options,
             **kwargs,
         )
 
