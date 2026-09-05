@@ -1,4 +1,4 @@
-"""Tests for the on-demand skill subsystem (skills/<name>/SKILL.md)."""
+"""Tests for the on-demand skill subsystem (one file per skill)."""
 
 import json
 from pathlib import Path
@@ -31,10 +31,10 @@ Follow the numbered structure.
 
 
 def write_skill(root: Path, name: str, content: str) -> Path:
-    directory = root / name
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "SKILL.md").write_text(content, encoding="utf-8")
-    return directory
+    skill_file = root / f"{name}.md"
+    skill_file.parent.mkdir(parents=True, exist_ok=True)
+    skill_file.write_text(content, encoding="utf-8")
+    return skill_file
 
 
 @pytest.fixture
@@ -114,33 +114,49 @@ class TestSkillRegistry:
 
 
 class TestSkillDiscovery:
-    def test_discovers_and_reports_disabled_and_ignored(self, skills_root: Path):
+    def test_discovers_flat_files_and_reports_disabled_and_ignored(
+        self, skills_root: Path
+    ):
         write_skill(
             skills_root,
             "off-skill",
             "---\ndescription: d\nenabled: false\n---\nbody\n",
         )
-        (skills_root / "stray-file.txt").write_text("not a dir", encoding="utf-8")
-        (skills_root / "empty-dir").mkdir()
+        (skills_root / "stray-file.txt").write_text("not a skill", encoding="utf-8")
+        (skills_root / "README.md").write_text("authoring guide", encoding="utf-8")
         registry = SkillRegistry()
         report = discover_skills(registry, root=skills_root)
         statuses = {r.name: r.status for r in report.records}
         assert statuses["weekly-report"] == "registered"
         assert statuses["paper-review"] == "registered"
         assert statuses["off-skill"] == "disabled"
+        # Non-markdown files are ignored; README.md is a reserved name.
         assert statuses["stray-file.txt"] == "ignored"
-        # A directory without SKILL.md is a real error, not a silent skip.
-        assert statuses["empty-dir"] == "error"
-        assert report.errors[0].name == "empty-dir"
-        assert not report.ok
+        assert "README.md" not in statuses
+        assert report.ok
         assert set(registry.snapshot()) == {"weekly-report", "paper-review"}
+
+    def test_legacy_directory_layout_is_reported_with_hint(self, skills_root: Path):
+        legacy_dir = skills_root / "old-skill"
+        legacy_dir.mkdir()
+        (legacy_dir / "SKILL.md").write_text(
+            "---\ndescription: d\n---\nbody\n", encoding="utf-8"
+        )
+        registry = SkillRegistry()
+        report = discover_skills(registry, root=skills_root)
+        record = report.for_skill("old-skill")
+        assert record is not None and record.status == "error"
+        assert "old-skill.md" in (record.error or "")
+        assert not report.ok
+        assert "old-skill" not in registry.snapshot()
 
     def test_hash_changes_when_content_changes(self, skills_root: Path):
         registry = SkillRegistry()
         first_report = discover_skills(registry, root=skills_root)
+        assert first_report.ok
         first_hash = registry.get("weekly-report").content_hash
         assert len(first_hash) == 64
-        path = skills_root / "weekly-report" / "SKILL.md"
+        path = skills_root / "weekly-report.md"
         path.write_text(VALID_SKILL_MD + "\nextra line\n", encoding="utf-8")
         second_report = discover_skills(registry, root=skills_root, replace=True)
         assert second_report.ok
@@ -154,13 +170,18 @@ class TestSkillDiscovery:
             "unknown-key",
             "---\ndescription: d\nbogus: x\n---\nbody\n",
         )
+        write_skill(
+            skills_root,
+            "Bad-Name",
+            "---\ndescription: d\n---\nbody\n",
+        )
         registry = SkillRegistry()
         report = discover_skills(registry, root=skills_root)
         errors = {r.name for r in report.errors}
-        assert {"no-front", "unknown-key"} <= errors
+        assert {"no-front", "unknown-key", "Bad-Name"} <= errors
 
     def test_strict_scan_raises_skill_discovery_error(self, skills_root: Path):
-        (skills_root / "broken").mkdir()
+        write_skill(skills_root, "broken", "just body, no frontmatter\n")
         registry = SkillRegistry()
         with pytest.raises(SkillDiscoveryError):
             discover_skills(registry, root=skills_root, strict=True)
@@ -181,9 +202,10 @@ class TestSkillCatalogTool:
         listed = tool.execute(SkillCatalogInput(action="list"))
         names = [entry["skill_name"] for entry in listed.skills]
         assert names == ["paper-review", "weekly-report"]
-        # Directory entries carry metadata only, never SKILL.md bodies.
+        # Directory entries carry metadata only, never skill file bodies.
         assert all(entry["description"] for entry in listed.skills)
         assert all("SKILL.md" not in json.dumps(entry) for entry in listed.skills)
+        assert all("numbered structure" not in json.dumps(entry) for entry in listed.skills)
 
         viewed = tool.execute(
             SkillCatalogInput(action="view", skill_name="weekly-report")
@@ -200,36 +222,6 @@ class TestSkillCatalogTool:
         tool = SkillCatalogTool(SkillRegistry())
         with pytest.raises(ValueError, match="skill_name is required"):
             tool.execute(SkillCatalogInput(action="view"))
-
-    def test_read_reference_blocks_traversal_and_missing_files(
-        self, skills_root: Path
-    ):
-        registry = SkillRegistry()
-        discover_skills(registry, root=skills_root)
-        tool = SkillCatalogTool(registry, root=skills_root)
-        references = skills_root / "weekly-report" / "references"
-        references.mkdir()
-        (references / "guide.md").write_text("reference body", encoding="utf-8")
-
-        result = tool.execute(
-            SkillCatalogInput(
-                action="read_reference",
-                skill_name="weekly-report",
-                reference_path="references/guide.md",
-            )
-        )
-        assert result.reference_content == "reference body"
-        assert result.reference_path == "references/guide.md"
-
-        for bad in ("../../etc/passwd", "references/missing.md", "."):
-            with pytest.raises((ValueError, FileNotFoundError)):
-                tool.execute(
-                    SkillCatalogInput(
-                        action="read_reference",
-                        skill_name="weekly-report",
-                        reference_path=bad,
-                    )
-                )
 
 
 class TestAgentIntegration:
@@ -257,8 +249,6 @@ class TestAgentIntegration:
         assert agent.skill_discovery_report.ok
 
     def test_skill_catalog_tool_executes_through_registry(self, skills_root: Path):
-        import asyncio
-
         agent = self._make_agent(skills_root)
         registration = agent.tools.resolve("system.skill_catalog")
         tool, _ = registration
@@ -293,7 +283,7 @@ class TestAgentIntegration:
     def test_prompt_cache_key_reflects_skill_changes(self, skills_root: Path):
         agent = self._make_agent(skills_root)
         key_before = agent._default_prompt_cache_key("p", "m", mode="native")
-        path = skills_root / "weekly-report" / "SKILL.md"
+        path = skills_root / "weekly-report.md"
         path.write_text(VALID_SKILL_MD + "\nchanged\n", encoding="utf-8")
         agent.discover_skills(replace=True)
         key_after = agent._default_prompt_cache_key("p", "m", mode="native")

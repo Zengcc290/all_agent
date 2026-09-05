@@ -1,7 +1,7 @@
 # Skills 指令包编写指南
 
 Skill 是**只读指令包**:模型按需阅读的 Markdown 玩法手册,不是可执行代码。
-Agent 启动时扫描本目录下的一级子目录,每个包含 `SKILL.md` 的子目录注册为一个 skill。
+**一个 skill 就是一个 `.md` 文件**,直接放在本目录下,文件名(去掉 `.md`)就是 skill 名。
 
 ## 运行机制(按需查看)
 
@@ -15,22 +15,19 @@ Agent 启动时扫描本目录下的一级子目录,每个包含 `SKILL.md` 的�
 
 ```
 skills/
-├── README.md            # 本文件
-├── skill_template/      # 模板(复制后改名,enabled: false 保持默认禁用)
-│   └── SKILL.md
-└── <skill-name>/
-    ├── SKILL.md         # 必需:frontmatter + 正文
-    └── references/      # 可选:参考文件,模型可用 read_reference 读取
-        └── example.md
+├── README.md            # 本文件(不会被当成 skill)
+├── skill-template.md    # 模板(enabled: false 保持默认禁用,复制后改名)
+├── paper-review.md      # 示例:论文审稿辅助
+└── weekly-report.md     # 示例:周报撰写
 ```
 
-## SKILL.md 格式
+## 文件格式
 
+文件名必须是 kebab-case ASCII(小写字母/数字/连字符,最长 64 字符)。
 frontmatter 使用最简单的 `key: value` 格式,以两行 `---` 包裹:
 
 ```markdown
 ---
-name 可省略;目录名就是 skill 名(小写字母/数字/连字符,最长 64 字符)
 description: 一行说明。写清"何时使用 + 覆盖什么内容",这是模型匹配的唯一依据。
 version: 1.0.0
 triggers: 触发词1, trigger two, 触发词三
@@ -50,6 +47,7 @@ enabled: true
 | `enabled` | 否 | `false` 时该 skill 被跳过(注册状态 `disabled`) |
 
 未知字段会直接报错(对齐工具契约的 `extra="forbid"` 风格),防止拼写错误静默丢失。
+frontmatter 后的全部内容(含 frontmatter 本身)就是 `view` 返回的正文。
 
 ## description 写法
 
@@ -61,5 +59,4 @@ enabled: true
 
 - 正文是**给模型读的指令**,不是给用户的文档;直接写步骤和示例。
 - skill 不会执行任何代码;需要可执行能力时请走 `tool/` 单文件工具协议。
-- `references/` 下的文件只能被 `system.skill_catalog`(`action: read_reference`)读取,
-  且路径不得越出 skill 目录(防路径穿越)。
+- 一个 skill 一个文件,内容很长时就在同一文件内用标题分节,模型会整篇阅读。

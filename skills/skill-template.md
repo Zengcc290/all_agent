@@ -17,8 +17,3 @@ enabled: false
 ## 示例
 
 (一个具体的输入/输出示例,帮助模型稳定复现期望行为。)
-
-## 参考文件(可选)
-
-需要更长的参考资料时,放到本目录 `references/` 下,并在正文里注明
-"详细信息调用 system.skill_catalog(action=read_reference) 读取 references/<文件名>"。

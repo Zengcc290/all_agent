@@ -235,7 +235,7 @@ class Agent(ABC):
             self.repository.save(self.catalog_tool.spec, replace=True)
         self.tool_discovery_report: ToolDiscoveryReport | None = None
         # Skills are read-only instruction packages: the registry keeps specs
-        # only, and the catalog tool reads SKILL.md content on demand.
+        # only, and the catalog tool reads the skill file content on demand.
         self.skills_root = skills_root
         self.skills = SkillRegistry()
         self.skill_catalog_tool = SkillCatalogTool(self.skills, root=skills_root)
@@ -647,7 +647,7 @@ class Agent(ABC):
 
         The message is deterministic for a fixed set of skills so the
         provider's prefix cache stays reusable across rounds. Only names,
-        descriptions, versions, and triggers belong here; SKILL.md content is
+        descriptions, versions, and triggers belong here; skill file content is
         deliberately excluded and loaded on demand through
         ``system.skill_catalog`` so it never fragments the cached prefix.
         """

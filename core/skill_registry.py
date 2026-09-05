@@ -3,7 +3,7 @@
 Unlike :class:`~core.registry.ToolRegistry`, this registry stores immutable
 metadata specs only. It intentionally does not keep content strings: content is
 read from disk by the catalog tool so a ``view`` call always reflects the
-current on-disk ``SKILL.md``.
+current on-disk skill file.
 """
 
 from __future__ import annotations

@@ -1,10 +1,12 @@
-"""Directory discovery for ``skills/<name>/SKILL.md`` instruction packages.
+"""Flat-file discovery for ``skills/<name>.md`` instruction packages.
 
 Scanning never imports or executes any Python code: a skill is pure
-documentation plus optional reference files. Only direct child directories of
-the skills root containing a ``SKILL.md`` are considered. A malformed skill
-produces an error record without hiding healthy siblings, matching the tool
-discovery contract.
+documentation stored as one Markdown file directly inside the skills root.
+The file stem is the skill name; the root ``README.md`` is skipped. A
+malformed skill produces an error record without hiding healthy siblings,
+matching the tool discovery contract. Legacy ``<name>/SKILL.md`` directories
+are reported as errors with a migration hint so old layouts cannot silently
+disappear.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from .skill_models import (
     MAX_DESCRIPTION_CHARS,
     MAX_TRIGGER_CHARS,
     MAX_VERSION_CHARS,
+    SKILL_NAME_PATTERN,
     SkillSpec,
 )
 
@@ -29,13 +32,15 @@ DiscoveryStatus = Literal[
     "error",
 ]
 
-SKILL_ENTRY_FILENAME = "SKILL.md"
+SKILL_FILE_SUFFIX = ".md"
+LEGACY_SKILL_ENTRY_FILENAME = "SKILL.md"
+README_FILENAME = "README.md"
 ENABLED_FIELD = "enabled"
 
 
 @dataclass(frozen=True)
 class SkillDiscoveryRecord:
-    """The discovery outcome for one candidate skill directory."""
+    """The discovery outcome for one candidate skill file."""
 
     name: str
     path: str | None
@@ -101,11 +106,12 @@ def discover_skills(
     replace: bool = False,
     strict: bool = False,
 ) -> SkillDiscoveryReport:
-    """Scan ``root`` and register one spec per valid ``<name>/SKILL.md``.
+    """Scan ``root`` and register one spec per valid ``<name>.md`` file.
 
-    Each directory must contain ``SKILL.md`` whose frontmatter starts with the
-    first ``---`` line and ends at the next ``---`` line. Unknown frontmatter
-    keys fail validation, mirroring the ``extra="forbid"`` tool contract. An
+    The file stem becomes the skill name and the whole file (frontmatter
+    plus body) is the viewable content. Frontmatter starts with the first
+    ``---`` line and ends at the next ``---`` line. Unknown frontmatter keys
+    fail validation, mirroring the ``extra="forbid"`` tool contract. An
     optional ``enabled: false`` key skips the skill without an error.
     """
 
@@ -133,30 +139,44 @@ def discover_skills(
 
     records: list[SkillDiscoveryRecord] = []
     for entry in sorted(root_path.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
+        if entry.is_dir():
+            if (entry / LEGACY_SKILL_ENTRY_FILENAME).is_file():
+                records.append(
+                    SkillDiscoveryRecord(
+                        name=entry.name,
+                        path=str(entry),
+                        status="error",
+                        error=(
+                            "legacy directory layout is no longer supported; "
+                            f"move {entry.name}/{LEGACY_SKILL_ENTRY_FILENAME} "
+                            f"to {entry.name}{SKILL_FILE_SUFFIX}"
+                        ),
+                    )
+                )
+            else:
+                records.append(
+                    SkillDiscoveryRecord(
+                        name=entry.name, path=str(entry), status="ignored"
+                    )
+                )
+            continue
+        if entry.suffix.lower() != SKILL_FILE_SUFFIX:
             records.append(
                 SkillDiscoveryRecord(
                     name=entry.name, path=str(entry), status="ignored"
                 )
             )
             continue
-        skill_file = entry / SKILL_ENTRY_FILENAME
-        if not skill_file.is_file():
-            records.append(
-                SkillDiscoveryRecord(
-                    name=entry.name,
-                    path=str(entry),
-                    status="error",
-                    error=f"missing {SKILL_ENTRY_FILENAME}",
-                )
-            )
+        if entry.name == README_FILENAME:
+            # The root authoring guide is not a skill; skip silently.
             continue
+        name = entry.stem
         try:
-            spec = _load_spec(entry.name, entry, skill_file)
+            spec = _load_spec(name, entry)
             if not spec:
                 records.append(
                     SkillDiscoveryRecord(
-                        name=entry.name,
+                        name=name,
                         path=str(entry),
                         status="disabled",
                     )
@@ -172,7 +192,7 @@ def discover_skills(
         except Exception as exc:  # noqa: BLE001
             records.append(
                 SkillDiscoveryRecord(
-                    name=entry.name,
+                    name=name,
                     path=str(entry),
                     status="error",
                     error=f"{type(exc).__name__}: {exc}",
@@ -195,9 +215,15 @@ def discover_skills(
     return report
 
 
-def _load_spec(name: str, directory: Path, skill_file: Path) -> SkillSpec | None:
-    """Parse one SKILL.md; return ``None`` when the skill is disabled."""
+def _load_spec(name: str, skill_file: Path) -> SkillSpec | None:
+    """Parse one ``<name>.md``; return ``None`` when the skill is disabled."""
 
+    if not SKILL_NAME_PATTERN.fullmatch(name):
+        raise ValueError(
+            f"file stem '{name}' is not a valid skill name; skill names must "
+            "be kebab-case ASCII (lowercase letters, digits, hyphens; max 64 "
+            "chars)"
+        )
     raw = skill_file.read_text(encoding="utf-8")
     content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     fields = _parse_frontmatter(raw, skill_file)
@@ -206,7 +232,7 @@ def _load_spec(name: str, directory: Path, skill_file: Path) -> SkillSpec | None
     description = fields.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError(
-            f"{SKILL_ENTRY_FILENAME} frontmatter must define a non-empty "
+            f"{skill_file.name} frontmatter must define a non-empty "
             "'description'"
         )
     version = fields.get("version", "1.0.0")
@@ -241,7 +267,7 @@ def _load_spec(name: str, directory: Path, skill_file: Path) -> SkillSpec | None
         description=description.strip(),
         version=version.strip(),
         triggers=triggers,
-        directory=str(directory),
+        file_path=str(skill_file),
         content_hash=content_hash,
     )
 
@@ -256,7 +282,7 @@ def _parse_frontmatter(raw: str, skill_file: Path) -> dict[str, Any] | None:
     lines = raw.splitlines()
     if not lines or lines[0].strip() != "---":
         raise ValueError(
-            f"{SKILL_ENTRY_FILENAME} must start with a '---' frontmatter block"
+            f"{skill_file.name} must start with a '---' frontmatter block"
         )
     fields: dict[str, Any] = {}
     end_index: int | None = None
@@ -266,7 +292,7 @@ def _parse_frontmatter(raw: str, skill_file: Path) -> dict[str, Any] | None:
             break
     if end_index is None:
         raise ValueError(
-            f"{SKILL_ENTRY_FILENAME} frontmatter is not closed with a '---' line"
+            f"{skill_file.name} frontmatter is not closed with a '---' line"
         )
     for line in lines[1:end_index]:
         stripped = line.strip()
@@ -300,13 +326,13 @@ def _parse_frontmatter(raw: str, skill_file: Path) -> dict[str, Any] | None:
 
 
 def read_skill_content(spec: SkillSpec) -> str:
-    """Read the full current SKILL.md content for one skill spec."""
+    """Read the full current skill file content for one skill spec."""
 
-    if spec.directory is None:
-        raise ValueError(f"skill '{spec.name}' has no source directory")
-    directory = Path(spec.directory)
-    if not directory.is_dir():
+    if spec.file_path is None:
+        raise ValueError(f"skill '{spec.name}' has no source file")
+    skill_file = Path(spec.file_path)
+    if not skill_file.is_file():
         raise FileNotFoundError(
-            f"skill '{spec.name}' directory does not exist: {directory}"
+            f"skill '{spec.name}' file does not exist: {skill_file}"
         )
-    return (directory / SKILL_ENTRY_FILENAME).read_text(encoding="utf-8")
+    return skill_file.read_text(encoding="utf-8")

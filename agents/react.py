@@ -451,7 +451,7 @@ class ReActAgent(Agent):
         "Names in `Available skills` are read-only instruction packages, not "
         "callable tools. When the task matches a skill's description or "
         "triggers, first call system.skill_catalog with `action`: `view` and "
-        "the skill's `skill_name`; the Observation returns the full SKILL.md "
+        "the skill's `skill_name`; the Observation returns the full skill file "
         "content. Follow that content for the task. Never guess a skill's "
         "content from its one-line description alone; descriptions are only "
         "matching hints."
@@ -1090,7 +1090,7 @@ class ReActAgent(Agent):
         Mirrors ``Agent._with_registered_skill_names``: only names,
         descriptions, versions, and triggers are listed so the ReAct
         instruction block stays byte-for-byte stable for one skill set and
-        SKILL.md content is fetched through ``system.skill_catalog`` on
+        skill file content is fetched through ``system.skill_catalog`` on
         demand.
         """
 
