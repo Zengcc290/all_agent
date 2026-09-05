@@ -6,6 +6,7 @@ import json
 import math
 import sqlite3
 import threading
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -271,13 +272,13 @@ class QdrantVectorStore(BaseVectorStore):
         from qdrant_client.models import PointStruct
         payload = item.to_dict()
         payload["namespace"] = self.namespace
-        self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=item.id, vector=item.embedding, payload=payload)])
+        self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(item.id), vector=item.embedding, payload=payload)])
 
     def delete(self, item_id: str) -> bool:
         if not self._ready:
             return False
         from qdrant_client.models import PointIdsList
-        self.client.delete(collection_name=self.collection_name, points_selector=PointIdsList(points=[item_id]))
+        self.client.delete(collection_name=self.collection_name, points_selector=PointIdsList(points=[self._point_id(item_id)]))
         return True
 
     def search(self, vector: list[float], *, limit: int = 10, memory_type: MemoryType | str | None = None) -> list[tuple[str, float]]:
@@ -292,7 +293,16 @@ class QdrantVectorStore(BaseVectorStore):
             points = self.client.search(collection_name=self.collection_name, query_vector=vector, query_filter=query_filter, limit=limit)
         except AttributeError:
             points = self.client.query_points(collection_name=self.collection_name, query=vector, query_filter=query_filter, limit=limit).points
-        return [(str(point.id), float(point.score)) for point in points]
+        return [(str((point.payload or {}).get("id", point.id)), float(point.score)) for point in points]
+
+    @staticmethod
+    def _point_id(item_id: str) -> str:
+        """Qdrant accepts UUIDs/integers only; preserve arbitrary app IDs in payload."""
+        try:
+            uuid.UUID(item_id)
+            return item_id
+        except (ValueError, AttributeError):
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"helloagents-memory:{item_id}"))
 
     def clear(self) -> None:
         if self._ready:
