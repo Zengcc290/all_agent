@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 from types import SimpleNamespace
@@ -358,6 +359,81 @@ async def test_registered_provider_is_used_for_completion(monkeypatch):
     assert answer == "provider answer"
     assert created[0]["base_url"] == "https://example.invalid/v1"
     assert created[0]["model"] == "model-a"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_model_call_prefers_streaming_transport():
+    class StreamingOnlyLLM:
+        model = "stream-model"
+
+        def __init__(self):
+            self.calls = []
+
+        def complete_streaming(self, messages, **options):
+            self.calls.append(dict(options))
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+
+    llm = StreamingOnlyLLM()
+    agent = DemoAgent("stream-dispatch", llm=llm)
+    response = await asyncio.to_thread(
+        agent._dispatch_model_call,
+        llm,
+        [{"role": "user", "content": "hi"}],
+        {"temperature": 0.5, "timeout": 30, "stream": False},
+        round_number=1,
+    )
+    assert response["choices"][0]["message"]["content"] == "done"
+    assert "stream" not in llm.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_model_call_falls_back_to_complete():
+    class CompleteOnlyLLM:
+        model = "complete-model"
+
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, messages, **options):
+            self.calls.append(dict(options))
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    llm = CompleteOnlyLLM()
+    agent = DemoAgent("complete-dispatch", llm=llm)
+    response = await asyncio.to_thread(
+        agent._dispatch_model_call,
+        llm,
+        [{"role": "user", "content": "hi"}],
+        {"temperature": 0.5, "timeout": 30, "stream": False},
+        round_number=1,
+    )
+    assert response["choices"][0]["message"]["content"] == "ok"
+    assert llm.calls[0]["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_model_call_supports_legacy_think():
+    class ThinkLLM:
+        model = "think-model"
+
+        def __init__(self):
+            self.calls = []
+
+        def think(self, messages, **options):
+            self.calls.append(dict(options))
+            return "legacy text"
+
+    llm = ThinkLLM()
+    agent = DemoAgent("think-dispatch", llm=llm)
+    response = await asyncio.to_thread(
+        agent._dispatch_model_call,
+        llm,
+        [{"role": "user", "content": "hi"}],
+        {"temperature": 0.5, "timeout": 30, "stream": False},
+        round_number=1,
+    )
+    assert response == "legacy text"
+    assert llm.calls[0].get("stream_response_bool") is False
 
 
 def _write_tool_mode_config(path, mode: str) -> str:

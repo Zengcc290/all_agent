@@ -798,14 +798,13 @@ class ReActAgent(Agent):
                 options["prompt_cache_key"] = cache_key
             if prompt_cache_retention is not None:
                 options["prompt_cache_retention"] = prompt_cache_retention
-            model_started_at = time.perf_counter()
             response = await asyncio.to_thread(
-                self._complete_text_or_response,
+                self._dispatch_model_call,
                 completion_llm,
                 conversation_for_request,
                 options,
+                round_number=round_number,
             )
-            log_model_completed(round_number, time.perf_counter() - model_started_at)
             if isinstance(response, str):
                 message = None
                 content = response
@@ -1147,50 +1146,6 @@ class ReActAgent(Agent):
         self._load_catalog_result(
             result, loaded_order, context, loaded_tool_schemas
         )
-
-    @staticmethod
-    def _complete_text_or_response(
-        completion_llm: Any,
-        messages: list[dict[str, Any]],
-        options: dict[str, Any],
-    ) -> Any:
-        """Call either the modern ``complete`` API or the legacy ``think`` API."""
-
-        complete = getattr(completion_llm, "complete", None)
-        if callable(complete):
-            return complete(messages, **options)
-        think = getattr(completion_llm, "think", None)
-        if not callable(think):
-            raise TypeError("llm must provide a complete() or think() method")
-        think_options = {
-            key: value
-            for key, value in options.items()
-            if key in {
-                "temperature",
-                "timeout",
-                "prompt_cache_key",
-                "prompt_cache_retention",
-            }
-        }
-        # ``think`` returns collected text for the project's LLM wrapper.
-        try:
-            parameters = inspect.signature(think).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-        accepts_var_kw = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
-        if "stream_response_bool" in parameters or accepts_var_kw:
-            think_options["stream_response_bool"] = False
-        if not accepts_var_kw:
-            # A legacy ``think`` implementation may not accept the cache
-            # hints.  Keep the compatibility path permissive while the
-            # native ``complete`` path remains fully cache-aware.
-            for key in ("prompt_cache_key", "prompt_cache_retention"):
-                if key not in parameters:
-                    think_options.pop(key, None)
-        return think(messages, **think_options)
 
     @staticmethod
     def _strict_react_schema(schema: dict[str, Any]) -> dict[str, Any]:

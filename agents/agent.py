@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from types import ModuleType
@@ -23,6 +25,7 @@ from core import (
     parse_openai_tool_calls,
 )
 from core import discover_tools as discover_tool_modules
+from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
 
 from .llm import LLM
@@ -68,6 +71,79 @@ class Agent(ABC):
         compressed = compress_saved_history(conversation)
         self._profile_histories[history_key] = compressed
         self.history = [dict(item) for item in compressed]
+
+    @staticmethod
+    def _dispatch_model_call(
+        completion_llm: Any,
+        messages: list[dict[str, Any]],
+        options: dict[str, Any],
+        *,
+        round_number: int,
+    ) -> Any:
+        """Run one model request, preferring a streaming transport.
+
+        Non-streaming requests stall the tool loop: gateways send no bytes
+        until the full completion exists, so a long generation trips the read
+        timeout and the OpenAI SDK silently retries the identical request.
+        Real ``LLM`` clients therefore stream and assemble; injected test
+        doubles and legacy ``think``-style wrappers keep their existing
+        transports. The returned response shape is identical for both paths.
+        """
+
+        model_started_at = time.perf_counter()
+        stream_method = getattr(completion_llm, "complete_streaming", None)
+        if callable(stream_method) and options.get("stream", False) is False:
+            streaming_options = {
+                key: value
+                for key, value in options.items()
+                if key not in {"stream"}
+            }
+            first_chunk_at: list[float] = []
+
+            def _log_first_chunk() -> None:
+                first_chunk_at.append(time.perf_counter())
+
+            response = stream_method(
+                messages,
+                on_first_chunk=_log_first_chunk,
+                **streaming_options,
+            )
+            if first_chunk_at:
+                log_model_first_chunk(
+                    round_number, first_chunk_at[0] - model_started_at
+                )
+            log_model_completed(round_number, time.perf_counter() - model_started_at)
+            return response
+        complete = getattr(completion_llm, "complete", None)
+        if callable(complete):
+            response = complete(messages, **options)
+            log_model_completed(round_number, time.perf_counter() - model_started_at)
+            return response
+        think = getattr(completion_llm, "think", None)
+        if not callable(think):
+            raise TypeError("llm must provide a complete() or complete_streaming() method")
+        think_options = {
+            key: value
+            for key, value in options.items()
+            if key in {"temperature", "timeout", "prompt_cache_key", "prompt_cache_retention"}
+        }
+        try:
+            parameters = inspect.signature(think).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_var_kw = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if "stream_response_bool" in parameters or accepts_var_kw:
+            think_options["stream_response_bool"] = False
+        if not accepts_var_kw:
+            for key in ("prompt_cache_key", "prompt_cache_retention"):
+                if key not in parameters:
+                    think_options.pop(key, None)
+        response = think(messages, **think_options)
+        log_model_completed(round_number, time.perf_counter() - model_started_at)
+        return response
 
     async def run_auto(
         self,
@@ -393,9 +469,11 @@ class Agent(ABC):
             if tool_definitions:
                 completion_options["tools"] = tool_definitions
             response = await asyncio.to_thread(
-                completion_llm.complete,
+                self._dispatch_model_call,
+                completion_llm,
                 self._with_registered_tool_names(conversation),
-                **completion_options,
+                completion_options,
+                round_number=round_number,
             )
             choices = _field(response, "choices")
             if not choices:

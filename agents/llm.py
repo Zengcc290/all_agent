@@ -2,10 +2,96 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _assemble_streaming_response(
+    stream: Iterable[Any],
+    *,
+    on_first_chunk: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Consume one streamed completion and rebuild the response envelope.
+
+    Assembles ``content`` deltas plus streaming ``tool_calls`` fragments (the
+    OpenAI chunks deliver ``index``-keyed pieces with partial ``id``,
+    ``function.name`` and ``function.arguments`` strings). The returned
+    mapping matches the non-streaming response shape, so message extraction
+    helpers need no branching.
+    """
+
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+    finish_reason: str | None = None
+    first_chunk_seen = False
+    try:
+        for chunk in stream:
+            choices = _field(chunk, "choices")
+            if not choices:
+                continue
+            choice = choices[0]
+            if not first_chunk_seen:
+                first_chunk_seen = True
+                if on_first_chunk is not None:
+                    try:
+                        on_first_chunk()
+                    except Exception:  # noqa: BLE001 - callback must not break the loop
+                        LOGGER.debug("on_first_chunk callback failed", exc_info=True)
+            if (reason := _field(choice, "finish_reason")) is not None:
+                finish_reason = reason
+            delta = _field(choice, "delta")
+            if delta is None:
+                continue
+            if (piece := _field(delta, "content")):
+                content_parts.append(piece)
+            raw_fragments = _field(delta, "tool_calls")
+            if not raw_fragments:
+                continue
+            for fragment in raw_fragments:
+                index = _field(fragment, "index") or 0
+                entry = tool_calls.setdefault(
+                    index,
+                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                )
+                if (fragment_id := _field(fragment, "id")):
+                    entry["id"] = (
+                        fragment_id if not entry["id"] else entry["id"] + fragment_id
+                    )
+                function = _field(fragment, "function")
+                if function is None:
+                    continue
+                if (name := _field(function, "name")):
+                    entry["function"]["name"] += name
+                if (arguments := _field(function, "arguments")):
+                    entry["function"]["arguments"] += arguments
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("failed to close LLM stream", exc_info=True)
+
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts) or None,
+    }
+    if tool_calls:
+        message["tool_calls"] = [
+            tool_calls[index] for index in sorted(tool_calls)
+        ]
+    response: dict[str, Any] = {
+        "choices": [
+            {
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ]
+    }
+    return response
 
 
 class LLM:
@@ -67,6 +153,50 @@ class LLM:
     @staticmethod
     def get_query() -> str:
         return input("请输入你的问题：")
+
+    def complete_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        timeout: float = 60,
+        on_first_chunk: Callable[[], None] | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Run one streaming completion and return an assembled response.
+
+        Tool loops must not use non-streaming requests: a gateway generating a
+        long completion sends no bytes until the whole response exists, so the
+        read timeout fires long before the gateway finishes and the OpenAI SDK
+        retries the identical request in the background. Streaming keeps the
+        connection alive from the first token, making the same timeout measure
+        the gap *between* tokens instead of the total generation time.
+
+        The assembled mapping mimics the non-streaming response shape so the
+        existing message extraction helpers keep working unchanged.
+        """
+
+        reserved = {"messages", "model", "stream"} & kwargs.keys()
+        if reserved:
+            raise TypeError(
+                f"reserved streaming arguments cannot be overridden: {', '.join(sorted(reserved))}"
+            )
+        options: dict[str, Any] = {
+            "model": model or self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+            "timeout": timeout,
+        }
+        if prompt_cache_key is not None:
+            options["prompt_cache_key"] = prompt_cache_key
+        if prompt_cache_retention is not None:
+            options["prompt_cache_retention"] = prompt_cache_retention
+        stream = self.client.chat.completions.create(**options, **kwargs)
+        return _assemble_streaming_response(stream, on_first_chunk=on_first_chunk)
 
     def think(
         self,

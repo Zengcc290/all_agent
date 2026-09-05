@@ -49,6 +49,16 @@ def log_model_completed(round_number: int, elapsed_seconds: float) -> None:
     LOGGER.info("模型思考耗时：第%d轮 %.3f秒", round_number, max(0.0, elapsed_seconds))
 
 
+def log_model_first_chunk(round_number: int, elapsed_seconds: float) -> None:
+    """Display the first streaming chunk latency for the model round."""
+
+    LOGGER.info(
+        "模型首字返回：第%d轮 %.3f秒（流式连接已建立）",
+        round_number,
+        max(0.0, elapsed_seconds),
+    )
+
+
 def log_react_thought(round_number: int, thought: str) -> None:
     """Display only the model's current thought."""
 
