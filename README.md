@@ -11,6 +11,17 @@ Discovery outcomes and registration state are queryable from the Agent. See the
 [Chinese tool guide](tool/README.md) for the complete template rules and the
 function-level LLM/tool call chain.
 
+## On-demand skills
+
+`Agent` also scans the `skills` directory (one subdirectory per skill, each
+containing a `SKILL.md`) and registers a `system.skill_catalog` tool. Only
+skill names, descriptions, versions, and triggers stay in the persistent
+system message; the model loads the full instruction content on demand with
+`system.skill_catalog` (`action: view`), so skill bodies never fragment the
+prompt prefix cache. Adding, removing, or editing a skill changes the prompt
+cache key, starting a new cache namespace. Skill directories never execute
+code. See [skills/README.md](skills/README.md) for the Chinese authoring guide.
+
 ## Runtime logs
 
 The runtime prints timestamped activity logs to the console. Each successful

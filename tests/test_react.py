@@ -312,8 +312,8 @@ def test_lazy_registration_logs_all_persisted_tool_names(capsys):
     assert output == ""
     instruction = agent._with_tool_instructions([], agent.tools.snapshot())
     assert (
-        "All registered tool names: system.tool_catalog, test.react_echo"
-        in instruction[0]["content"]
+        "All registered tool names: system.skill_catalog, system.tool_catalog, "
+        "test.react_echo" in instruction[0]["content"]
     )
     repository.close()
 
@@ -484,8 +484,8 @@ async def test_react_logs_progress_and_each_round_result(capsys):
     assert "Action Input" not in output
     assert '"value": 7' not in output
     assert all(
-        "All registered tool names: system.tool_catalog, test.react_echo"
-        in request[0]["content"]
+        "All registered tool names: system.skill_catalog, system.tool_catalog, "
+        "test.react_echo" in request[0]["content"]
         for request in llm.requests
     )
 
@@ -505,7 +505,10 @@ async def test_react_exposes_registered_names_and_catalog_schema_by_default():
 
     assert answer == "done"
     first_instruction = llm.requests[0][0]["content"]
-    assert "All registered tool names: system.tool_catalog, test.react_echo" in first_instruction
+    assert (
+        "All registered tool names: system.skill_catalog, system.tool_catalog, "
+        "test.react_echo" in first_instruction
+    )
     assert "- system.tool_catalog:" in first_instruction
     assert "Action Input schema:" in first_instruction
     assert "- test.react_echo:" not in first_instruction

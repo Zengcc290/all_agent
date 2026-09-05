@@ -446,6 +446,16 @@ class ReActAgent(Agent):
     # Keep the old public constant as a compatibility alias for callers that
     # customized the previous lazy-loading prompt.
     LAZY_REACT_INSTRUCTIONS = CATALOG_FIRST_REACT_INSTRUCTIONS
+
+    SKILL_VIEW_REACT_INSTRUCTIONS = (
+        "Names in `Available skills` are read-only instruction packages, not "
+        "callable tools. When the task matches a skill's description or "
+        "triggers, first call system.skill_catalog with `action`: `view` and "
+        "the skill's `skill_name`; the Observation returns the full SKILL.md "
+        "content. Follow that content for the task. Never guess a skill's "
+        "content from its one-line description alone; descriptions are only "
+        "matching hints."
+    )
     # ``max_rounds=None`` means the caller does not want to tune the limit,
     # but a provider must still be prevented from keeping the process alive
     # forever when it repeats a failing tool request.
@@ -1031,6 +1041,10 @@ class ReActAgent(Agent):
         ]
         if catalog_first:
             lines.extend((self.CATALOG_FIRST_REACT_INSTRUCTIONS, ""))
+        skill_entries = self._skill_directory_lines()
+        if skill_entries:
+            lines.extend((*skill_entries, ""))
+            lines.extend((self.SKILL_VIEW_REACT_INSTRUCTIONS, ""))
         lines.append("Available tools:")
         if not registrations:
             lines.append("(No tools are currently available; answer directly.)")
@@ -1069,6 +1083,27 @@ class ReActAgent(Agent):
                 )
         instruction = {"role": "system", "content": "\n".join(lines)}
         return [instruction, *conversation]
+
+    def _skill_directory_lines(self) -> list[str]:
+        """Return deterministic skill-directory lines, or an empty list.
+
+        Mirrors ``Agent._with_registered_skill_names``: only names,
+        descriptions, versions, and triggers are listed so the ReAct
+        instruction block stays byte-for-byte stable for one skill set and
+        SKILL.md content is fetched through ``system.skill_catalog`` on
+        demand.
+        """
+
+        snapshot = self.skills.snapshot()
+        if not snapshot:
+            return []
+        lines = ["Available skills (view content via system.skill_catalog):"]
+        for name, (spec, _) in snapshot.items():
+            entry = f"- {name} (v{spec.version}): {spec.description}"
+            if spec.triggers:
+                entry += " Triggers: " + ", ".join(spec.triggers)
+            lines.append(entry)
+        return lines
 
     def _ensure_tool_loaded(self, name: str) -> None:
         """Load one implementation referenced by the persistent catalog."""
