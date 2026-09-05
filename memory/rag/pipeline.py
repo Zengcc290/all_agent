@@ -24,8 +24,8 @@ class RetrievedChunk:
 
 class RAGPipeline:
     def __init__(self, manager: MemoryManager | None = None, *, processor: DocumentProcessor | None = None) -> None:
-        self.manager = manager or MemoryManager()
-        self.processor = processor or DocumentProcessor()
+        self.manager = manager if manager is not None else MemoryManager()
+        self.processor = processor if processor is not None else DocumentProcessor()
 
     def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = 1000, overlap: int = 100) -> list[MemoryItem]:
         values = [documents] if isinstance(documents, Document) else list(documents)

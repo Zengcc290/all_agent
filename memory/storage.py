@@ -45,9 +45,9 @@ class SQLiteDocumentStore(BaseDocumentStore):
     """SQLite document persistence with safe JSON serialization."""
 
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.path = str(path)
+        self.path = ":memory:" if str(path) == ":memory:" else str(Path(path).expanduser())
         if self.path != ":memory:":
-            Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
         if self.path == ":memory:":

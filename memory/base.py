@@ -19,10 +19,14 @@ class BaseMemory:
     memory_type: MemoryType
 
     def __init__(self, *, document_store: BaseDocumentStore | None = None, vector_store: BaseVectorStore | None = None, embedding: BaseEmbedding | None = None, config: MemoryConfig | None = None, memory_type: MemoryType | str | None = None) -> None:
-        self.config = config or MemoryConfig()
-        self.document_store = document_store or SQLiteDocumentStore(self.config.sqlite_path)
-        self.vector_store = vector_store or InMemoryVectorStore()
-        self.embedding = embedding or TFIDFEmbedding(self.config.embedding_dimension)
+        self.config = config if config is not None else MemoryConfig()
+        self.document_store = (
+            document_store
+            if document_store is not None
+            else SQLiteDocumentStore(self.config.sqlite_path)
+        )
+        self.vector_store = vector_store if vector_store is not None else InMemoryVectorStore()
+        self.embedding = embedding if embedding is not None else TFIDFEmbedding(self.config.embedding_dimension)
         self.memory_type = MemoryType(memory_type or self.memory_type)
 
     def _validate_embedding_dimension(self, vector: list[float]) -> None:

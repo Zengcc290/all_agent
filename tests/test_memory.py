@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from memory import MemoryConfig, MemoryManager, MemoryType, Neo4jGraphStore, TFIDFEmbedding
+from memory.storage import SQLiteDocumentStore
 
 
 def test_manager_crud_search_and_type_isolation():
@@ -41,3 +42,22 @@ def test_tfidf_dimension_is_stable():
     assert len(embedding.embed("hello")) == 32
     embedding.fit(["hello world", "another document"])
     assert len(embedding.embed("hello")) == 32
+
+
+def test_sqlite_memory_store_creates_nested_parent_directory(tmp_path):
+    path = tmp_path / "nested" / "memory" / "records.sqlite3"
+    store = SQLiteDocumentStore(path)
+
+    assert path.exists()
+    store.close()
+
+
+def test_manager_preserves_falsey_injected_embedding():
+    class FalseyEmbedding(TFIDFEmbedding):
+        def __bool__(self):
+            return False
+
+    embedding = FalseyEmbedding(8)
+    manager = MemoryManager(MemoryConfig(sqlite_path=":memory:"), embedding=embedding)
+
+    assert manager.embedding is embedding

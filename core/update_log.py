@@ -30,7 +30,9 @@ class UpdateLogRepository:
             path = os.getenv("UPDATE_LOG_DB_PATH") or DEFAULT_UPDATE_LOG_FILENAME
         if not isinstance(path, (str, Path)):
             raise TypeError("path must be a string, pathlib.Path, or None")
-        self.path = str(path)
+        # Normalize the path before opening sqlite so ``~/...`` behaves the
+        # same way for directory creation and subsequent connections.
+        self.path = ":memory:" if str(path) == ":memory:" else str(Path(path).expanduser())
         self._lock = threading.RLock()
         self._shared_connection: sqlite3.Connection | None = None
         if self.path == ":memory:":
@@ -69,7 +71,7 @@ class UpdateLogRepository:
 
     def _initialize(self) -> None:
         if self.path != ":memory:":
-            parent = Path(self.path).expanduser().parent
+            parent = Path(self.path).parent
             if str(parent) not in {"", "."}:
                 parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:

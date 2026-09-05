@@ -69,3 +69,12 @@ def test_repository_sorts_numeric_prerelease_components_naturally(tmp_path):
         )
 
     assert repository.get("test.prerelease")["version"] == "1.0-alpha.10"
+
+
+def test_repository_creates_nested_parent_directory(tmp_path):
+    path = tmp_path / "nested" / "catalog" / "tools.sqlite3"
+    repository = ToolSpecRepository(path)
+
+    repository.save(SearchTool(base_url="https://example.invalid").spec)
+
+    assert path.exists()

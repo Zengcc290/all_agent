@@ -18,7 +18,11 @@ class ToolSpecRepository:
     def __init__(self, path: str | Path = "tools.sqlite3") -> None:
         if not isinstance(path, (str, Path)):
             raise TypeError("path must be a string or pathlib.Path")
-        self.path = str(path)
+        # Expand user paths once and use the normalized value for both
+        # directory creation and sqlite connections.  Keeping the literal
+        # ``~`` here makes sqlite create a database in a directory literally
+        # named ``~`` instead of the user's home directory.
+        self.path = ":memory:" if str(path) == ":memory:" else str(Path(path).expanduser())
         self._lock = threading.RLock()
         self._shared_connection: sqlite3.Connection | None = None
         if self.path == ":memory:":
@@ -26,6 +30,8 @@ class ToolSpecRepository:
                 self.path, check_same_thread=False
             )
             self._shared_connection.row_factory = sqlite3.Row
+        elif Path(self.path).parent != Path("."):
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:

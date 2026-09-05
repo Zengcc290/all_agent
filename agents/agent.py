@@ -71,7 +71,11 @@ class Agent(ABC):
             provider_registry, ProviderRegistry
         ):
             raise TypeError("provider_registry must be a ProviderRegistry or None")
-        self.provider_registry = provider_registry or ProviderRegistry(provider_config)
+        self.provider_registry = (
+            provider_registry
+            if provider_registry is not None
+            else ProviderRegistry(provider_config)
+        )
         self.active_profile = self.provider_registry.active_profile
         self._profile_clients: dict[tuple[str, str], LLM] = {}
         self._profile_histories: dict[str, list[dict[str, Any]]] = {}

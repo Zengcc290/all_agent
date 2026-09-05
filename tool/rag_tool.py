@@ -51,7 +51,7 @@ class RAGTool(BaseTool):
     )
 
     def __init__(self, pipeline: RAGPipeline | None = None) -> None:
-        self.pipeline = pipeline or RAGPipeline()
+        self.pipeline = pipeline if pipeline is not None else RAGPipeline()
 
     def execute(self, arguments: RAGToolInput) -> RAGToolOutput:
         if arguments.action == "ingest":

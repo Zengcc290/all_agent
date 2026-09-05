@@ -92,7 +92,7 @@ class ReadUpdateLogTool(BaseTool):
     )
 
     def __init__(self, repository: UpdateLogRepository | None = None) -> None:
-        self.repository = repository or UpdateLogRepository()
+        self.repository = repository if repository is not None else UpdateLogRepository()
 
     def execute(self, arguments: ReadUpdateLogInput) -> ReadUpdateLogOutput:
         if not isinstance(arguments, ReadUpdateLogInput):

@@ -16,11 +16,21 @@ class MemoryManager:
     """Single entry point that coordinates all four memory implementations."""
 
     def __init__(self, config: MemoryConfig | None = None, *, embedding: BaseEmbedding | None = None, embedding_service: BaseEmbedding | None = None, document_store: BaseDocumentStore | None = None, vector_store: BaseVectorStore | None = None, graph_store: Neo4jGraphStore | None = None) -> None:
-        self.config = config or MemoryConfig()
+        self.config = config if config is not None else MemoryConfig()
         if embedding is not None and embedding_service is not None:
             raise ValueError("provide either embedding or embedding_service, not both")
-        self.embedding = embedding or embedding_service or TFIDFEmbedding(self.config.embedding_dimension)
-        self.document_store = document_store or SQLiteDocumentStore(self.config.sqlite_path)
+        self.embedding = (
+            embedding
+            if embedding is not None
+            else embedding_service
+            if embedding_service is not None
+            else TFIDFEmbedding(self.config.embedding_dimension)
+        )
+        self.document_store = (
+            document_store
+            if document_store is not None
+            else SQLiteDocumentStore(self.config.sqlite_path)
+        )
         if vector_store is not None:
             self.vector_store = vector_store
         elif self.config.qdrant_url:
@@ -31,8 +41,14 @@ class MemoryManager:
             )
         else:
             self.vector_store = InMemoryVectorStore()
-        self.graph_store = graph_store or Neo4jGraphStore(
-            self.config.neo4j_uri, self.config.neo4j_username, self.config.neo4j_password
+        self.graph_store = (
+            graph_store
+            if graph_store is not None
+            else Neo4jGraphStore(
+                self.config.neo4j_uri,
+                self.config.neo4j_username,
+                self.config.neo4j_password,
+            )
         )
         common = {
             "document_store": self.document_store,

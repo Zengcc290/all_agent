@@ -66,7 +66,11 @@ class MemoryTool(BaseTool):
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:
-        self.manager = manager or MemoryManager(MemoryConfig(sqlite_path=":memory:"))
+        self.manager = (
+            manager
+            if manager is not None
+            else MemoryManager(MemoryConfig(sqlite_path=":memory:"))
+        )
 
     def execute(self, arguments: MemoryToolInput) -> MemoryToolOutput:
         action = arguments.action

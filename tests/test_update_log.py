@@ -52,6 +52,16 @@ def test_update_log_repository_assigns_monotonic_ids_and_decodes_files(tmp_path)
     assert stored["files"][0]["path"] == "core/update_log.py"
 
 
+def test_update_log_repository_creates_nested_parent_directory(tmp_path):
+    path = tmp_path / "nested" / "audit" / "updates.sqlite3"
+    repository = UpdateLogRepository(path)
+
+    result = repository.append(**_payload(), system_name="TestOS")
+
+    assert path.exists()
+    assert result["update_id"] == 1
+
+
 def test_update_log_tool_returns_compact_acknowledgement():
     repository = UpdateLogRepository(":memory:")
     tool = UpdateLogTool(repository)

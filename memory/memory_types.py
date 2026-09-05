@@ -80,7 +80,7 @@ class SemanticMemory(BaseMemory):
 
     def __init__(self, *, graph_store: Neo4jGraphStore | None = None, **kwargs: Any) -> None:
         super().__init__(memory_type=self.memory_type, **kwargs)
-        self.graph_store = graph_store or Neo4jGraphStore()
+        self.graph_store = graph_store if graph_store is not None else Neo4jGraphStore()
 
     def add_fact(self, subject: str, predicate: str, object: str, *, metadata: Mapping[str, Any] | None = None, confidence: float = 1.0) -> MemoryItem:
         if not all(isinstance(value, str) and value.strip() for value in (subject, predicate, object)):
