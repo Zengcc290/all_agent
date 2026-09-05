@@ -15,7 +15,9 @@ class WorkingMemory(BaseMemory):
 
     def __init__(self, *, capacity: int | None = None, **kwargs: Any) -> None:
         super().__init__(memory_type=self.memory_type, **kwargs)
-        self.capacity = capacity or self.config.working_memory_capacity
+        self.capacity = self.config.working_memory_capacity if capacity is None else capacity
+        if isinstance(self.capacity, bool) or not isinstance(self.capacity, int) or self.capacity < 1:
+            raise ValueError("capacity must be a positive integer")
 
     def add(self, content: str, **kwargs: Any) -> MemoryItem:
         item = super().add(content, **kwargs)
@@ -64,9 +66,13 @@ class EpisodicMemory(BaseMemory):
     def timeline(self, *, start: datetime | str | None = None, end: datetime | str | None = None, limit: int | None = None) -> list[MemoryItem]:
         from .models import ensure_datetime
         start_dt, end_dt = ensure_datetime(start), ensure_datetime(end)
+        if start_dt is not None and end_dt is not None and start_dt > end_dt:
+            raise ValueError("start must not be later than end")
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ValueError("limit must be a positive integer")
         items = [item for item in self.list() if (start_dt is None or item.event_time >= start_dt) and (end_dt is None or item.event_time <= end_dt)]
         items.sort(key=lambda item: item.event_time)
-        return items[:limit] if limit else items
+        return items[:limit] if limit is not None else items
 
 
 class SemanticMemory(BaseMemory):
@@ -79,7 +85,7 @@ class SemanticMemory(BaseMemory):
     def add_fact(self, subject: str, predicate: str, object: str, *, metadata: Mapping[str, Any] | None = None, confidence: float = 1.0) -> MemoryItem:
         if not all(isinstance(value, str) and value.strip() for value in (subject, predicate, object)):
             raise ValueError("subject, predicate and object must be non-empty strings")
-        if not 0 <= confidence <= 1:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
         item_metadata = dict(metadata or {})
         item_metadata.update({"subject": subject, "predicate": predicate, "object": object, "confidence": confidence})
@@ -89,6 +95,17 @@ class SemanticMemory(BaseMemory):
 
     def add_relation(self, source: str, relation: str, target: str, *, metadata: Mapping[str, Any] | None = None) -> MemoryItem:
         return self.add_fact(source, relation, target, metadata=metadata)
+
+    def delete(self, item_id: str) -> bool:
+        item = self.document_store.get(item_id)
+        if item is None or item.memory_type != self.memory_type:
+            return False
+        removed = super().delete(item_id)
+        if removed:
+            remove_relation = getattr(self.graph_store, "delete_memory_relation", None)
+            if callable(remove_relation):
+                remove_relation(item_id)
+        return removed
 
     def related(self, entity: str, *, relation: str | None = None) -> list[dict[str, Any]]:
         return self.graph_store.get_relations(entity, relation=relation)
@@ -106,7 +123,7 @@ class PerceptualMemory(BaseMemory):
     def store(self, data: Any, *, modality: str, content: str | None = None, metadata: Mapping[str, Any] | None = None, importance: float = 0.5, item_id: str | None = None) -> MemoryItem:
         if not isinstance(modality, str) or not modality.strip():
             raise ValueError("modality must be a non-empty string")
-        text = content or (data if isinstance(data, str) else f"{modality} perceptual memory")
+        text = content if content is not None else (data if isinstance(data, str) else f"{modality} perceptual memory")
         return self.add(str(text), metadata=metadata, importance=importance, payload=data, modality=modality, item_id=item_id)
 
     def get_data(self, item_id: str, default: Any = None) -> Any:

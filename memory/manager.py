@@ -9,7 +9,7 @@ from .config import MemoryConfig
 from .embeddings import BaseEmbedding, TFIDFEmbedding
 from .memory_types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
 from .models import MemoryItem, MemorySearchResult, MemoryType
-from .storage import BaseDocumentStore, BaseVectorStore, InMemoryVectorStore, Neo4jGraphStore, SQLiteDocumentStore
+from .storage import BaseDocumentStore, BaseVectorStore, InMemoryVectorStore, Neo4jGraphStore, QdrantVectorStore, SQLiteDocumentStore
 
 
 class MemoryManager:
@@ -21,7 +21,16 @@ class MemoryManager:
             raise ValueError("provide either embedding or embedding_service, not both")
         self.embedding = embedding or embedding_service or TFIDFEmbedding(self.config.embedding_dimension)
         self.document_store = document_store or SQLiteDocumentStore(self.config.sqlite_path)
-        self.vector_store = vector_store or InMemoryVectorStore()
+        if vector_store is not None:
+            self.vector_store = vector_store
+        elif self.config.qdrant_url:
+            self.vector_store = QdrantVectorStore(
+                url=self.config.qdrant_url,
+                collection_name=self.config.qdrant_collection,
+                dimension=self.config.embedding_dimension,
+            )
+        else:
+            self.vector_store = InMemoryVectorStore()
         self.graph_store = graph_store or Neo4jGraphStore(
             self.config.neo4j_uri, self.config.neo4j_username, self.config.neo4j_password
         )
@@ -72,8 +81,7 @@ class MemoryManager:
         item = self.document_store.get(item_id)
         if item is None:
             return False
-        self.vector_store.delete(item_id)
-        return self.document_store.delete(item_id)
+        return self.for_type(item.memory_type).delete(item_id)
 
     remove = delete
     retrieve = get
@@ -81,7 +89,9 @@ class MemoryManager:
     def search(self, query: str, *, memory_type: MemoryType | str | None = None, limit: int | None = None, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[MemorySearchResult]:
         if memory_type is not None:
             return self.for_type(memory_type).search(query, limit=limit, threshold=threshold, metadata=metadata)
-        limit = limit or self.config.search_limit
+        limit = self.config.search_limit if limit is None else limit
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
         # Search each namespace, then merge by score. This keeps one vector
         # collection usable while preserving the caller's type filter option.
         per_type_limit = max(limit, 1)
@@ -108,19 +118,25 @@ class MemoryManager:
     def clear(self, *, memory_type: MemoryType | str | None = None) -> int:
         if memory_type is not None:
             return self.for_type(memory_type).clear()
-        count = len(self.document_store.list(include_expired=True))
-        self.vector_store.clear()
-        self.document_store.clear()
-        return count
+        return sum(memory.clear() for memory in self.memories.values())
 
     def stats(self) -> dict[str, int]:
         return {memory_type.value: len(self.document_store.list(memory_type=memory_type)) for memory_type in MemoryType}
 
     def close(self) -> None:
         self.document_store.close()
+        close_vector = getattr(self.vector_store, "close", None)
+        if callable(close_vector):
+            close_vector()
         close = getattr(self.graph_store, "close", None)
         if callable(close):
             close()
+
+    def __enter__(self) -> "MemoryManager":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
 
 
 __all__ = ["MemoryManager"]

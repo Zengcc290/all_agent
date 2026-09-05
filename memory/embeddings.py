@@ -25,7 +25,10 @@ class BaseEmbedding(ABC):
         raise NotImplementedError
 
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
-        return [self.embed(text) for text in texts]
+        values = list(texts)
+        if not all(isinstance(text, str) for text in values):
+            raise TypeError("texts must contain strings")
+        return [self.embed(text) for text in values]
 
 
 class TFIDFEmbedding(BaseEmbedding):
@@ -114,10 +117,22 @@ class LocalTransformerEmbedding(BaseEmbedding):
         if not isinstance(text, str):
             raise TypeError("text must be a string")
         if callable(getattr(self.model, "encode", None)):
-            value = self.model.encode(text, convert_to_numpy=False)
+            try:
+                value = self.model.encode(text, convert_to_numpy=False)
+            except TypeError:
+                value = self.model.encode(text)
         else:
             value = self.model(text)
+        # Some model wrappers return a one-row matrix for a single input.
+        try:
+            first = value[0]
+        except (IndexError, KeyError, TypeError):
+            first = None
+        if isinstance(first, (list, tuple)) or getattr(first, "ndim", 0) > 0:
+            value = first
         result = [float(item) for item in value]
+        if not result or any(not math.isfinite(item) for item in result):
+            raise ValueError("embedding model returned an invalid vector")
         if not self.dimension:
             self.dimension = len(result)
         return result
@@ -140,6 +155,10 @@ class DashScopeEmbedding(BaseEmbedding):
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be non-empty")
         self.api_key, self.model, self.base_url = api_key.strip(), model.strip(), base_url.strip()
+        if not self.base_url:
+            raise ValueError("base_url must be non-empty")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be positive")
         self.client = client
         self.timeout = timeout
         self.dimension = 0
@@ -154,7 +173,14 @@ class DashScopeEmbedding(BaseEmbedding):
         if not values:
             return []
         if self.client is not None:
-            response = self.client(values, model=self.model)
+            if callable(self.client):
+                response = self.client(values, model=self.model)
+            elif callable(getattr(self.client, "embed", None)):
+                response = self.client.embed(values, model=self.model)
+            elif callable(getattr(getattr(self.client, "embeddings", None), "create", None)):
+                response = self.client.embeddings.create(input=values, model=self.model)
+            else:
+                raise TypeError("client must be callable or expose embed()/embeddings.create()")
             result = _extract_embeddings(response)
         else:
             body = json.dumps({"model": self.model, "input": {"texts": values}}).encode("utf-8")
@@ -171,17 +197,32 @@ class DashScopeEmbedding(BaseEmbedding):
                 raise RuntimeError(f"DashScope embedding request failed: {exc}") from exc
         if result:
             self.dimension = len(result[0])
+            if any(len(vector) != self.dimension for vector in result) or len(result) != len(values):
+                raise RuntimeError("embedding response count or dimensions did not match input")
         return result
 
 
 def _extract_embeddings(response: Any) -> list[list[float]]:
-    data = response.get("output", response) if isinstance(response, dict) else response
+    if isinstance(response, dict):
+        data = response.get("output", response)
+    else:
+        data = getattr(response, "output", None) or getattr(response, "data", response)
     if isinstance(data, dict):
         data = data.get("embeddings", data.get("data", []))
+    if not isinstance(data, (list, tuple)):
+        try:
+            data = list(data)
+        except TypeError:
+            data = []
     result = []
     for item in data or []:
-        values = item.get("embedding") if isinstance(item, dict) else item
-        result.append([float(value) for value in values])
+        values = item.get("embedding") if isinstance(item, dict) else getattr(item, "embedding", item)
+        if values is None:
+            continue
+        vector = [float(value) for value in values]
+        if not vector or any(not math.isfinite(value) for value in vector):
+            raise RuntimeError("embedding response contained an invalid vector")
+        result.append(vector)
     if not result:
         raise RuntimeError("embedding response contained no vectors")
     return result

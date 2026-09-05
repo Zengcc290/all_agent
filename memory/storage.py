@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
-from .models import MemoryItem, MemorySearchResult, MemoryType
+from .models import MemoryItem, MemorySearchResult, MemoryType, _json_restore
 
 
 class BaseDocumentStore(ABC):
@@ -31,6 +31,11 @@ class BaseDocumentStore(ABC):
 
     def save(self, item: MemoryItem) -> None:
         self.upsert(item)
+
+    def clear(self, memory_type: MemoryType | str | None = None) -> int:
+        """Delete records, with a portable fallback for custom stores."""
+        items = self.list(memory_type=memory_type, include_expired=True)
+        return sum(1 for item in items if self.delete(item.id))
 
     def close(self) -> None:
         pass
@@ -117,7 +122,7 @@ class SQLiteDocumentStore(BaseDocumentStore):
                     data["created_at"], data["updated_at"], data["expires_at"],
                     data["timestamp"], json.dumps(item.embedding),
                     json.dumps(data.get("payload"), ensure_ascii=False), item.modality,
-                    json.dumps(item.relations, ensure_ascii=False),
+                    json.dumps(data["relations"], ensure_ascii=False),
                 ),
             )
 
@@ -153,21 +158,14 @@ class SQLiteDocumentStore(BaseDocumentStore):
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> MemoryItem:
-        payload = json.loads(row["payload"]) if row["payload"] is not None else None
-        if isinstance(payload, dict) and "__bytes__" in payload:
-            # Preserve binary payloads written by MemoryItem.to_dict().
-            import base64
-            try:
-                payload = base64.b64decode(payload["__bytes__"])
-            except Exception:
-                pass
+        payload = _json_restore(json.loads(row["payload"])) if row["payload"] is not None else None
         return MemoryItem(
             id=row["id"], content=row["content"], memory_type=row["memory_type"],
             metadata=json.loads(row["metadata"]), importance=row["importance"],
             created_at=row["created_at"], updated_at=row["updated_at"],
             expires_at=row["expires_at"], timestamp=row["timestamp"],
             embedding=json.loads(row["embedding"]) if row["embedding"] else None,
-            payload=payload, modality=row["modality"], relations=json.loads(row["relations"]),
+            payload=payload, modality=row["modality"], relations=_json_restore(json.loads(row["relations"])),
         )
 
     def close(self) -> None:
@@ -194,6 +192,8 @@ class BaseVectorStore(ABC):
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
         return 0.0
+    if any(not math.isfinite(float(value)) for value in (*left, *right)):
+        return 0.0
     dot = sum(a * b for a, b in zip(left, right))
     norm_left = math.sqrt(sum(a * a for a in left))
     norm_right = math.sqrt(sum(b * b for b in right))
@@ -209,14 +209,18 @@ class InMemoryVectorStore(BaseVectorStore):
 
     def upsert(self, item: MemoryItem) -> None:
         if item.embedding is not None:
+            if not item.embedding or any(not math.isfinite(float(value)) for value in item.embedding):
+                raise ValueError("item embedding must contain finite values")
             with self._lock:
-                self._vectors[item.id] = (item.embedding, item.memory_type)
+                self._vectors[item.id] = (list(item.embedding), item.memory_type)
 
     def delete(self, item_id: str) -> bool:
         with self._lock:
             return self._vectors.pop(item_id, None) is not None
 
     def search(self, vector: list[float], *, limit: int = 10, memory_type: MemoryType | str | None = None) -> list[tuple[str, float]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
         wanted = MemoryType(memory_type) if memory_type is not None else None
         with self._lock:
             scores = [
@@ -249,6 +253,10 @@ class QdrantVectorStore(BaseVectorStore):
             except ImportError as exc:
                 raise RuntimeError("QdrantVectorStore requires qdrant-client") from exc
             client = QdrantClient(url=url, api_key=api_key) if url else QdrantClient(path=":memory:")
+        if not isinstance(collection_name, str) or not collection_name.strip():
+            raise ValueError("collection_name must be non-empty")
+        if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
+            raise ValueError("dimension must be a positive integer")
         self.client, self.collection_name, self.dimension, self.namespace = client, collection_name, dimension, namespace
         self._ready = False
 
@@ -260,8 +268,20 @@ class QdrantVectorStore(BaseVectorStore):
             exists = self.client.collection_exists(collection_name=self.collection_name)
             if not exists:
                 self.client.create_collection(collection_name=self.collection_name, vectors_config=VectorParams(size=dimension, distance=Distance.COSINE))
+            elif self.dimension is not None and self.dimension != dimension:
+                raise ValueError(f"Qdrant collection dimension mismatch: expected {self.dimension}, got {dimension}")
+            else:
+                get_collection = getattr(self.client, "get_collection", None)
+                if callable(get_collection):
+                    info = get_collection(collection_name=self.collection_name)
+                    configured = getattr(getattr(info, "config", None), "params", None)
+                    configured_size = getattr(configured, "size", None)
+                    if configured_size is not None and int(configured_size) != dimension:
+                        raise ValueError(f"Qdrant collection dimension mismatch: existing {configured_size}, got {dimension}")
             self.dimension = dimension
             self._ready = True
+        except ValueError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"unable to initialize Qdrant collection: {exc}") from exc
 
@@ -282,6 +302,8 @@ class QdrantVectorStore(BaseVectorStore):
         return True
 
     def search(self, vector: list[float], *, limit: int = 10, memory_type: MemoryType | str | None = None) -> list[tuple[str, float]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
         if not self._ready:
             return []
         from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -331,7 +353,10 @@ class Neo4jGraphStore:
             raise ValueError("source, relation and target must be non-empty strings")
         props = dict(properties or {})
         if self.driver is None:
-            self._local.setdefault(source, []).append({"source": source, "relation": relation, "target": target, "properties": props})
+            edge = {"source": source, "relation": relation, "target": target, "properties": props}
+            edges = self._local.setdefault(source, [])
+            if edge not in edges:
+                edges.append(edge)
             return
         query = "MERGE (a:MemoryEntity {name: $source}) MERGE (b:MemoryEntity {name: $target}) MERGE (a)-[r:RELATED {kind: $relation}]->(b) SET r += $properties"
         with self.driver.session(database=self.database) as session:
@@ -341,15 +366,15 @@ class Neo4jGraphStore:
     upsert_relation = add_relation
 
     def get_relations(self, entity: str, *, relation: str | None = None, direction: str = "both") -> list[dict[str, Any]]:
+        if direction not in {"in", "out", "both"}:
+            raise ValueError("direction must be in, out, or both")
         if self.driver is None:
-            values = list(self._local.get(entity, []))
+            values = list(self._local.get(entity, [])) if direction in ("out", "both") else []
             if direction in ("in", "both"):
                 values += [edge for edges in self._local.values() for edge in edges if edge["target"] == entity]
             if relation is not None:
                 values = [edge for edge in values if edge["relation"] == relation]
             return values
-        if direction not in {"in", "out", "both"}:
-            raise ValueError("direction must be in, out, or both")
         condition = "a.name = $entity" if direction == "out" else "b.name = $entity" if direction == "in" else "a.name = $entity OR b.name = $entity"
         query = f"MATCH (a:MemoryEntity)-[r:RELATED]->(b:MemoryEntity) WHERE {condition} RETURN a.name AS source, r.kind AS relation, b.name AS target, properties(r) AS properties"
         with self.driver.session(database=self.database) as session:
@@ -365,6 +390,25 @@ class Neo4jGraphStore:
         query = "MATCH (a:MemoryEntity {name: $source})-[r:RELATED {kind: $relation}]->(b:MemoryEntity {name: $target}) DELETE r"
         with self.driver.session(database=self.database) as session:
             result = session.run(query, source=source, relation=relation, target=target).consume()
+            return bool(getattr(result.counters, "relationships_deleted", 0))
+
+    def delete_memory_relation(self, memory_id: str) -> bool:
+        """Remove a relation created for a specific semantic memory item."""
+        if not isinstance(memory_id, str) or not memory_id:
+            raise ValueError("memory_id must be a non-empty string")
+        if self.driver is None:
+            removed = False
+            for source, edges in list(self._local.items()):
+                kept = [edge for edge in edges if edge.get("properties", {}).get("memory_id") != memory_id]
+                removed = removed or len(kept) != len(edges)
+                if kept:
+                    self._local[source] = kept
+                else:
+                    self._local.pop(source, None)
+            return removed
+        query = "MATCH ()-[r:RELATED {memory_id: $memory_id}]->() DELETE r"
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query, memory_id=memory_id).consume()
             return bool(getattr(result.counters, "relationships_deleted", 0))
 
     def close(self) -> None:

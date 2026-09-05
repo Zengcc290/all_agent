@@ -9,6 +9,6 @@ agent = ReActAgent(
 )
 
 answer = agent.run(
-    "关于现在最新的国内外新闻，你了解多少",
+    "关于最新的openai公司的消息，你了解多少，特别是关于最新的大模型的消息。我要的是最新的，最近两天的",
 )
 # print(answer)

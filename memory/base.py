@@ -25,6 +25,11 @@ class BaseMemory:
         self.embedding = embedding or TFIDFEmbedding(self.config.embedding_dimension)
         self.memory_type = MemoryType(memory_type or self.memory_type)
 
+    def _validate_embedding_dimension(self, vector: list[float]) -> None:
+        expected = getattr(self.embedding, "dimension", 0)
+        if expected and len(vector) != expected:
+            raise ValueError(f"embedding dimension {len(vector)} does not match expected dimension {expected}")
+
     def add(
         self,
         content: str,
@@ -54,8 +59,11 @@ class BaseMemory:
             if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float)) or ttl_seconds <= 0:
                 raise ValueError("ttl_seconds must be positive")
             expires_at = utc_now() + timedelta(seconds=float(ttl_seconds))
+        existing = self.document_store.get(item_id) if item_id else None
+        if existing is not None and existing.memory_type != self.memory_type:
+            raise ValueError(f"item id already belongs to {existing.memory_type.value} memory")
         item = MemoryItem(
-            id=item_id or str(uuid4()),
+            id=item_id if item_id is not None else str(uuid4()),
             content=content,
             memory_type=self.memory_type,
             metadata=dict(metadata or {}),
@@ -67,8 +75,22 @@ class BaseMemory:
             relations=list(relations or []),
         )
         item.embedding = self.embedding.embed(item.content)
+        self._validate_embedding_dimension(item.embedding)
+        # Persist first so a vector backend failure cannot create an index entry
+        # for a record that does not exist in the source of truth.
         self.document_store.upsert(item)
-        self.vector_store.upsert(item)
+        try:
+            self.vector_store.upsert(item)
+        except Exception:
+            if existing is None:
+                self.document_store.delete(item.id)
+            else:
+                self.document_store.upsert(existing)
+                if existing.embedding is not None:
+                    self.vector_store.upsert(existing)
+                else:
+                    self.vector_store.delete(existing.id)
+            raise
         return item
 
     remember = add
@@ -94,13 +116,18 @@ class BaseMemory:
     def search(self, query: str, *, limit: int | None = None, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[MemorySearchResult]:
         if not isinstance(query, str):
             raise TypeError("query must be a string")
-        limit = limit or self.config.search_limit
+        if not query.strip():
+            return []
+        limit = self.config.search_limit if limit is None else limit
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         threshold = self.config.similarity_threshold if threshold is None else threshold
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= float(threshold) <= 1:
+            raise ValueError("threshold must be between 0 and 1")
         vector = self.embedding.embed(query)
         # Ask for more than the requested number because metadata/expiry can
         # remove candidates after the vector index has ranked them.
+        self._validate_embedding_dimension(vector)
         candidates = self.vector_store.search(vector, limit=max(limit * 4, limit), memory_type=self.memory_type)
         results: list[MemorySearchResult] = []
         for item_id, score in candidates:

@@ -82,10 +82,23 @@ class MemoryItem:
         self.updated_at = ensure_datetime(self.updated_at) or self.created_at
         self.expires_at = ensure_datetime(self.expires_at)
         self.timestamp = ensure_datetime(self.timestamp)
+        if self.modality is not None and (not isinstance(self.modality, str) or not self.modality.strip()):
+            raise ValueError("modality must be a non-empty string when provided")
         if self.embedding is not None:
-            self.embedding = [float(v) for v in self.embedding]
+            if isinstance(self.embedding, (str, bytes)):
+                raise TypeError("embedding must be an iterable of numbers")
+            try:
+                self.embedding = [float(v) for v in self.embedding]
+            except (TypeError, ValueError) as exc:
+                raise TypeError("embedding must be an iterable of numbers") from exc
+            if any(not math.isfinite(value) for value in self.embedding):
+                raise ValueError("embedding values must be finite")
+            if not self.embedding:
+                raise ValueError("embedding must not be empty")
         if not isinstance(self.relations, list):
             self.relations = list(self.relations)
+        if any(not isinstance(relation, Mapping) for relation in self.relations):
+            raise TypeError("relations must contain mappings")
 
     @property
     def is_expired(self) -> bool:

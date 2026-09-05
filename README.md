@@ -95,8 +95,9 @@ The project now includes an opt-in four-layer memory package under
 [`memory/`](memory/). It provides
 `MemoryManager`, working/episodic/semantic/perceptual memories, SQLite document
 persistence, Qdrant vector search, Neo4j graph relations, and interchangeable
-DashScope/local-transformer/TF-IDF embedding services. It is intentionally not
-wired into `Agent` yet; see [`memory/README.md`](memory/README.md)
-for usage and backend configuration.
+DashScope/local-transformer/TF-IDF embedding services. The built-in
+`memory.manage` and `memory.rag` tools expose the same APIs to the
+current `Agent` tool runtime. See [`memory/README.md`](memory/README.md) for
+usage and backend configuration.
 
 Copy `.env.example` to `.env` and provide credentials locally. Never commit `.env`.

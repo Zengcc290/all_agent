@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import math
 import os
 
 
@@ -41,7 +42,7 @@ class MemoryConfig:
         if isinstance(self.embedding_dimension, bool) or not isinstance(self.embedding_dimension, int) or self.embedding_dimension < 1:
             raise ValueError("embedding_dimension must be a positive integer")
         if self.default_ttl_seconds is not None:
-            if isinstance(self.default_ttl_seconds, bool) or not isinstance(self.default_ttl_seconds, (int, float)) or self.default_ttl_seconds <= 0:
+            if isinstance(self.default_ttl_seconds, bool) or not isinstance(self.default_ttl_seconds, (int, float)) or not math.isfinite(float(self.default_ttl_seconds)) or self.default_ttl_seconds <= 0:
                 raise ValueError("default_ttl_seconds must be positive or None")
         if not isinstance(self.qdrant_collection, str) or not self.qdrant_collection.strip():
             raise ValueError("qdrant_collection must be non-empty")
