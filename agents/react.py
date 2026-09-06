@@ -736,6 +736,9 @@ class ReActAgent(Agent):
             request_messages, use_history=use_history, history_key=history_key
         )
         initial_snapshot = self.tools.snapshot()
+        # Capture the frozen prefix before the routing key is derived: the
+        # first request freezes both the advertised inventory and the epoch.
+        self._sync_frozen_manifest()
         # Permission metadata is retained for compatibility and audit output,
         # but it is not an authorization filter in this deployment.
         loaded_tool_schemas: dict[str, dict[str, Any]] = {}
@@ -786,6 +789,14 @@ class ReActAgent(Agent):
                     if name != self.catalog_tool.spec.name and name not in self.tools:
                         self._ensure_tool_loaded(name)
             current_snapshot = self.tools.snapshot()
+            # Hot-reloaded tools stay executable even when the caller never
+            # passed them through ``tool_names`` or a catalog resolution.
+            hot_in_registry = [
+                name for name in self._hot_tools if name in current_snapshot
+            ]
+            for name in hot_in_registry:
+                if name not in loaded_order:
+                    loaded_order.append(name)
             registrations = {
                 name: current_snapshot[name]
                 for name in loaded_order
@@ -805,6 +816,22 @@ class ReActAgent(Agent):
                 loaded_tool_schemas,
                 catalog_first=defer_tool_loading or self.lazy_tools,
             )
+            if self._hot_tools:
+                # The hot-zone block is rebuilt per request and appended at
+                # the very end so it rides after every cached prefix byte.
+                tail_messages = conversation_for_request[-1:]
+                head_messages = conversation_for_request[:-1]
+                hot_block = {
+                    "role": "system",
+                    "content": "\n".join(
+                        self._hot_zone_lines(loaded_tool_schemas)
+                    ),
+                }
+                conversation_for_request = [
+                    *head_messages,
+                    *tail_messages,
+                    hot_block,
+                ]
             options: dict[str, Any] = {
                 "model": selected_model,
                 "temperature": temperature,
@@ -860,6 +887,12 @@ class ReActAgent(Agent):
                             context,
                             loaded_tool_schemas,
                         )
+                    for name in [
+                        name
+                        for name in self._hot_tools
+                        if name in self.tools and name not in loaded_order
+                    ]:
+                        loaded_order.append(name)
                 continue
 
             if content is None:
@@ -959,6 +992,12 @@ class ReActAgent(Agent):
                 self._load_catalog_result(
                     result, loaded_order, context, loaded_tool_schemas
                 )
+                for name in [
+                    name
+                    for name in self._hot_tools
+                    if name in self.tools and name not in loaded_order
+                ]:
+                    loaded_order.append(name)
 
         raise RuntimeError("maximum ReAct rounds exceeded")
 
@@ -1029,10 +1068,17 @@ class ReActAgent(Agent):
                 for name, registration in registrations.items()
                 if name == self.catalog_tool.spec.name
             }
-        all_tool_names = set(self.tools.snapshot())
-        if self.repository is not None:
-            all_tool_names.update(self.repository.active_tool_names())
-        inventory = ", ".join(sorted(all_tool_names)) or "(none)"
+        # The frozen inventory is captured on the first request and then
+        # byte-stable for the whole epoch: hot-reloaded tools are advertised
+        # in the trailing hot-zone block instead of rewriting this cached
+        # prefix.
+        self._sync_frozen_manifest()
+        frozen_names = sorted(self._frozen_manifest or {})
+        inventory = ", ".join(frozen_names) or "(none)"
+        # Hot-reloaded tools may appear in ``registrations`` (they are fully
+        # executable), but their schemas must never render into this cached
+        # prefix: the trailing hot-zone block advertises them instead.
+        hot_names = set(self._hot_tools)
         lines = [
             self.REACT_INSTRUCTIONS,
             "",
@@ -1046,10 +1092,15 @@ class ReActAgent(Agent):
             lines.extend((*skill_entries, ""))
             lines.extend((self.SKILL_VIEW_REACT_INSTRUCTIONS, ""))
         lines.append("Available tools:")
-        if not registrations:
+        prefix_registrations = {
+            name: registration
+            for name, registration in registrations.items()
+            if name not in hot_names
+        }
+        if not prefix_registrations:
             lines.append("(No tools are currently available; answer directly.)")
         else:
-            for name, (tool, _) in registrations.items():
+            for name, (tool, _) in prefix_registrations.items():
                 schema = self._strict_react_schema(tool.spec.input_schema)
                 lines.append(f"- {name}: {tool.spec.model_description}")
                 lines.append(
@@ -1083,6 +1134,52 @@ class ReActAgent(Agent):
                 )
         instruction = {"role": "system", "content": "\n".join(lines)}
         return [instruction, *conversation]
+
+    def _hot_zone_lines(
+        self, loaded_tool_schemas: Mapping[str, Mapping[str, Any]]
+    ) -> list[str]:
+        """Render the trailing hot-zone block for hot-reloaded tools.
+
+        The block is rebuilt from ``_hot_tools`` on every request and is
+        never stored in conversation history: it always sits after the last
+        message, where model attention is strongest and where any change is
+        free for the provider's prefix cache. Recently reloaded tools keep
+        their full schema; every other hot tool degrades to a roster line.
+        """
+
+        if not self._hot_tools:
+            return []
+        max_full = 4
+        roster = sorted(self._hot_tools)
+        hot_snapshot = self.tools.snapshot()
+        # Keep tools whose executable disappeared from the registry (e.g.
+        # replaced outside this agent) out of the advertised schema list but
+        # still listable by name until they are re-registered or unloaded.
+        renderable = [name for name in roster if name in hot_snapshot]
+        lines = [
+            "Hot-loaded tools (newly registered during this conversation, "
+            "usable immediately):"
+        ]
+        full_names = set(renderable[-max_full:])
+        for name in renderable:
+            tool, _ = hot_snapshot[name]
+            schema = self._strict_react_schema(tool.spec.input_schema)
+            if name in full_names:
+                lines.append(f"- {name}: {tool.spec.model_description}")
+                lines.append(
+                    "  Action Input schema: "
+                    + json.dumps(
+                        schema,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                lines.append(f"- {name}: (see schema above or via catalog)")
+        for name in sorted(set(roster) - set(renderable)):
+            lines.append(f"- {name}: (implementation temporarily unavailable)")
+        return lines
 
     def _skill_directory_lines(self) -> list[str]:
         """Return deterministic skill-directory lines, or an empty list.

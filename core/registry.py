@@ -48,6 +48,22 @@ class ToolRegistry:
             registered_names = tuple(self._tools)
         log_tool_registration(name, generation, registered_names)
 
+    def unregister(self, name: str) -> BaseTool:
+        """Remove one executable from the runtime registry.
+
+        The per-name generation counter is preserved so the generation
+        sequence stays monotonic across unregister/re-register cycles. The
+        removed tool instance is returned to the caller.
+        """
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("tool name must be a non-empty string")
+        with self._lock:
+            tool = self._tools.pop(name, None)
+            if tool is None:
+                raise KeyError(f"tool '{name}' is not registered")
+        return tool
+
     def confirmation_key(self, name: str) -> str:
         """Return a key invalidated whenever the registered implementation changes."""
         tool, generation = self.resolve(name)

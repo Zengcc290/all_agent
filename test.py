@@ -38,6 +38,17 @@ async def main():
             continue
 
         try:
+            # 热加载对照：每轮提问前重新扫描 tool/ 目录。
+            # 第一次调用建立冻结清单；之后 scan 内部对同一实现短路
+            # （already_registered），只有新增/变化的工具才会真正注册。
+            report = agent.discover_tools(reload_modules=True)
+            if agent._frozen_manifest is not None:
+                new_tools = sorted(
+                    record.tool_name for record in report.registered
+                )
+                if new_tools:
+                    print(f"热加载工具：{', '.join(new_tools)}")
+
             answer = await agent.run_auto(
                 query,
                 # Agent 默认复用同一 profile 的历史；/clear 可显式清空。

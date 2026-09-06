@@ -254,6 +254,17 @@ class Agent(ABC):
         self.prompt: dict[str, str] = {}
         self.history: list[dict[str, Any]] = []
         self.max_retries = MAX_RETRIES
+        # Hot-reload cache state. ``_frozen_manifest`` records the
+        # prompt-visible fingerprint (schema hash plus description) of the
+        # tool set living in the stable prompt prefix; it is captured on the
+        # first request and never rebuilt silently afterwards.
+        # ``_hot_tools`` buffers tools registered after that capture so they
+        # are rendered at the end of the prompt instead of rewriting the
+        # cached prefix. ``cache_epoch`` only bumps when the frozen prefix
+        # itself must change.
+        self._frozen_manifest: dict[str, str] | None = None
+        self._hot_tools: dict[str, str] = {}
+        self.cache_epoch: int = 0
 
     def clear_history(self) -> None:
         self.history.clear()
@@ -267,6 +278,84 @@ class Agent(ABC):
         self.tools.register(tool, replace=replace)
         if self.repository is not None:
             self.repository.save(tool.spec, replace=True)
+
+    def register_hot_tool(self, tool: BaseTool, *, replace: bool = False) -> None:
+        """Register a tool for hot-reload rendering instead of prefix edits.
+
+        The tool becomes fully executable immediately; its schema is only
+        advertised through the trailing hot-zone block. When no frozen prompt
+        exists yet the tool simply becomes part of the first frozen prefix.
+        """
+
+        self.register_tool(tool, replace=replace)
+        name = tool.spec.name
+        fingerprint = self._prompt_fingerprint(tool.spec)
+        if self._frozen_manifest is None:
+            return
+        if self._frozen_manifest.get(name) == fingerprint:
+            self._hot_tools.pop(name, None)
+            return
+        self._hot_tools[name] = fingerprint
+
+    def unregister_tool(self, name: str) -> None:
+        """Remove a tool from the runtime registry and the prompt zones.
+
+        Removing a frozen-zone tool invalidates the cached prefix and bumps
+        ``cache_epoch``; removing a hot-zone tool is free. When the agent has
+        not issued a request yet, the tool is simply unregistered.
+        """
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("tool name must be a non-empty string")
+        self.tools.unregister(name)
+        if self._frozen_manifest is None:
+            self._hot_tools.pop(name, None)
+            return
+        if name in self._frozen_manifest:
+            self._frozen_manifest.pop(name)
+            self.cache_epoch += 1
+            return
+        self._hot_tools.pop(name, None)
+
+    @staticmethod
+    def _prompt_fingerprint(spec: Any) -> str:
+        """Fingerprint what a tool contributes to the prompt text.
+
+        ``schema_hash`` alone misses description-only edits, but the
+        description is rendered verbatim into the schema block. Bundle both
+        so a re-registration is a no-op only when the rendered prompt would
+        be byte-identical.
+        """
+
+        return f"{spec.schema_hash}#{spec.description}"
+
+    def _sync_frozen_manifest(self) -> None:
+        """Capture the frozen manifest once, before the first request.
+
+        The first request defines the byte-stable prompt prefix: every tool
+        registered at that moment is advertised from the frozen system
+        message. Later registrations go to the hot zone instead of touching
+        that prefix. This deliberately does not rescan the tool package;
+        callers decide when to run :meth:`discover_tools`.
+        """
+
+        if self._frozen_manifest is not None:
+            return
+        names = set(self.tools.snapshot())
+        if self.repository is not None:
+            names.update(self.repository.active_tool_names())
+        manifest: dict[str, str] = {}
+        for name in names:
+            tool = self.tools.maybe_get(name)
+            if tool is not None:
+                manifest[name] = self._prompt_fingerprint(tool.spec)
+            elif self.repository is not None:
+                stored = self.repository.get(name)
+                if stored is not None and isinstance(stored.get("schema_hash"), str):
+                    manifest[name] = (
+                        f"{stored['schema_hash']}#{stored.get('description', '')}"
+                    )
+        self._frozen_manifest = manifest
 
     def discover_tools(
         self,
@@ -458,6 +547,10 @@ class Agent(ABC):
         conversation = prefix + [dict(message) for message in messages]
 
         initial_snapshot = self.tools.snapshot()
+        # Capture the frozen prefix before the routing key is derived: the
+        # first request freezes both the advertised inventory and the epoch,
+        # so hot re-registrations never change the native routing key.
+        self._sync_frozen_manifest()
         # Permission metadata is retained for compatibility and audit output,
         # but it is not an authorization filter in this deployment.
         visible_order = list(initial_snapshot)
@@ -732,18 +825,25 @@ class Agent(ABC):
 
         The key intentionally excludes user text, tool results, and loaded
         catalog schemas.  Those values belong after the reusable prefix and
-        must not fragment the provider's prefix-cache routing.  Tool names are
-        sorted and repository-backed names are included so lazy loading keeps
-        the same key across rounds.  Skill directory entries (name, version,
-        and content hash) are part of the cached system message, so they are
-        included for the same reason: adding, removing, or editing a skill
-        changes the cached prefix and therefore must start a new cache
-        namespace.
+        must not fragment the provider's prefix-cache routing.  Hot-reloaded
+        tool names are included through the hot-zone roster because their
+        rendered block is part of the request tail, but hot reloads must not
+        change the routing key: only ``cache_epoch`` (frozen-zone structural
+        changes) starts a new cache namespace.  Skill directory entries
+        (name, version, and content hash) are part of the cached system
+        message, so they are included for the same reason: adding, removing,
+        or editing a skill changes the cached prefix and therefore must start
+        a new cache namespace.
         """
 
         names = set(self.tools.snapshot())
         if self.repository is not None:
             names.update(self.repository.active_tool_names())
+        # Hot-reloaded tools must not change the routing key: their schemas
+        # are rendered in the request tail, outside the cached prefix. The
+        # frozen manifest only changes together with ``cache_epoch``.
+        if self._frozen_manifest is not None:
+            names = set(self._frozen_manifest)
         skill_entries = [
             (name, spec.version, spec.content_hash)
             for name, (spec, _) in self.skills.snapshot().items()
@@ -756,6 +856,7 @@ class Agent(ABC):
             "configured_prompt": self._configured_prompt_messages(),
             "tool_names": sorted(names),
             "skill_entries": skill_entries,
+            "cache_epoch": self.cache_epoch,
         }
         # ReAct keeps its protocol instructions in class constants.  Include
         # them in the digest when present so a prompt-template deployment
