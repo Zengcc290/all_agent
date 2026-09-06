@@ -8,6 +8,12 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Literal
 
+from constants import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TIMEOUT,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 # Line-start final-answer markers shared by the ReAct text protocol. The live
@@ -196,7 +202,7 @@ class LLM:
         api_key: str,
         base_url: str,
         model: str,
-        max_retries: int = 3,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         if (
             isinstance(max_retries, bool)
@@ -247,8 +253,8 @@ class LLM:
         messages: list[dict[str, Any]],
         *,
         model: str | None = None,
-        temperature: float = 0.7,
-        timeout: float = 60,
+        temperature: float = DEFAULT_TEMPERATURE,
+        timeout: float = DEFAULT_TIMEOUT,
         on_first_chunk: Callable[[], None] | None = None,
         echo_mode: EchoMode | None = None,
         echo_write: Callable[[str], None] | None = None,
@@ -296,8 +302,8 @@ class LLM:
     def think(
         self,
         messages: list[dict[str, Any]],
-        temperature: float = 0.7,
-        timeout: float = 60,
+        temperature: float = DEFAULT_TEMPERATURE,
+        timeout: float = DEFAULT_TIMEOUT,
         stream_response_bool: bool = True,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
@@ -321,8 +327,8 @@ class LLM:
         messages: list[dict[str, Any]],
         *,
         model: str | None = None,
-        temperature: float = 0.7,
-        timeout: float = 60,
+        temperature: float = DEFAULT_TEMPERATURE,
+        timeout: float = DEFAULT_TIMEOUT,
         stream: bool = False,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,

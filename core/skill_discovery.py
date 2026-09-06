@@ -16,13 +16,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .skill_models import (
+from constants import (
+    DEFAULT_SKILLS_ROOT,
+    ENABLED_FIELD,
+    LEGACY_SKILL_ENTRY_FILENAME,
     MAX_DESCRIPTION_CHARS,
     MAX_TRIGGER_CHARS,
     MAX_VERSION_CHARS,
+    README_FILENAME,
+    SKILL_FILE_SUFFIX,
     SKILL_NAME_PATTERN,
-    SkillSpec,
 )
+
+from .skill_models import SkillSpec
 
 DiscoveryStatus = Literal[
     "registered",
@@ -31,11 +37,6 @@ DiscoveryStatus = Literal[
     "ignored",
     "error",
 ]
-
-SKILL_FILE_SUFFIX = ".md"
-LEGACY_SKILL_ENTRY_FILENAME = "SKILL.md"
-README_FILENAME = "README.md"
-ENABLED_FIELD = "enabled"
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ class SkillDiscoveryError(RuntimeError):
 def discover_skills(
     registry,
     *,
-    root: str | Path = "skills",
+    root: str | Path = DEFAULT_SKILLS_ROOT,
     replace: bool = False,
     strict: bool = False,
 ) -> SkillDiscoveryReport:

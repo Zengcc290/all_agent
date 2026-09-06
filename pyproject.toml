@@ -19,6 +19,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-cov>=5.0", "ruff>=0.8"]
 
 [tool.setuptools]
 packages = ["agents", "core", "tool", "memory", "memory.rag", "memory.storage", "memory.types"]
+py-modules = ["constants"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,11 +12,14 @@ import json
 from collections.abc import Iterator, Mapping
 from typing import Any
 
+from constants import TOOL_LOOP_SAFETY_LIMIT
+
 
 class ToolLoop:
     """Generate bounded conversation rounds and detect stuck tool calls."""
 
-    DEFAULT_SAFETY_LIMIT = 64
+    # 单一来源是 constants.TOOL_LOOP_SAFETY_LIMIT；类属性保留为兼容别名。
+    DEFAULT_SAFETY_LIMIT = TOOL_LOOP_SAFETY_LIMIT
 
     def __init__(self, max_rounds: int | None = None, *, safety_limit: int = DEFAULT_SAFETY_LIMIT) -> None:
         if max_rounds is not None and (

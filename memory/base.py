@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 from uuid import uuid4
 
+from constants import DEFAULT_MEMORY_DB_FILENAME
+
 from .embedding import BaseEmbedding, TFIDFEmbedding
 
 if TYPE_CHECKING:
@@ -30,9 +32,6 @@ class MemoryType(StrEnum):
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
     PERCEPTUAL = "perceptual"
-
-
-DEFAULT_MEMORY_DB_FILENAME = "memory.sqlite3"
 
 
 def default_sqlite_path() -> str:

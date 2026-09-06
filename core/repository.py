@@ -9,13 +9,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from constants import DEFAULT_TOOLS_DB_FILENAME
+
 from .models import ToolSpec
 
 
 class ToolSpecRepository:
     """SQLite persistence for discoverable tool metadata, never executable code."""
 
-    def __init__(self, path: str | Path = "tools.sqlite3") -> None:
+    def __init__(self, path: str | Path = DEFAULT_TOOLS_DB_FILENAME) -> None:
         if not isinstance(path, (str, Path)):
             raise TypeError("path must be a string or pathlib.Path")
         # Expand user paths once and use the normalized value for both

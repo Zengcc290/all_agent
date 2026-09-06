@@ -18,8 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-DEFAULT_UPDATE_LOG_FILENAME = "update_log.sqlite3"
+from constants import DEFAULT_UPDATE_LOG_FILENAME
 
 
 class UpdateLogRepository:

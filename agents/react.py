@@ -46,6 +46,7 @@ from core.activity_log import (
     log_tool_call_started,
     log_tool_registration,
 )
+from constants import DEFAULT_TEMPERATURE, DEFAULT_TIMEOUT
 from core.registry import BaseTool
 from core.parser import parse_openai_tool_calls
 
@@ -641,8 +642,8 @@ class ReActAgent(Agent):
         *,
         max_rounds: int | None = None,
         model: str | None = None,
-        temperature: float = 0.7,
-        timeout: float = 60,
+        temperature: float = DEFAULT_TEMPERATURE,
+        timeout: float = DEFAULT_TIMEOUT,
         tool_names: list[str] | None = None,
         profile_name: str | None = None,
         provider_name: str | None = None,
@@ -680,8 +681,8 @@ class ReActAgent(Agent):
         *,
         max_rounds: int | None = None,
         model: str | None = None,
-        temperature: float = 0.7,
-        timeout: float = 60,
+        temperature: float = DEFAULT_TEMPERATURE,
+        timeout: float = DEFAULT_TIMEOUT,
         tool_names: list[str] | None = None,
         profile_name: str | None = None,
         provider_name: str | None = None,

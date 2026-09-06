@@ -29,15 +29,21 @@ from core import (
 )
 from core import discover_tools as discover_tool_modules
 from core import discover_skills as discover_skill_packages
+from constants import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_SKILLS_ROOT,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TIMEOUT,
+    OBSERVATION_COMPRESS_THRESHOLD,
+    OBSERVATION_PREVIEW_CHARS,
+    OBSERVATION_STUB_PREFIX,
+    PROMPT_CACHE_KEY_VERSION,
+)
 from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
 
 from .llm import EchoMode, LLM
 from .providers import ProviderProfile, ProviderRegistry
-
-MAX_RETRIES = 3
-PROMPT_CACHE_KEY_VERSION = "pc-v1"
-DEFAULT_SKILLS_ROOT = "skills"
 
 
 class Agent(ABC):
@@ -253,7 +259,7 @@ class Agent(ABC):
         self.role = ["user", "assistant", "system", "tool"]
         self.prompt: dict[str, str] = {}
         self.history: list[dict[str, Any]] = []
-        self.max_retries = MAX_RETRIES
+        self.max_retries = DEFAULT_MAX_RETRIES
         # Hot-reload cache state. ``_frozen_manifest`` records the
         # prompt-visible fingerprint (schema hash plus description) of the
         # tool set living in the stable prompt prefix; it is captured on the
@@ -493,8 +499,8 @@ class Agent(ABC):
         *,
         max_rounds: int | None = None,
         model: str | None = None,
-        temperature: float = 0.7,
-        timeout: float = 60,
+        temperature: float = DEFAULT_TEMPERATURE,
+        timeout: float = DEFAULT_TIMEOUT,
         tool_names: list[str] | None = None,
         profile_name: str | None = None,
         provider_name: str | None = None,
@@ -1111,13 +1117,6 @@ def _result_json(result: Any) -> str:
     except Exception:  # noqa: BLE001
         payload = result.model_dump()
     return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-# Observations larger than this are compressed when a conversation is saved
-# into the profile history. Inside the running turn the full payload is kept.
-OBSERVATION_COMPRESS_THRESHOLD = 12_000
-OBSERVATION_STUB_PREFIX = "[已压缩的历史工具结果"
-OBSERVATION_PREVIEW_CHARS = 400
 
 
 def compress_saved_history(

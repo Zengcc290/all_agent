@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+from constants import DEFAULT_SKILLS_ROOT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .models import ExecutionContext, ToolSpec
@@ -66,7 +67,7 @@ class SkillCatalogTool(BaseTool):
         self,
         registry: SkillRegistry,
         *,
-        root: str | Path = "skills",
+        root: str | Path = DEFAULT_SKILLS_ROOT,
     ) -> None:
         if not isinstance(registry, SkillRegistry):
             raise TypeError("registry must be a SkillRegistry")

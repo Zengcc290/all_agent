@@ -12,12 +12,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-SKILL_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
-
-MAX_DESCRIPTION_CHARS = 2000
-MAX_VERSION_CHARS = 32
-MAX_TRIGGER_CHARS = 200
-CONTENT_HASH_LENGTH = 64
+from constants import (
+    CONTENT_HASH_LENGTH,
+    MAX_DESCRIPTION_CHARS,
+    MAX_TRIGGER_CHARS,
+    MAX_VERSION_CHARS,
+    SKILL_NAME_PATTERN,
+)
 
 
 @dataclass(frozen=True)
