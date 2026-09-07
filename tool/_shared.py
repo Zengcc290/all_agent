@@ -277,6 +277,20 @@ def run_process(
     )
 
 
+def git_env() -> dict[str, str]:
+    """Base environment for git subprocesses: never hang on interactive prompts.
+
+    Deliberately sets only ``GIT_TERMINAL_PROMPT=0``: overriding GIT_ASKPASS or
+    setting GIT_CONFIG_NOSYSTEM breaks credential helpers such as Git Credential
+    Manager (registered at the system level on Windows), which then cannot
+    authenticate with stored credentials. With prompts disabled, git fails fast
+    instead of hanging when no credential is available.
+    """
+    return {
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def run_git(
     args: list[str],
     *,
@@ -288,11 +302,7 @@ def run_git(
         ["git", *args],
         cwd=cwd,
         timeout_seconds=timeout_seconds,
-        env={
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": "git-askpass-disabled",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        },
+        env=git_env(),
         shell=False,
     )
 

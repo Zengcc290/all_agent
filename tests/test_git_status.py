@@ -146,6 +146,18 @@ async def test_git_status_runs_without_side_effect_confirmation(tmp_path):
     assert batch.results[0].data["branch"] == "main"
 
 
+def test_git_env_preserves_credential_helpers():
+    """GIT_ASKPASS / GIT_CONFIG_NOSYSTEM must stay unset so credential
+    managers (registered at the system level on Windows) can authenticate."""
+
+    from tool._shared import git_env
+
+    env = git_env()
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_CONFIG_NOSYSTEM" not in env
+
+
 def test_git_status_is_auto_discoverable():
     from core import discover_tools
 
