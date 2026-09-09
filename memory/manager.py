@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType
-from .embedding import BaseEmbedding, TFIDFEmbedding
+from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType, make_default_embedding
+from .embedding import BaseEmbedding
 from .storage import BaseDocumentStore, BaseVectorStore, InMemoryVectorStore, Neo4jGraphStore, QdrantVectorStore, SQLiteDocumentStore
 from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
 
@@ -22,7 +22,7 @@ class MemoryManager:
             if embedding is not None
             else embedding_service
             if embedding_service is not None
-            else TFIDFEmbedding(self.config.embedding_dimension)
+            else make_default_embedding(self.config)
         )
         self.document_store = (
             document_store

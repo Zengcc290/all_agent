@@ -6,7 +6,7 @@ Applications opt in with ``from memory import MemoryManager``; the built-in
 Package layout:
 
 - ``base``      data structures (``MemoryItem``, ``MemoryConfig``) and ``BaseMemory``
-- ``embedding`` DashScope / local-transformer / TF-IDF embedding services
+- ``embedding`` vendor-neutral API embedding (qwen3-embedding-0.6b via OpenAI-compatible endpoint)
 - ``types``     working, episodic, semantic and perceptual memories
 - ``storage``   SQLite documents, local/Qdrant vector indexes, Neo4j graph
 - ``rag``       document parsing, chunking and the RAG pipeline
@@ -21,14 +21,15 @@ from .base import (
     MemoryType,
     default_sqlite_path,
     ensure_datetime,
+    make_default_embedding,
     utc_now,
 )
 from .embedding import (
+    APIEmbedding,
     BaseEmbedding,
-    DashScopeEmbedding,
+    DEFAULT_EMBEDDING_BASE_URL,
+    DEFAULT_EMBEDDING_MODEL,
     EmbeddingService,
-    LocalTransformerEmbedding,
-    TFIDFEmbedding,
 )
 from .manager import MemoryManager
 from .storage import (
@@ -44,10 +45,10 @@ from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemo
 from .rag import Document, DocumentProcessor, RAGPipeline, RetrievedChunk
 
 __all__ = [
-    "BaseMemory", "MemoryConfig", "MemoryItem", "MemoryManager", "MemorySearchResult", "MemoryType",
+    "APIEmbedding", "BaseEmbedding", "BaseMemory", "DEFAULT_EMBEDDING_BASE_URL", "DEFAULT_EMBEDDING_MODEL",
+    "EmbeddingService", "MemoryConfig", "MemoryItem", "MemoryManager", "MemorySearchResult", "MemoryType",
     "WorkingMemory", "EpisodicMemory", "SemanticMemory", "PerceptualMemory",
-    "BaseEmbedding", "EmbeddingService", "DashScopeEmbedding", "LocalTransformerEmbedding", "TFIDFEmbedding",
     "BaseDocumentStore", "BaseVectorStore", "InMemoryVectorStore", "QdrantVectorStore", "Neo4jGraphStore", "SQLiteDocumentStore", "cosine_similarity",
-    "ensure_datetime", "utc_now", "default_sqlite_path",
+    "ensure_datetime", "utc_now", "default_sqlite_path", "make_default_embedding",
     "Document", "DocumentProcessor", "RAGPipeline", "RetrievedChunk",
 ]

@@ -7,10 +7,12 @@ import pytest
 from memory import MemoryConfig, MemoryManager
 from memory.rag import Document, DocumentProcessor, RAGPipeline
 
+from conftest import HashEmbedding
+
 
 @pytest.fixture()
 def manager() -> MemoryManager:
-    return MemoryManager(MemoryConfig(sqlite_path=":memory:"))
+    return MemoryManager(MemoryConfig(sqlite_path=":memory:"), embedding=HashEmbedding())
 
 
 @pytest.fixture()
@@ -128,12 +130,17 @@ def test_tool_default_sqlite_path_prefers_env(monkeypatch: pytest.MonkeyPatch):
 
 def test_memory_tool_persists_across_instances(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "tool-memory.sqlite3"))
+    from memory import default_sqlite_path
     from tool.memory_tool import MemoryTool, MemoryToolInput
 
-    first = MemoryTool()
+    def make_tool() -> MemoryTool:
+        manager = MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path()), embedding=HashEmbedding())
+        return MemoryTool(manager=manager)
+
+    first = make_tool()
     first.execute(MemoryToolInput(action="add", content="persistent fact", memory_type="semantic"))
 
-    second = MemoryTool()
+    second = make_tool()
     output = second.execute(MemoryToolInput(action="search", query="persistent fact", memory_type="semantic"))
 
     assert output.count >= 1
@@ -142,9 +149,14 @@ def test_memory_tool_persists_across_instances(tmp_path: Path, monkeypatch: pyte
 
 def test_rag_tool_ingest_and_retrieve_with_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "rag-memory.sqlite3"))
+    from memory import default_sqlite_path
     from tool.rag_tool import RAGTool, RAGToolInput
 
-    tool = RAGTool()
+    def make_tool() -> RAGTool:
+        pipeline = RAGPipeline(MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path()), embedding=HashEmbedding()))
+        return RAGTool(pipeline=pipeline)
+
+    tool = make_tool()
     ingest = tool.execute(RAGToolInput(action="ingest", text="The zebra lives in savannah. " * 20, chunk_size=100, overlap=20))
     assert ingest.count >= 2
 

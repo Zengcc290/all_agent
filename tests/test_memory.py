@@ -1,11 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
-from memory import MemoryConfig, MemoryManager, MemoryType, Neo4jGraphStore, TFIDFEmbedding
+from memory import MemoryConfig, MemoryManager, MemoryType, Neo4jGraphStore
 from memory.storage import SQLiteDocumentStore
+
+from conftest import HashEmbedding
+
+
+def _manager(**config_kwargs):
+    return MemoryManager(MemoryConfig(sqlite_path=":memory:", **config_kwargs), embedding=HashEmbedding())
 
 
 def test_manager_crud_search_and_type_isolation():
-    manager = MemoryManager(MemoryConfig(sqlite_path=":memory:"))
+    manager = _manager()
     item = manager.add("Python is a programming language", memory_type=MemoryType.SEMANTIC)
     manager.add("The meeting starts at nine", memory_type=MemoryType.EPISODIC)
 
@@ -18,7 +24,7 @@ def test_manager_crud_search_and_type_isolation():
 
 
 def test_working_memory_ttl_and_capacity():
-    manager = MemoryManager(MemoryConfig(sqlite_path=":memory:", working_memory_capacity=2))
+    manager = _manager(working_memory_capacity=2)
     manager.working.set("a", 1, importance=0.1)
     manager.working.set("b", 2, importance=0.9)
     manager.working.set("c", 3, importance=0.9)
@@ -31,17 +37,16 @@ def test_working_memory_ttl_and_capacity():
 
 
 def test_semantic_memory_graph_fallback():
-    manager = MemoryManager(MemoryConfig(sqlite_path=":memory:"), graph_store=Neo4jGraphStore())
+    manager = MemoryManager(MemoryConfig(sqlite_path=":memory:"), graph_store=Neo4jGraphStore(), embedding=HashEmbedding())
     manager.semantic.add_fact("Alice", "knows", "Bob")
     relations = manager.semantic.related("Alice")
     assert relations[0]["target"] == "Bob"
 
 
-def test_tfidf_dimension_is_stable():
-    embedding = TFIDFEmbedding(32)
+def test_hash_embedding_dimension_is_stable():
+    embedding = HashEmbedding(32)
     assert len(embedding.embed("hello")) == 32
-    embedding.fit(["hello world", "another document"])
-    assert len(embedding.embed("hello")) == 32
+    assert len(embedding.embed("hello world")) == 32
 
 
 def test_sqlite_memory_store_creates_nested_parent_directory(tmp_path):
@@ -53,7 +58,7 @@ def test_sqlite_memory_store_creates_nested_parent_directory(tmp_path):
 
 
 def test_manager_preserves_falsey_injected_embedding():
-    class FalseyEmbedding(TFIDFEmbedding):
+    class FalseyEmbedding(HashEmbedding):
         def __bool__(self):
             return False
 

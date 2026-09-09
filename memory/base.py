@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from constants import DEFAULT_MEMORY_DB_FILENAME
 
-from .embedding import BaseEmbedding, TFIDFEmbedding
+from .embedding import APIEmbedding, BaseEmbedding, DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL
 
 if TYPE_CHECKING:
     from .storage import BaseDocumentStore, BaseVectorStore
@@ -42,6 +42,24 @@ def default_sqlite_path() -> str:
     affected.
     """
     return os.getenv("MEMORY_DB_PATH") or DEFAULT_MEMORY_DB_FILENAME
+
+
+def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
+    """Build the default embedding service from a (possibly implicit) config.
+
+    Uses ``MemoryConfig.from_env()`` when no config is supplied, so the
+    ``DASHSCOPE_API_KEY`` environment variable alone is enough to activate
+    qwen3-embedding-0.6b.
+    """
+    config = config if config is not None else MemoryConfig.from_env()
+    return APIEmbedding(
+        api_key=config.embedding_api_key,
+        model=config.embedding_model,
+        base_url=config.embedding_base_url,
+        dimension=config.embedding_dimension,
+        timeout=config.embedding_timeout,
+        batch_size=config.embedding_batch_size,
+    )
 
 
 def utc_now() -> datetime:
@@ -206,7 +224,15 @@ class MemoryConfig:
     working_memory_capacity: int = 100
     search_limit: int = 10
     similarity_threshold: float = 0.0
-    embedding_dimension: int = 384
+    # qwen3-embedding-0.6b emits 1024-dimensional vectors.
+    embedding_dimension: int = 1024
+    # Embedding provider settings; an API key may also come from the
+    # ``DASHSCOPE_API_KEY`` environment variable when left unset here.
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_base_url: str = DEFAULT_EMBEDDING_BASE_URL
+    embedding_api_key: str | None = None
+    embedding_timeout: float = 30.0
+    embedding_batch_size: int = 10
     qdrant_url: str | None = None
     qdrant_collection: str = "helloagents_memory"
     neo4j_uri: str | None = None
@@ -225,6 +251,16 @@ class MemoryConfig:
                 raise ValueError(f"{name} must be between 0 and 1")
         if isinstance(self.embedding_dimension, bool) or not isinstance(self.embedding_dimension, int) or self.embedding_dimension < 1:
             raise ValueError("embedding_dimension must be a positive integer")
+        for name in ("embedding_model", "embedding_base_url"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(self.embedding_api_key, (str, type(None))) or (isinstance(self.embedding_api_key, str) and not self.embedding_api_key.strip()):
+            raise ValueError("embedding_api_key must be a non-empty string or None")
+        for name in ("embedding_timeout", "embedding_batch_size"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f"{name} must be positive")
         if self.default_ttl_seconds is not None:
             if isinstance(self.default_ttl_seconds, bool) or not isinstance(self.default_ttl_seconds, (int, float)) or not math.isfinite(float(self.default_ttl_seconds)) or self.default_ttl_seconds <= 0:
                 raise ValueError("default_ttl_seconds must be positive or None")
@@ -238,7 +274,9 @@ class MemoryConfig:
         """Build configuration from environment variables.
 
         Supported names mirror the dataclass fields, e.g.
-        ``HELLOAGENTS_MEMORY_SQLITE_PATH`` and ``..._QDRANT_URL``.
+        ``HELLOAGENTS_MEMORY_SQLITE_PATH`` and ``..._QDRANT_URL``.  Numeric
+        fields are coerced appropriately; ``embedding_api_key`` also falls
+        back to the common ``DASHSCOPE_API_KEY`` variable.
         """
         values: dict[str, object] = {}
         for field_name in cls.__dataclass_fields__:
@@ -246,14 +284,16 @@ class MemoryConfig:
             raw = os.getenv(key)
             if raw is None:
                 continue
-            if field_name in {"working_memory_capacity", "search_limit", "embedding_dimension"}:
+            if field_name in {"working_memory_capacity", "search_limit", "embedding_dimension", "embedding_batch_size"}:
                 values[field_name] = int(raw)
-            elif field_name in {"default_ttl_seconds", "similarity_threshold"}:
+            elif field_name in {"default_ttl_seconds", "similarity_threshold", "embedding_timeout"}:
                 values[field_name] = None if raw.casefold() == "none" else float(raw)
             elif field_name == "extra":
                 continue
             else:
                 values[field_name] = raw
+        if values.get("embedding_api_key") is None:
+            values["embedding_api_key"] = os.getenv("DASHSCOPE_API_KEY")
         return cls(**values)
 
     def to_dict(self) -> dict[str, object]:
@@ -280,7 +320,7 @@ class BaseMemory:
             else SQLiteDocumentStore(self.config.sqlite_path)
         )
         self.vector_store = vector_store if vector_store is not None else InMemoryVectorStore()
-        self.embedding = embedding if embedding is not None else TFIDFEmbedding(self.config.embedding_dimension)
+        self.embedding = embedding if embedding is not None else make_default_embedding(self.config)
         self.memory_type = MemoryType(memory_type or self.memory_type)
 
     def _validate_embedding_dimension(self, vector: list[float]) -> None:
@@ -390,7 +430,7 @@ class BaseMemory:
         results: list[MemorySearchResult] = []
         for item_id, score in candidates:
             item = self.get(item_id)
-            # A zero vector (or an unrelated hashed TF-IDF vector) is not a
+            # A zero vector (or an unrelated embedded vector) is not a
             # meaningful match even when callers leave threshold at its
             # permissive default of 0.
             if item is None or score < threshold or (query.strip() and score <= 0):
@@ -430,5 +470,6 @@ __all__ = [
     "MemoryType",
     "default_sqlite_path",
     "ensure_datetime",
+    "make_default_embedding",
     "utc_now",
 ]

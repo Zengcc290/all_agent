@@ -1,27 +1,44 @@
-"""Unified embedding service implementations.
+"""Unified embedding service backed by an OpenAI-compatible HTTP API.
 
-All providers expose the same tiny interface, making them interchangeable in
-the manager and in applications that want to supply their own model.
+Only one concrete implementation ships: :class:`APIEmbedding`, a vendor-neutral
+client for any provider that exposes the OpenAI ``/embeddings`` shape (DashScope
+for qwen3-embedding-0.6b, OpenAI, SiliconFlow, Zhipu, local vLLM, ...).  The
+abstract :class:`BaseEmbedding` interface stays so applications can inject
+their own model or callable without touching the rest of the system.
+
+The default model is ``qwen3-embedding-0.6b`` (1024 dimensions) served by
+DashScope's OpenAI-compatible endpoint.  The API key is read from
+``DASHSCOPE_API_KEY`` (or ``MemoryConfig.embedding_api_key`` / the
+``HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`` environment variable).
 """
 
 from __future__ import annotations
 
-import hashlib
+import json
 import math
-import re
+import os
 import urllib.error
 import urllib.request
-import json
 from abc import ABC, abstractmethod
-from collections import Counter
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+
+#: Default vendor endpoint and model used when nothing else is configured.
+DEFAULT_EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
+
+#: DashScope style batch ceiling; other providers tolerate different sizes and
+#: can lower/raise ``batch_size`` at construction time.
+DEFAULT_BATCH_SIZE = 10
 
 
 class BaseEmbedding(ABC):
-    dimension: int
+    """Tiny interface every embedding provider implements."""
+
+    dimension: int = 0
 
     @abstractmethod
     def embed(self, text: str) -> list[float]:
+        """Embed one text into a finite numeric vector."""
         raise NotImplementedError
 
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
@@ -31,148 +48,65 @@ class BaseEmbedding(ABC):
         return [self.embed(text) for text in values]
 
 
-class TFIDFEmbedding(BaseEmbedding):
-    """A deterministic, dependency-free TF-IDF style embedding.
+class APIEmbedding(BaseEmbedding):
+    """OpenAI-compatible ``/embeddings`` client for any provider.
 
-    Tokens are hashed into a fixed-size vector, so adding documents never
-    changes vector dimensionality (important for persistent vector stores).
-    ``fit`` may be called with a corpus to improve IDF weighting.
-    """
+    ``base_url`` is the provider root without the trailing ``/embeddings``
+    path (e.g. ``https://dashscope.aliyuncs.com/compatible-mode/v1``).  The
+    request body and the response parser follow the OpenAI shape, and the
+    parser additionally accepts DashScope's native ``output.embeddings``
+    layout so either gateway works.
 
-    def __init__(self, dimension: int = 384) -> None:
-        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
-            raise ValueError("dimension must be a positive integer")
-        self.dimension = dimension
-        self._idf: dict[int, float] = {}
-        self._documents = 0
-
-    @staticmethod
-    def tokenize(text: str) -> list[str]:
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-        # Keep Unicode words (including Chinese runs) and latin/numeric terms.
-        return re.findall(r"[\w]+", text.casefold(), flags=re.UNICODE)
-
-    def fit(self, texts: Iterable[str]) -> "TFIDFEmbedding":
-        documents = list(texts)
-        df: Counter[int] = Counter()
-        for text in documents:
-            seen = set()
-            for token in self.tokenize(text):
-                seen.add(self._index(token))
-            df.update(seen)
-        self._documents = len(documents)
-        self._idf = {
-            index: math.log((1 + self._documents) / (1 + count)) + 1.0
-            for index, count in df.items()
-        }
-        return self
-
-    def _index(self, token: str) -> int:
-        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-        return int.from_bytes(digest, "big") % self.dimension
-
-    def embed(self, text: str) -> list[float]:
-        tokens = self.tokenize(text)
-        vector = [0.0] * self.dimension
-        if not tokens:
-            return vector
-        counts = Counter(tokens)
-        for token, count in counts.items():
-            index = self._index(token)
-            # Sublinear TF reduces the impact of repeated boilerplate words.
-            tf = 1.0 + math.log(float(count))
-            vector[index] += tf * self._idf.get(index, 1.0)
-        norm = math.sqrt(sum(value * value for value in vector))
-        return [value / norm for value in vector] if norm else vector
-
-
-class LocalTransformerEmbedding(BaseEmbedding):
-    """Sentence-transformers adapter loaded lazily.
-
-    A model instance or callable can be injected in tests and in applications;
-    the optional ``sentence-transformers`` package is only imported when needed.
-    """
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", model: Any = None) -> None:
-        if not isinstance(model_name, str) or not model_name.strip():
-            raise ValueError("model_name must be non-empty")
-        if model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as exc:
-                raise RuntimeError(
-                    "LocalTransformerEmbedding requires sentence-transformers; "
-                    "install it or inject a model instance"
-                ) from exc
-            model = SentenceTransformer(model_name)
-        if not callable(getattr(model, "encode", None)) and not callable(model):
-            raise TypeError("model must provide encode() or be callable")
-        self.model_name = model_name
-        self.model = model
-        dimensions = getattr(model, "get_sentence_embedding_dimension", lambda: None)()
-        self.dimension = int(dimensions) if dimensions else 0
-
-    def embed(self, text: str) -> list[float]:
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-        if callable(getattr(self.model, "encode", None)):
-            try:
-                value = self.model.encode(text, convert_to_numpy=False)
-            except TypeError:
-                value = self.model.encode(text)
-        else:
-            value = self.model(text)
-        # Some model wrappers return a one-row matrix for a single input.
-        try:
-            first = value[0]
-        except (IndexError, KeyError, TypeError):
-            first = None
-        if isinstance(first, (list, tuple)) or getattr(first, "ndim", 0) > 0:
-            value = first
-        result = [float(item) for item in value]
-        if not result or any(not math.isfinite(item) for item in result):
-            raise ValueError("embedding model returned an invalid vector")
-        if not self.dimension:
-            self.dimension = len(result)
-        return result
-
-
-class DashScopeEmbedding(BaseEmbedding):
-    """DashScope compatible embedding API adapter using the standard library.
-
-    ``batch_size`` caps the number of texts sent per request; DashScope
-    text-embedding-v3 accepts at most 10 texts per call, so ``embed_batch``
-    splits larger inputs automatically while preserving input order.
+    ``client`` may be injected for tests: a callable ``client(payload, *)``
+    returning a parsed JSON object, or an object exposing
+    ``embeddings.create(input=..., model=...)``.
     """
 
     def __init__(
         self,
-        api_key: str,
-        model: str = "text-embedding-v3",
-        base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+        api_key: str | None = None,
         *,
-        client: Any = None,
+        model: str = DEFAULT_EMBEDDING_MODEL,
+        base_url: str = DEFAULT_EMBEDDING_BASE_URL,
+        dimension: int | None = None,
         timeout: float = 30.0,
-        batch_size: int = 10,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        client: Any = None,
+        api_key_env: str = "DASHSCOPE_API_KEY",
     ) -> None:
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ValueError("api_key must be non-empty")
         if not isinstance(model, str) or not model.strip():
-            raise ValueError("model must be non-empty")
-        self.api_key, self.model, self.base_url = api_key.strip(), model.strip(), base_url.strip()
-        if not self.base_url:
-            raise ValueError("base_url must be non-empty")
+            raise ValueError("model must be a non-empty string")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("base_url must be a non-empty string")
+        if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
+            raise ValueError("dimension must be a positive integer")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("timeout must be positive")
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError("batch_size must be a positive integer")
-        self.client = client
-        self.timeout = timeout
+        if not isinstance(api_key_env, str) or not api_key_env.strip():
+            raise ValueError("api_key_env must be a non-empty string")
+
+        resolved_key = api_key if api_key is not None else os.getenv(api_key_env)
+        if not resolved_key or not str(resolved_key).strip():
+            raise RuntimeError(
+                f"APIEmbedding requires an API key: pass api_key=... or set the "
+                f"{api_key_env} environment variable"
+            )
+        self.api_key = str(resolved_key).strip()
+        self.model = model.strip()
+        self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
         self.batch_size = batch_size
-        self.dimension = 0
+        self.client = client
+        self.api_key_env = api_key_env
+        self.dimension = dimension or 0
+
+    # ------------------------------------------------------------------ embed
 
     def embed(self, text: str) -> list[float]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
         return self.embed_batch([text])[0]
 
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
@@ -183,95 +117,137 @@ class DashScopeEmbedding(BaseEmbedding):
             return []
         result: list[list[float]] = []
         for start in range(0, len(values), self.batch_size):
-            batch = values[start : start + self.batch_size]
-            result.extend(self._embed_batch_once(batch))
+            result.extend(_embed_batch_once(self, values[start : start + self.batch_size]))
         return result
 
-    def _embed_batch_once(self, values: list[str]) -> list[list[float]]:
-        if self.client is not None:
-            if callable(self.client):
-                response = self.client(values, model=self.model)
-            elif callable(getattr(self.client, "embed", None)):
-                response = self.client.embed(values, model=self.model)
-            elif callable(getattr(getattr(self.client, "embeddings", None), "create", None)):
-                response = self.client.embeddings.create(input=values, model=self.model)
-            else:
-                raise TypeError("client must be callable or expose embed()/embeddings.create()")
-            result = _extract_embeddings(response)
-        else:
-            body = json.dumps({"model": self.model, "input": {"texts": values}}).encode("utf-8")
-            request = urllib.request.Request(
-                self.base_url,
-                data=body,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    result = _extract_embeddings(json.loads(response.read().decode("utf-8")))
-            except (urllib.error.URLError, ValueError) as exc:
-                raise RuntimeError(f"DashScope embedding request failed: {exc}") from exc
-        if result:
-            self.dimension = len(result[0])
-            if any(len(vector) != self.dimension for vector in result) or len(result) != len(values):
-                raise RuntimeError("embedding response count or dimensions did not match input")
-        return result
+    # ------------------------------------------------------------------ config
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": type(self).__name__,
+            "model": self.model,
+            "base_url": self.base_url,
+            "dimension": self.dimension,
+            "batch_size": self.batch_size,
+        }
+
+    def __repr__(self) -> str:
+        return f"APIEmbedding(model={self.model!r}, dimension={self.dimension}, base_url={self.base_url!r})"
 
 
-def _extract_embeddings(response: Any) -> list[list[float]]:
+def _embed_batch_once(embedding: APIEmbedding, values: list[str]) -> list[list[float]]:
+    """Send one batch and normalize the response into a list of vectors."""
+    response = _request(embedding, values)
+    vectors = _extract_embedding_vectors(response)
+    if len(vectors) != len(values):
+        raise RuntimeError(
+            f"embedding response count {len(vectors)} did not match input count {len(values)}"
+        )
+    dimension = len(vectors[0]) if vectors else 0
+    if dimension == 0:
+        raise RuntimeError("embedding response contained empty vectors")
+    if any(len(vector) != dimension for vector in vectors):
+        raise RuntimeError("embedding response contained inconsistent dimensions")
+    if any(not math.isfinite(value) for vector in vectors for value in vector):
+        raise RuntimeError("embedding response contained non-finite values")
+    if embedding.dimension and embedding.dimension != dimension:
+        raise RuntimeError(
+            f"embedding dimension {dimension} does not match expected dimension {embedding.dimension}"
+        )
+    embedding.dimension = dimension
+    return vectors
+
+
+def _request(embedding: APIEmbedding, values: list[str]) -> Any:
+    """Perform the HTTP call (or the injected test client) and parse JSON."""
+    payload = {"model": embedding.model, "input": values}
+    client = embedding.client
+    if client is not None:
+        if callable(client):
+            return client(payload, model=embedding.model)
+        if callable(getattr(client, "embed", None)):
+            return client.embed(values, model=embedding.model)
+        if callable(getattr(getattr(client, "embeddings", None), "create", None)):
+            return client.embeddings.create(input=values, model=embedding.model)
+        raise TypeError("client must be callable or expose embed()/embeddings.create()")
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{embedding.base_url}/embeddings",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {embedding.api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=embedding.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(
+            f"embedding API HTTP {exc.code}: {detail}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"embedding API request failed: {exc.reason}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"embedding API returned invalid JSON: {exc}") from exc
+
+
+def _extract_embedding_vectors(response: Any) -> list[list[float]]:
+    """Accept OpenAI ``data[].embedding`` and DashScope ``output.embeddings``."""
     if isinstance(response, dict):
-        data = response.get("output", response)
+        data = response.get("data")
+        if data is None:
+            output = response.get("output", {})
+            data = output.get("embeddings") if isinstance(output, dict) else None
     else:
-        data = getattr(response, "output", None) or getattr(response, "data", response)
-    if isinstance(data, dict):
-        data = data.get("embeddings", data.get("data", []))
-    if not isinstance(data, (list, tuple)):
-        try:
-            data = list(data)
-        except TypeError:
-            data = []
-    indexed: list[tuple[int | None, list[float]]] = []
-    for item in data or []:
+        data = getattr(response, "data", None)
+        if data is None:
+            output = getattr(response, "output", None)
+            data = getattr(output, "embeddings", None) if output is not None else None
+    if data is None:
+        raise RuntimeError("embedding response contained no data/embeddings list")
+
+    indexed: list[tuple[int, list[float]]] = []
+    for index, item in enumerate(data):
         if isinstance(item, dict):
             values = item.get("embedding")
-            index = item.get("text_index", item.get("index"))
+            explicit = item.get("index", item.get("text_index"))
         else:
             values = getattr(item, "embedding", item)
-            index = getattr(item, "text_index", None)
-            if index is None:
-                index = getattr(item, "index", None)
+            explicit = getattr(item, "index", None)
+            if explicit is None:
+                explicit = getattr(item, "text_index", None)
         if values is None:
-            continue
-        vector = [float(value) for value in values]
-        if not vector or any(not math.isfinite(value) for value in vector):
-            raise RuntimeError("embedding response contained an invalid vector")
-        indexed.append((int(index) if index is not None else None, vector))
-    if not indexed:
-        raise RuntimeError("embedding response contained no vectors")
-    if any(index is not None for index, _ in indexed):
-        # Providers such as DashScope label each embedding with its input
-        # position; reassemble strictly in that order and reject gaps.
-        size = max(index for index, _ in indexed if index is not None) + 1
-        if any(index is None for index, _ in indexed) or size != len(indexed):
-            raise RuntimeError("embedding response indices were incomplete")
-        ordered: list[list[float] | None] = [None] * size
-        for index, vector in indexed:
-            if index < 0 or index >= size:
-                raise RuntimeError("embedding response index was out of range")
-            ordered[index] = vector
-        if any(vector is None for vector in ordered):
-            raise RuntimeError("embedding response indices were incomplete")
-        return [vector for vector in ordered if vector is not None]
+            raise RuntimeError("embedding response item contained no embedding vector")
+        try:
+            vector = [float(value) for value in values]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("embedding response item contained an invalid vector") from exc
+        if not vector:
+            raise RuntimeError("embedding response item contained an empty vector")
+        # Reorder explicitly when providers label each vector with a position.
+        if explicit is not None:
+            indexed.append((int(explicit), vector))
+        else:
+            indexed.append((index, vector))
+
+    indexed.sort(key=lambda pair: pair[0])
+    positions = [position for position, _ in indexed]
+    if positions != list(range(len(indexed))):
+        raise RuntimeError("embedding response indices were incomplete")
     return [vector for _, vector in indexed]
 
 
-# Friendly alias used by integrations that call this layer an embedding service.
+# A friendly alias used by integrations that treat this layer as a service.
 EmbeddingService = BaseEmbedding
 
 __all__ = [
+    "APIEmbedding",
     "BaseEmbedding",
+    "DEFAULT_EMBEDDING_BASE_URL",
+    "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_BATCH_SIZE",
     "EmbeddingService",
-    "DashScopeEmbedding",
-    "LocalTransformerEmbedding",
-    "TFIDFEmbedding",
 ]
