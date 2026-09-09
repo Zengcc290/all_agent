@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from constants import DEFAULT_MEMORY_DB_FILENAME
 
-from .embedding import APIEmbedding, BaseEmbedding, DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL
+from .embedding import APIEmbedding, BaseEmbedding, DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL, load_dotenv_once
 
 if TYPE_CHECKING:
     from .storage import BaseDocumentStore, BaseVectorStore
@@ -279,6 +279,7 @@ class MemoryConfig:
         back to the common ``DASHSCOPE_API_KEY`` variable.
         """
         values: dict[str, object] = {}
+        load_dotenv_once()
         for field_name in cls.__dataclass_fields__:
             key = f"{prefix}{field_name.upper()}"
             raw = os.getenv(key)

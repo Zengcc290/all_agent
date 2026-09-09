@@ -13,10 +13,13 @@ def embedding() -> APIEmbedding:
 
 
 def test_requires_api_key():
+    # Use an env name that no .env file can provide, so the assertion holds even
+    # when the developer's real .env contains DASHSCOPE_API_KEY.
+    missing_env = "DASHSCOPE_API_KEY_MISSING_FOR_TEST"
     with pytest.raises(RuntimeError, match="API key"):
-        APIEmbedding(api_key=None)
+        APIEmbedding(api_key=None, api_key_env=missing_env)
     with pytest.raises(RuntimeError, match="API key"):
-        APIEmbedding(api_key="  ")
+        APIEmbedding(api_key="  ", api_key_env=missing_env)
 
 
 def test_accepts_api_key_from_environment(monkeypatch: pytest.MonkeyPatch):

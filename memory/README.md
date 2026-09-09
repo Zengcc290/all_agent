@@ -89,8 +89,17 @@ manager = MemoryManager(MemoryConfig(sqlite_path="memory.sqlite3"), embedding=em
 `MemoryConfig` 也支持全环境变量配置（见 `.env.example`）：
 `HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`、`..._EMBEDDING_MODEL`、
 `..._EMBEDDING_BASE_URL`、`..._EMBEDDING_DIMENSION`、`..._EMBEDDING_TIMEOUT`、
-`..._EMBEDDING_BATCH_SIZE`。若既没有显式配置也没有 `DASHSCOPE_API_KEY`，
-构造管理器时会抛出清晰的错误提示。
+`..._EMBEDDING_BATCH_SIZE`。项目根目录的 `.env` 文件会被自动加载
+（`memory.embedding.load_dotenv_once`，需 `python-dotenv`，已列入依赖），
+因此最简单的方式就是在 `.env` 里写 `DASHSCOPE_API_KEY=sk-...`。若既没有
+显式配置也没有 `DASHSCOPE_API_KEY`，构造管理器时会抛出清晰的错误提示。
+
+验证接入与中文检索效果：
+
+```bash
+.venv\Scripts\python.exe check_embedding.py            # 完整验证（需 key）
+.venv\Scripts\python.exe check_embedding.py --offline  # 只检查配置
+```
 
 ## 后端配置
 

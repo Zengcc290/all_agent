@@ -31,6 +31,21 @@ DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
 DEFAULT_BATCH_SIZE = 10
 
 
+def load_dotenv_once() -> None:
+    """Load the repository's ``.env`` when python-dotenv is available.
+
+    Mirrors ``tool/search.py`` so a key written to ``.env`` is picked up by the
+    memory layer without requiring the caller to export it first.  Existing
+    environment variables always win (``override=False``).
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        # Environment variables remain usable without the optional loader.
+        return
+    load_dotenv(override=False)
+
+
 class BaseEmbedding(ABC):
     """Tiny interface every embedding provider implements."""
 
@@ -87,11 +102,14 @@ class APIEmbedding(BaseEmbedding):
         if not isinstance(api_key_env, str) or not api_key_env.strip():
             raise ValueError("api_key_env must be a non-empty string")
 
+        if api_key is None:
+            load_dotenv_once()
         resolved_key = api_key if api_key is not None else os.getenv(api_key_env)
         if not resolved_key or not str(resolved_key).strip():
             raise RuntimeError(
                 f"APIEmbedding requires an API key: pass api_key=... or set the "
-                f"{api_key_env} environment variable"
+                f"{api_key_env} environment variable (a .env file in the project "
+                f"root is loaded automatically)"
             )
         self.api_key = str(resolved_key).strip()
         self.model = model.strip()
@@ -250,4 +268,5 @@ __all__ = [
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_BATCH_SIZE",
     "EmbeddingService",
+    "load_dotenv_once",
 ]
