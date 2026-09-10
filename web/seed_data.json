@@ -1,0 +1,194 @@
+{
+  "meta": {
+    "name": "Aetheria 初始星图",
+    "source": "C:/Users/liang/Desktop/python/新建 文本文档 (6).html",
+    "note": "节点 title/content/agent 字段为原 HTML celestialTree 的原文；domain 将 Language 归并到 Language & Mind 以保持星系家族聚合；importance 由原 depth 星级映射（五星=0.95，四星=0.85，三星=0.75）。",
+    "version": 1
+  },
+  "domains": ["Technology", "Language & Mind", "Business"],
+  "entities": [
+    {
+      "name": "Agent 内核诞生：因果闭环架构",
+      "domain": "Technology",
+      "date": "2026-01-14",
+      "importance": 0.95,
+      "content": "自研带有长期反思与因果图谱的 Agent 内核。让智能从被动应答跨越到自主反思与闭环推演。"
+    },
+    {
+      "name": "认知记忆子系统 (Reflective Memory)",
+      "domain": "Technology",
+      "date": "2026-01-20",
+      "importance": 0.85,
+      "content": "自动把碎屑信息压缩、沉淀为认知图谱并建立语义因果关联。"
+    },
+    {
+      "name": "向量+图谱混合检索 (Hybrid GraphRAG)",
+      "domain": "Technology",
+      "date": "2026-02-05",
+      "importance": 0.85,
+      "content": "将 pgvector 与图遍历结合，彻底攻克长时序多跳因果线索中断的技术难关。"
+    },
+    {
+      "name": "记忆修剪与遗忘曲线 (Forgetting Curve)",
+      "domain": "Technology",
+      "date": "2026-02-18",
+      "importance": 0.85,
+      "content": "模拟艾宾浩斯遗忘模型，对低访问度、无因果关联的临时碎屑进行无损降维归档。"
+    },
+    {
+      "name": "自愈执行沙盒 (Self-Healing Skill Engine)",
+      "domain": "Technology",
+      "date": "2026-02-02",
+      "importance": 0.95,
+      "content": "工具执行遇到 4xx/5xx 时，自主反省入参，修改重试。"
+    },
+    {
+      "name": "GRE 单词与前沿论文研读计划",
+      "domain": "Language & Mind",
+      "date": "2025-09-01",
+      "importance": 0.85,
+      "content": "攻克前沿论文深度阅读障碍，每天记录 3~5 个高阶冷门单词并锚定具体心流心境。"
+    },
+    {
+      "name": "生词: Epiphany (顿悟/灵光一闪)",
+      "domain": "Language & Mind",
+      "date": "2025-09-05",
+      "importance": 0.75,
+      "content": "词义: 突然的大彻大悟。例句: 'A sudden epiphany struck him while refactoring.'"
+    },
+    {
+      "name": "生词: Serendipity (意外机缘)",
+      "domain": "Language & Mind",
+      "date": "2025-09-12",
+      "importance": 0.85,
+      "content": "词义: 意外发现珍宝的幸运能力。常用于描述科学史上的意外伟大发现。"
+    },
+    {
+      "name": "商业沉没成本陷阱：苦撑旧方向",
+      "domain": "Business",
+      "date": "2025-02-12",
+      "importance": 0.95,
+      "content": "现金流危急却因不甘心放弃已投的 80 万而拖延止损，导致最后几个月心力交瘁。"
+    },
+    {
+      "name": "亏损复盘：沉没成本不是成本",
+      "domain": "Business",
+      "date": "2025-05-30",
+      "importance": 0.95,
+      "content": "过去已经发生的支出与未来决策的理性预期无关。止损必须坚决且迅速。"
+    }
+  ],
+  "relations": [
+    {
+      "subject": "Agent 内核诞生：因果闭环架构",
+      "predicate": "包含子系统",
+      "object": "认知记忆子系统 (Reflective Memory)",
+      "domain": "Technology",
+      "confidence": 0.9,
+      "note": "自动把碎屑信息压缩、沉淀为认知图谱并建立语义因果关联。",
+      "date": "2026-01-20"
+    },
+    {
+      "subject": "认知记忆子系统 (Reflective Memory)",
+      "predicate": "包含技术模块",
+      "object": "向量+图谱混合检索 (Hybrid GraphRAG)",
+      "domain": "Technology",
+      "confidence": 0.9,
+      "note": "将 pgvector 与图遍历结合，彻底攻克长时序多跳因果线索中断的技术难关。",
+      "date": "2026-02-05"
+    },
+    {
+      "subject": "认知记忆子系统 (Reflective Memory)",
+      "predicate": "包含技术模块",
+      "object": "记忆修剪与遗忘曲线 (Forgetting Curve)",
+      "domain": "Technology",
+      "confidence": 0.9,
+      "note": "模拟艾宾浩斯遗忘模型，对低访问度、无因果关联的临时碎屑进行无损降维归档。",
+      "date": "2026-02-18"
+    },
+    {
+      "subject": "Agent 内核诞生：因果闭环架构",
+      "predicate": "包含子系统",
+      "object": "自愈执行沙盒 (Self-Healing Skill Engine)",
+      "domain": "Technology",
+      "confidence": 0.95,
+      "note": "工具执行遇到 4xx/5xx 时，自主反省入参，修改重试。",
+      "date": "2026-02-02"
+    },
+    {
+      "subject": "GRE 单词与前沿论文研读计划",
+      "predicate": "记录生词",
+      "object": "生词: Epiphany (顿悟/灵光一闪)",
+      "domain": "Language & Mind",
+      "confidence": 0.75,
+      "note": "词义: 突然的大彻大悟。例句: 'A sudden epiphany struck him while refactoring.'",
+      "date": "2025-09-05"
+    },
+    {
+      "subject": "GRE 单词与前沿论文研读计划",
+      "predicate": "记录生词",
+      "object": "生词: Serendipity (意外机缘)",
+      "domain": "Language & Mind",
+      "confidence": 0.85,
+      "note": "词义: 意外发现珍宝的幸运能力。常用于描述科学史上的意外伟大发现。",
+      "date": "2025-09-12"
+    },
+    {
+      "subject": "商业沉没成本陷阱：苦撑旧方向",
+      "predicate": "沉淀复盘",
+      "object": "亏损复盘：沉没成本不是成本",
+      "domain": "Business",
+      "confidence": 0.95,
+      "note": "过去已经发生的支出与未来决策的理性预期无关。止损必须坚决且迅速。",
+      "date": "2025-05-30"
+    },
+    {
+      "subject": "生词: Epiphany (顿悟/灵光一闪)",
+      "predicate": "双向因果链路",
+      "object": "Agent 内核诞生：因果闭环架构",
+      "domain": "Technology",
+      "confidence": 0.6,
+      "note": "跨领域推断：原星图注记「已与代码重构日记建立双向因果链路」，代码重构属于 Agent 内核技术域。",
+      "date": "2025-09-05"
+    },
+    {
+      "subject": "生词: Serendipity (意外机缘)",
+      "predicate": "算法评价指标",
+      "object": "Agent 内核诞生：因果闭环架构",
+      "domain": "Technology",
+      "confidence": 0.6,
+      "note": "跨领域推断：原星图注记「作为 Agent 探索未定义行为的算法评价指标」。",
+      "date": "2025-09-12"
+    },
+    {
+      "subject": "记忆修剪与遗忘曲线 (Forgetting Curve)",
+      "predicate": "学习策略支撑",
+      "object": "GRE 单词与前沿论文研读计划",
+      "domain": "Technology",
+      "confidence": 0.55,
+      "note": "跨领域推断：遗忘曲线模型天然支撑单词记忆计划，两边互为方法论佐证。",
+      "date": "2026-02-18"
+    },
+    {
+      "subject": "亏损复盘：沉没成本不是成本",
+      "predicate": "决策准则植入",
+      "object": "Agent 内核诞生：因果闭环架构",
+      "domain": "Technology",
+      "confidence": 0.55,
+      "note": "跨领域推断：原星图注记「植入系统决策逻辑库」，即 Agent 内核的决策逻辑。",
+      "date": "2025-05-30"
+    }
+  ],
+  "notes": [
+    { "entity": "Agent 内核诞生：因果闭环架构", "title": "星图注记", "domain": "Technology", "date": "2026-01-14", "content": "【系统核心中枢】调度全域微观记忆子星。" },
+    { "entity": "认知记忆子系统 (Reflective Memory)", "title": "星图注记", "domain": "Technology", "date": "2026-01-20", "content": "【二级子系统】负责长程记忆检索与冲突检测。" },
+    { "entity": "向量+图谱混合检索 (Hybrid GraphRAG)", "title": "星图注记", "domain": "Technology", "date": "2026-02-05", "content": "【三级技术模块】多跳查询召回率突破 92%。" },
+    { "entity": "记忆修剪与遗忘曲线 (Forgetting Curve)", "title": "星图注记", "domain": "Technology", "date": "2026-02-18", "content": "【三级技术模块】垃圾清理系统。" },
+    { "entity": "自愈执行沙盒 (Self-Healing Skill Engine)", "title": "星图注记", "domain": "Technology", "date": "2026-02-02", "content": "【二级子系统】闭环执行成功的核心护城河。" },
+    { "entity": "GRE 单词与前沿论文研读计划", "title": "星图注记", "domain": "Language & Mind", "date": "2025-09-01", "content": "【母星容器】包含词根星团与具体单词行星。" },
+    { "entity": "生词: Epiphany (顿悟/灵光一闪)", "title": "星图注记", "domain": "Language & Mind", "date": "2025-09-05", "content": "【二级单词】已与代码重构日记建立双向因果链路。" },
+    { "entity": "生词: Serendipity (意外机缘)", "title": "星图注记", "domain": "Language & Mind", "date": "2025-09-12", "content": "【二级单词】作为 Agent 探索未定义行为的算法评价指标。" },
+    { "entity": "商业沉没成本陷阱：苦撑旧方向", "title": "星图注记", "domain": "Business", "date": "2025-02-12", "content": "【负面最高警戒样本】系统在评估任何重资产投入时强制比对。" },
+    { "entity": "亏损复盘：沉没成本不是成本", "title": "星图注记", "domain": "Business", "date": "2025-05-30", "content": "【二级决策准则】植入系统决策逻辑库。" }
+  ]
+}

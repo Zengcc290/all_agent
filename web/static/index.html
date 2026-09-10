@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aetheria · 知识星云图</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body {
+      background-color: #010206;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      cursor: grab;
+    }
+    canvas:active { cursor: grabbing; }
+
+    .hud { position: absolute; z-index: 10; pointer-events: none; }
+    header.hud { top: 24px; left: 28px; }
+    h1 {
+      font-size: 20px;
+      font-weight: 300;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      background: linear-gradient(135deg, #cbd5e1 0%, #38bdf8 50%, #c084fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 4px;
+    }
+    .hud-sub {
+      font-size: 11px;
+      color: #64748b;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    /* 空间定位面包屑 */
+    .breadcrumb-nav {
+      position: absolute;
+      top: 72px;
+      left: 28px;
+      z-index: 10;
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(10, 15, 30, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      padding: 6px 16px;
+      border-radius: 9999px;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      box-shadow: 0 0 25px rgba(56, 189, 248, 0.12);
+      max-width: 44vw;
+      overflow: hidden;
+    }
+    .crumb-item {
+      color: #94a3b8;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .crumb-item:hover { color: #38bdf8; }
+    .crumb-item.active { color: #f8fafc; font-weight: 600; cursor: default; }
+    .crumb-sep { color: #475569; font-size: 9px; }
+
+    /* 快捷导览 */
+    .tour-panel {
+      position: absolute;
+      top: 125px;
+      left: 28px;
+      z-index: 10;
+      pointer-events: auto;
+      width: 280px;
+      background: rgba(7, 11, 24, 0.88);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+    }
+    .tour-title {
+      font-size: 11px;
+      color: #38bdf8;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tour-list { display: flex; flex-direction: column; gap: 8px; }
+    .tour-btn {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      color: #cbd5e1;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .tour-btn:hover {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: rgba(56, 189, 248, 0.3);
+      color: #38bdf8;
+      transform: translateX(4px);
+    }
+
+    /* 底部视界重置 */
+    .controls.hud {
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      pointer-events: auto;
+      display: flex;
+      gap: 10px;
+      background: rgba(8, 12, 28, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      box-shadow: 0 0 30px rgba(56, 189, 248, 0.2);
+    }
+    .btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      font-size: 12px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .btn:hover, .btn.active {
+      background: rgba(56, 189, 248, 0.2);
+      color: #e0f2fe;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+    }
+
+    /* 抽屉唤出胶囊 */
+    #drawer-reopen-trigger {
+      position: absolute;
+      top: 24px;
+      right: 0;
+      z-index: 15;
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-right: none;
+      color: #e0f2fe;
+      padding: 10px 16px 10px 14px;
+      border-radius: 9999px 0 0 9999px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+      box-shadow: -5px 10px 25px rgba(0, 0, 0, 0.6), 0 0 15px rgba(56, 189, 248, 0.2);
+      transform: translateX(110%);
+      transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease;
+      pointer-events: auto;
+    }
+    #drawer-reopen-trigger.show { transform: translateX(0); }
+    #drawer-reopen-trigger:hover {
+      background: rgba(30, 41, 59, 0.95);
+      box-shadow: -5px 10px 30px rgba(56, 189, 248, 0.35);
+    }
+    .trigger-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #38bdf8;
+      box-shadow: 0 0 8px #38bdf8;
+    }
+
+    /* 右侧抽屉 */
+    #detail-drawer {
+      position: absolute;
+      top: 24px;
+      right: 28px;
+      width: 440px;
+      max-height: calc(100vh - 48px);
+      background: rgba(7, 11, 24, 0.94);
+      backdrop-filter: blur(25px);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 18px;
+      padding: 24px;
+      z-index: 20;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 30px rgba(192, 132, 252, 0.15);
+      transform: translateX(490px);
+      transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+      pointer-events: auto;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #detail-drawer.visible { transform: translateX(0); }
+
+    .drawer-scroll-container {
+      overflow-y: auto;
+      padding-right: 4px;
+      margin-top: 6px;
+    }
+    .drawer-scroll-container::-webkit-scrollbar { width: 4px; }
+    .drawer-scroll-container::-webkit-scrollbar-thumb {
+      background: rgba(56, 189, 248, 0.2);
+      border-radius: 4px;
+    }
+
+    .close-btn {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 16px;
+      z-index: 5;
+    }
+    .close-btn:hover { color: #f8fafc; }
+
+    .parent-uplink-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid rgba(56, 189, 248, 0.2);
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-bottom: 12px;
+      width: fit-content;
+      transition: all 0.2s ease;
+    }
+    .parent-uplink-btn:hover {
+      background: rgba(56, 189, 248, 0.2);
+      transform: translateX(-2px);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      font-size: 10px;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+    .drawer-title {
+      font-size: 17px;
+      font-weight: 500;
+      color: #f8fafc;
+      margin-bottom: 8px;
+      line-height: 1.4;
+      padding-right: 26px;
+    }
+    .drawer-meta {
+      font-size: 11px;
+      color: #64748b;
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      padding-bottom: 10px;
+    }
+    .drawer-content {
+      font-size: 13px;
+      line-height: 1.7;
+      color: #cbd5e1;
+      margin-bottom: 16px;
+    }
+
+    .agent-box {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 18px;
+    }
+    .agent-header {
+      font-size: 11px;
+      color: #38bdf8;
+      font-weight: 600;
+      margin-bottom: 6px;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .agent-text {
+      font-size: 12px;
+      color: #94a3b8;
+      line-height: 1.6;
+    }
+
+    .subnodes-section {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 14px;
+      margin-top: 4px;
+    }
+    .subnodes-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: #c084fc;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+    .subnodes-count {
+      font-size: 10px;
+      background: rgba(192, 132, 252, 0.15);
+      border: 1px solid rgba(192, 132, 252, 0.3);
+      padding: 2px 6px;
+      border-radius: 9999px;
+      color: #e9d5ff;
+    }
+    .subnode-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .subnode-card:hover {
+      background: rgba(56, 189, 248, 0.12);
+      border-color: rgba(56, 189, 248, 0.35);
+      transform: translateX(4px);
+    }
+    .subnode-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .subnode-card-title {
+      font-size: 12px;
+      font-weight: 500;
+      color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .subnode-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .subnode-card-badge {
+      font-size: 10px;
+      color: #94a3b8;
+    }
+    .subnode-card-desc {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.5;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    /* ========== 新增功能：顶栏搜索 / 添加知识 / 聊天 / 导入导出 ========== */
+    .top-actions {
+      position: absolute;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 12;
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .searchwrap { position: relative; width: 320px; }
+    #search-input {
+      width: 100%;
+      padding: 8px 16px;
+      border-radius: 9999px;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      background: rgba(10, 15, 30, 0.85);
+      backdrop-filter: blur(20px);
+      color: #e2e8f0;
+      font-size: 12px;
+      outline: none;
+      letter-spacing: 0.5px;
+      transition: all 0.25s ease;
+      font-family: inherit;
+    }
+    #search-input:focus {
+      border-color: rgba(56, 189, 248, 0.6);
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
+    }
+    #search-input::placeholder { color: #475569; }
+    #search-results {
+      position: absolute;
+      top: 40px;
+      left: 0;
+      right: 0;
+      max-height: 300px;
+      overflow-y: auto;
+      background: rgba(7, 11, 24, 0.97);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 12px;
+      backdrop-filter: blur(20px);
+      display: none;
+      padding: 6px;
+      box-shadow: 0 15px 40px rgba(0,0,0,0.7);
+    }
+    .search-hit {
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      transition: background 0.15s ease;
+    }
+    .search-hit:hover { background: rgba(56, 189, 248, 0.12); }
+    .search-hit .k {
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      white-space: nowrap;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .search-hit .t { font-size: 12px; color: #cbd5e1; }
+    .search-hit .t b { color: #f8fafc; }
+    .search-empty {
+      padding: 12px;
+      font-size: 11px;
+      color: #64748b;
+      text-align: center;
+      font-style: italic;
+    }
+
+    .action-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 9999px;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      background: rgba(10, 15, 30, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      color: #cbd5e1;
+      white-space: nowrap;
+      font-family: inherit;
+    }
+    .action-btn:hover {
+      border-color: rgba(56, 189, 248, 0.7);
+      color: #38bdf8;
+      box-shadow: 0 0 18px rgba(56, 189, 248, 0.3);
+      transform: translateY(-1px);
+    }
+    .action-btn.primary {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: rgba(56, 189, 248, 0.5);
+      color: #e0f2fe;
+    }
+    .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* 添加知识表单（嵌在抽屉中） */
+    .add-knowledge-form {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 14px;
+      margin-top: 4px;
+    }
+    .add-knowledge-form h4 {
+      font-size: 12px;
+      color: #34d399;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+    .form-row { display: flex; gap: 8px; margin-bottom: 8px; }
+    .form-row input, .form-row select, .form-row textarea {
+      flex: 1;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 12px;
+      padding: 8px 10px;
+      outline: none;
+      font-family: inherit;
+      user-select: text;
+    }
+    .form-row input:focus, .form-row select:focus, .form-row textarea:focus {
+      border-color: rgba(52, 211, 153, 0.6);
+    }
+    .form-row textarea { resize: vertical; min-height: 44px; }
+    .form-submit {
+      width: 100%;
+      padding: 9px;
+      border-radius: 10px;
+      font-size: 12px;
+      cursor: pointer;
+      border: 1px solid rgba(52, 211, 153, 0.5);
+      background: rgba(52, 211, 153, 0.12);
+      color: #a7f3d0;
+      transition: all 0.2s ease;
+      font-family: inherit;
+      letter-spacing: 0.5px;
+    }
+    .form-submit:hover { background: rgba(52, 211, 153, 0.25); }
+    .form-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* 聊天面板 */
+    #chat-panel {
+      position: absolute;
+      right: 28px;
+      bottom: 80px;
+      width: 400px;
+      height: 62vh;
+      max-height: 520px;
+      z-index: 22;
+      background: rgba(7, 11, 24, 0.96);
+      backdrop-filter: blur(25px);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 18px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 30px rgba(56, 189, 248, 0.1);
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+      animation: chatpop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    #chat-panel.open { display: flex; }
+    @keyframes chatpop { from { transform: scale(0.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .chat-head {
+      padding: 14px 18px;
+      border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .chat-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #f43f5e;
+      box-shadow: 0 0 8px #f43f5e;
+    }
+    .chat-status-dot.on { background: #34d399; box-shadow: 0 0 8px #34d399; }
+    .chat-head .title { font-size: 13px; font-weight: 600; color: #f1f5f9; }
+    .chat-head .sub { font-size: 10px; color: #64748b; letter-spacing: 0.5px; }
+    .chat-head .close-chat {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .chat-head .close-chat:hover { color: #f8fafc; }
+    .chat-msgs {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .chat-msgs::-webkit-scrollbar { width: 4px; }
+    .chat-msgs::-webkit-scrollbar-thumb { background: rgba(56, 189, 248, 0.2); border-radius: 4px; }
+    .bubble {
+      max-width: 85%;
+      padding: 9px 13px;
+      border-radius: 14px;
+      font-size: 13px;
+      line-height: 1.6;
+      word-break: break-word;
+      white-space: pre-wrap;
+      user-select: text;
+    }
+    .bubble.me {
+      align-self: flex-end;
+      background: rgba(56, 189, 248, 0.18);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.ai {
+      align-self: flex-start;
+      background: rgba(148, 163, 184, 0.1);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-bottom-left-radius: 4px;
+    }
+    .bubble.ai.thinking { opacity: 0.65; font-style: italic; }
+    .chat-input-bar {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      border-top: 1px solid rgba(56, 189, 248, 0.12);
+    }
+    #chat-textarea {
+      flex: 1;
+      resize: none;
+      height: 42px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      background: rgba(15, 23, 42, 0.8);
+      color: #e2e8f0;
+      font-size: 12px;
+      outline: none;
+      font-family: inherit;
+      user-select: text;
+    }
+    #chat-textarea:focus { border-color: rgba(56, 189, 248, 0.6); }
+    #chat-send-btn {
+      padding: 0 18px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 12px;
+      border: 1px solid rgba(56, 189, 248, 0.5);
+      background: rgba(56, 189, 248, 0.15);
+      color: #e0f2fe;
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+    #chat-send-btn:hover { background: rgba(56, 189, 248, 0.3); }
+    #chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* toast */
+    #toasts {
+      position: absolute;
+      top: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 60;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+      pointer-events: none;
+    }
+    .toast {
+      padding: 10px 18px;
+      border-radius: 12px;
+      font-size: 12px;
+      letter-spacing: 0.3px;
+      background: rgba(7, 11, 24, 0.96);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      max-width: 480px;
+      animation: toastin 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .toast.err { border-color: rgba(244, 63, 94, 0.5); }
+    .toast.ok { border-color: rgba(52, 211, 153, 0.5); }
+    @keyframes toastin { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+    /* 启动覆盖层 */
+    #boot-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 80;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      background: radial-gradient(ellipse at center, #04081a 0%, #010206 70%);
+      transition: opacity 0.6s ease;
+    }
+    #boot-overlay.hide { opacity: 0; pointer-events: none; }
+    .boot-orb {
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #7dd3fc, #38bdf8 40%, #1e3a8a 75%);
+      box-shadow: 0 0 50px rgba(56, 189, 248, 0.6);
+      animation: float 2.4s ease-in-out infinite;
+    }
+    @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-12px); } }
+    #boot-text { font-size: 14px; letter-spacing: 6px; color: #94a3b8; text-transform: uppercase; }
+    #boot-sub { font-size: 11px; color: #475569; max-width: 440px; text-align: center; line-height: 1.7; }
+
+    /* 底部星图统计 */
+    #stats-bar {
+      position: absolute;
+      left: 28px;
+      bottom: 28px;
+      z-index: 10;
+      pointer-events: none;
+      display: flex;
+      gap: 18px;
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      color: #475569;
+      background: rgba(7, 11, 24, 0.7);
+      backdrop-filter: blur(14px);
+      padding: 8px 14px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    #stats-bar b { color: #94a3b8; font-weight: 600; }
+    #stats-bar .sk { color: #334155; margin-right: 4px; }
+
+    #edge-toggle-btn.active { color: #34d399; box-shadow: 0 0 12px rgba(52, 211, 153, 0.4); }
+  </style>
+</head>
+<body>
+
+  <header class="hud">
+    <h1>Aetheria 知识星云图</h1>
+    <div class="hud-sub">个人知识库 · 天体物理级层级星云 · 记忆共享</div>
+  </header>
+
+  <div class="top-actions">
+    <div class="searchwrap">
+      <input id="search-input" type="text" placeholder="搜索星图：标题 / 内容 / 领域…" autocomplete="off">
+      <div id="search-results"></div>
+    </div>
+    <button id="btn-add-knowledge" class="action-btn primary">＋ 添加知识</button>
+    <button id="btn-ingest" class="action-btn">⤒ 导入文档</button>
+    <button id="btn-export" class="action-btn">⤓ 导出星图</button>
+    <button id="btn-chat" class="action-btn">✦ 知识管家</button>
+  </div>
+
+  <div id="breadcrumb" class="breadcrumb-nav">
+    <span class="crumb-item active">全景星系群 (Galactic View)</span>
+  </div>
+
+  <div class="tour-panel" id="tour-panel">
+    <div class="tour-title">
+      <span>✦</span> 天体系统飞越
+    </div>
+    <div class="tour-list" id="tour-list"></div>
+  </div>
+
+  <button id="drawer-reopen-trigger">
+    <span id="trigger-dot" class="trigger-dot"></span>
+    <span id="trigger-label">展开天体详情</span>
+    <span style="color: #64748b; font-size: 10px;">➔</span>
+  </button>
+
+  <canvas id="universe"></canvas>
+
+  <div class="controls hud">
+    <button class="btn active" id="btn-reset">回到全景宏观视野</button>
+    <button class="btn active" id="edge-toggle-btn">引力桥 ON</button>
+  </div>
+
+  <div id="stats-bar">
+    <span><span class="sk">恒星系</span><b id="stat-domains">–</b></span>
+    <span><span class="sk">天体</span><b id="stat-total">–</b></span>
+    <span><span class="sk">事实边</span><b id="stat-edges">–</b></span>
+    <span><span class="sk">知识块</span><b id="stat-chunks">–</b></span>
+  </div>
+
+  <div id="detail-drawer">
+    <button class="close-btn" id="drawer-close">✕</button>
+    <div id="parent-uplink-container"></div>
+
+    <div class="drawer-scroll-container">
+      <span id="drawer-badge" class="badge">层级</span>
+      <h2 id="drawer-title" class="drawer-title">恒星记忆</h2>
+      <div class="drawer-meta">
+        <span id="drawer-date">—</span>
+        <span id="drawer-depth">—</span>
+      </div>
+      <div id="drawer-content" class="drawer-content">正在加载…</div>
+
+      <div class="agent-box">
+        <div class="agent-header">
+          <span>✧</span> AGENT 语义萃取与因果拓扑
+        </div>
+        <div id="drawer-agent" class="agent-text">正在检索相关记忆...</div>
+      </div>
+
+      <div id="relations-section" class="subnodes-section" style="display:none">
+        <div class="subnodes-header">
+          <span>↭ 因果引力关联</span>
+          <span id="relations-count" class="subnodes-count">0 条关联</span>
+        </div>
+        <div id="relations-list"></div>
+      </div>
+
+      <div id="subnodes-section" class="subnodes-section">
+        <div class="subnodes-header">
+          <span>✦ 伴生下一级天体系统</span>
+          <span id="subnodes-count" class="subnodes-count">0 个节点</span>
+        </div>
+        <div id="subnodes-list"></div>
+      </div>
+
+      <div class="add-knowledge-form" id="add-knowledge-form">
+        <h4>✦ 在此天体下添加知识（三元组）</h4>
+        <div class="form-row">
+          <input id="fact-subject" type="text" placeholder="主语，如：向量数据库">
+        </div>
+        <div class="form-row">
+          <input id="fact-predicate" type="text" placeholder="谓语，如：用于">
+        </div>
+        <div class="form-row">
+          <input id="fact-object" type="text" placeholder="宾语，如：语义检索">
+        </div>
+        <div class="form-row">
+          <input id="fact-domain" type="text" placeholder="领域（可留空，默认继承当前天体）">
+        </div>
+        <div class="form-row">
+          <textarea id="fact-note" placeholder="备注 / 背后的思考（可选）"></textarea>
+        </div>
+        <button id="fact-submit" class="form-submit">✦ 点亮新的知识节点</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="chat-panel">
+    <div class="chat-head">
+      <span class="chat-status-dot" id="chat-status-dot"></span>
+      <div>
+        <div class="title">知识管家</div>
+        <div class="sub" id="chat-status-text">检测服务状态中…</div>
+      </div>
+      <button class="close-chat" id="chat-close">✕</button>
+    </div>
+    <div class="chat-msgs" id="chat-msgs">
+      <div class="bubble ai">你好，我是你的知识管家。问我任何关于你知识库的事——「我最近在学什么？」「X 和 Y 有什么关系？」</div>
+    </div>
+    <div class="chat-input-bar">
+      <textarea id="chat-textarea" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <button id="chat-send-btn" disabled>发送</button>
+    </div>
+  </div>
+
+  <input id="file-input" type="file" hidden accept=".txt,.md,.html,.htm,.json,.jsonl,.csv,.pdf">
+  <div id="toasts"></div>
+
+  <div id="boot-overlay">
+    <div class="boot-orb"></div>
+    <div id="boot-text">星图测绘中</div>
+    <div id="boot-sub">正在从记忆数据库拉取知识节点与因果引力桥…</div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  // =====================================================================
+  // 0. 小工具
+  // =====================================================================
+  function $(id) { return document.getElementById(id); }
+  function escapeHtml(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function shortTitle(title) {
+    return String(title || "").split('：')[0].split('(')[0] || "(未命名)";
+  }
+  function toast(msg, type) {
+    const box = $("toasts");
+    const el = document.createElement("div");
+    el.className = "toast " + (type || "");
+    el.textContent = msg;
+    box.appendChild(el);
+    setTimeout(() => { el.style.transition = "opacity .4s"; el.style.opacity = "0"; }, 3200);
+    setTimeout(() => el.remove(), 3700);
+  }
+  async function apiFetch(path, options, timeoutMs) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs || 30000);
+    try {
+      const res = await fetch(path, options ? { ...options, signal: ctrl.signal } : { signal: ctrl.signal });
+      if (!res.ok) {
+        let detail = "";
+        try { detail = (await res.json()).detail || ""; } catch (_) {}
+        const err = new Error(`HTTP ${res.status}${detail ? "：" + detail : ""}`);
+        err.status = res.status;
+        throw err;
+      }
+      return await res.json();
+    } finally { clearTimeout(timer); }
+  }
+  const apiGet = (path, t) => apiFetch(path, null, t);
+  const apiPostJson = (path, body, t) => apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }, t);
+  const apiPostForm = (path, form, t) => apiFetch(path, { method: "POST", body: form }, t);
+
+  // =====================================================================
+  // 1. 数据层：/api/graph → 星系树（恒星=领域 行星=实体 卫星=事实/知识块）
+  // =====================================================================
+  const graph = { nodes: [], edges: [], byId: new Map(), stars: [] };
+  const UNCLASSIFIED = "未分类";
+
+  async function loadGraph() {
+    const data = await apiGet("/api/graph", 30000);
+    graph.nodes = data.nodes || [];
+    graph.edges = data.edges || [];
+    graph.byId = new Map(graph.nodes.map(n => [n.id, n]));
+    graph._adjacency = null;   // 邻接缓存随数据刷新失效
+    buildStarSystem();
+    renderTourPanel();
+    updateStats(data.stats || {});
+  }
+
+  // 扁平 nodes/edges → 嵌套星系树
+  function buildStarSystem() {
+    // 1) 恒星 = kind=domain，沿环带分布
+    graph.stars = graph.nodes.filter(n => n.kind === "domain");
+    const RING = 430;
+    graph.stars.forEach((star, i) => {
+      const a = (i / Math.max(1, graph.stars.length)) * Math.PI * 2 - Math.PI / 2;
+      star.x = Math.cos(a) * RING;
+      star.y = (i % 2 ? 1 : -1) * 60;
+      star.z = Math.sin(a) * RING;
+      star.children = [];
+      star.parent = null;
+      star.tierName = "恒星系 (Star System)";
+      star.level = 1;
+    });
+    // 2) 其余节点找归属恒星：沿 parent 链向上（最多 8 层）
+    const starById = new Map(graph.stars.map(s => [s.id, s]));
+    const findStar = (n) => {
+      let cur = n, guard = 0;
+      while (cur && guard++ < 8) {
+        if (starById.has(cur.id)) return starById.get(cur.id);
+        cur = graph.byId.get(cur.parent);
+      }
+      return null;
+    };
+    // 3) 实体=行星；fact/chunk/note/event=卫星；树深度任意
+    for (const n of graph.nodes) {
+      if (n.kind === "domain") continue;
+      n.children = [];
+      const star = findStar(n);
+      if (!star) continue;  // 孤儿节点由补种兜底恒星收容
+      n.parentStar = star;
+      // 面包屑/母星上溯用的树形父指针
+      const parentEntity = graph.byId.get(n.parent);
+      n.treeParent = (n.kind === "entity" || !parentEntity || parentEntity === n) ? star : parentEntity;
+      if (n.kind === "entity") { star.children.push(n); n.level = 2; }
+      else { n.level = 3; }
+      n.tierName = n.kind === "entity" ? "行星 (Planet)"
+        : { fact: "卫星·事实 (Moon)", chunk: "卫星·知识块 (Moon)", note: "卫星·档案 (Moon)", event: "卫星·事件 (Moon)" }[n.kind] || "卫星 (Moon)";
+    }
+    // 4) 卫星挂载：parent 指向实体 → 该实体的 children；否则直接绕恒星
+    for (const n of graph.nodes) {
+      if (n.kind === "domain" || n.kind === "entity") continue;
+      const parentEntity = graph.byId.get(n.parent);
+      if (parentEntity && parentEntity.kind === "entity") {
+        parentEntity.children.push(n);
+      } else if (n.parentStar) {
+        n.parentStar.children.push(n);  // 绕恒星转的卫星
+      }
+    }
+    // 5) 半径/速度/角度按同层序号错开（避免遮挡，保持原作轨道美学）
+    for (const star of graph.stars) {
+      let pIdx = 0, mIdx = 0;
+      for (const child of star.children) {
+        if (child.kind === "entity") {
+          child.orbitR = 150 + pIdx * 55;
+          child.orbitSpeed = (pIdx % 2 ? -1 : 1) * (0.002 + pIdx * 0.0005);
+          child.orbitAngle = pIdx * 2.4;
+          child.radius = 16 + Math.min(8, (child.importance || 0.5) * 8);
+          pIdx++;
+        }
+      }
+      for (const child of star.children) {
+        if (child.kind !== "entity") {
+          child.orbitR = 55 + (mIdx % 8) * 13 + Math.floor(mIdx / 8) * 32;
+          child.orbitSpeed = ((mIdx % 5) - 2) * 0.0012;
+          child.orbitAngle = mIdx * 1.7;
+          child.radius = 6.5 + (child.importance || 0.5) * 4;
+          mIdx++;
+        }
+      }
+      star.radius = 44;
+    }
+  }
+
+  function updateStats(stats) {
+    $("stat-domains").textContent = stats.domains ?? "–";
+    $("stat-total").textContent = stats.total ?? "–";
+    $("stat-edges").textContent = stats.edges ?? "–";
+    $("stat-chunks").textContent = stats.chunks ?? "–";
+  }
+
+  // 快捷导览：默认展示前 5 个最重要的天体（含跨域）
+  function renderTourPanel() {
+    const list = $("tour-list");
+    list.innerHTML = "";
+    const candidates = graph.nodes
+      .filter(n => n.kind === "domain" || (n.kind === "entity" && (n.importance || 0) >= 0.8))
+      .sort((a, b) => (b.importance || 0) - (a.importance || 0))
+      .slice(0, 5);
+    for (const node of candidates) {
+      const btn = document.createElement("button");
+      btn.className = "tour-btn";
+      const tier = node.kind === "domain" ? "恒星系" : "行星系";
+      const color = node.kind === "domain" ? "#38bdf8" : "#60a5fa";
+      btn.innerHTML = `<span>${escapeHtml("【" + tier + "】" + shortTitle(node.title))}</span>
+        <span style="font-size: 10px; color:${color}">推进到${node.kind === "domain" ? "星系" : "行星"}</span>`;
+      btn.addEventListener("click", () => drillIntoNode(node));
+      list.appendChild(btn);
+    }
+    if (!candidates.length) {
+      list.innerHTML = `<div style="font-size:11px;color:#475569;font-style:italic;padding:4px 0">星云空旷，等待第一颗知识星…</div>`;
+    }
+  }
+
+  // =====================================================================
+  // 2. 渲染引擎（完整保留原作：投影/五层光照/摄像机阻尼/星尘星云）
+  // =====================================================================
+  const canvas = $("universe"), ctx = canvas.getContext("2d");
+  let width = (canvas.width = window.innerWidth), height = (canvas.height = window.innerHeight);
+  window.addEventListener("resize", () => {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    generateNebulaGases();
+  });
+
+  function hexToRgba(hex, alpha) {
+    if (!hex) return `rgba(255,255,255,${alpha})`;
+    let c = hex.replace('#', '').trim();
+    if (c.length === 3) c = c.split('').map(x => x + x).join('');
+    const num = parseInt(c, 16);
+    if (isNaN(num)) return `rgba(255,255,255,${alpha})`;
+    return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+  }
+
+  // --- 摄像机（修复原 bug：投影统一用平滑后的 camDistance） ---
+  let camTargetX = 0, camTargetY = 0, camTargetZ = 0;
+  let camX = 0, camY = 0, camZ = 0;
+  let camDistance = 850, targetCamDistance = 850;
+  let rotX = 0.35, targetRotX = 0.35, rotY = -0.3, targetRotY = -0.3;
+  let currentFocusNode = null, isDragging = false;
+  let lastMouseX = 0, lastMouseY = 0, mouseX = -9999, mouseY = -9999;
+  let edgesVisible = true;
+
+  function project3D(wx, wy, wz) {
+    const dx = wx - camX, dy = wy - camY, dz = wz - camZ;
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const x1 = dx * cosY - dz * sinY;
+    const z1 = dz * cosY + dx * sinY;
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const y2 = dy * cosX - z1 * sinX;
+    const z2 = z1 * cosX + dy * sinX;
+    const denom = camDistance + z2;   // ← 修复：用平滑值，缩放有过渡
+    if (denom <= 20) return { px: -9999, py: -9999, scale: 0, depth: z2 };
+    const fov = camDistance / denom;
+    return { px: width / 2 + x1 * fov, py: height / 2 + y2 * fov, scale: fov, depth: z2 };
+  }
+
+  window.addEventListener("mousedown", (e) => {
+    if (e.target.closest("#detail-drawer") || e.target.closest("#drawer-reopen-trigger") ||
+        e.target.closest(".controls") || e.target.closest(".tour-panel") ||
+        e.target.closest(".breadcrumb-nav") || e.target.closest(".top-actions") ||
+        e.target.closest("#chat-panel") || e.target.closest("#stats-bar")) return;
+    isDragging = true; lastMouseX = e.clientX; lastMouseY = e.clientY;
+  });
+  window.addEventListener("mousemove", (e) => {
+    mouseX = e.clientX; mouseY = e.clientY;
+    if (!isDragging) return;
+    targetRotY += (e.clientX - lastMouseX) * 0.0035;
+    targetRotX -= (e.clientY - lastMouseY) * 0.0035;
+    targetRotX = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, targetRotX));
+    lastMouseX = e.clientX; lastMouseY = e.clientY;
+  });
+  window.addEventListener("mouseup", () => { isDragging = false; });
+  window.addEventListener("contextmenu", (e) => e.preventDefault());
+  window.addEventListener("wheel", (e) => {
+    if (e.target.closest("#detail-drawer") || e.target.closest("#chat-panel") ||
+        e.target.closest(".top-actions") || e.target.closest(".tour-panel")) return;
+    e.preventDefault();
+    targetCamDistance = Math.max(120, Math.min(2200, targetCamDistance * (e.deltaY < 0 ? 0.88 : 1.14)));
+  }, { passive: false });
+
+  // --- 天体绘制：原作五层光照（光晕/漫反射/纹理/晨昏线/菲涅尔），远景 LOD ---
+  function drawCelestialBody(p, radius, hexColor, rotAngle, isFocused) {
+    if (radius < 1.0) return;
+
+    ctx.save();
+
+    // 远景 LOD：只画光点，保住帧率
+    if (camDistance > 1500) {
+      ctx.beginPath();
+      ctx.arc(p.px, p.py, Math.max(1.5, radius * 0.5), 0, Math.PI * 2);
+      ctx.fillStyle = hexColor; ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    // (1) 外围柔和发光大气光晕
+    ctx.globalCompositeOperation = "screen";
+    const outerR = radius * (isFocused ? 2.3 : 1.7);
+    const glowGrad = ctx.createRadialGradient(p.px, p.py, radius * 0.75, p.px, p.py, outerR);
+    glowGrad.addColorStop(0, hexToRgba(hexColor, 0.45));
+    glowGrad.addColorStop(0.4, hexToRgba(hexColor, 0.15));
+    glowGrad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = glowGrad;
+    ctx.beginPath(); ctx.arc(p.px, p.py, outerR, 0, Math.PI * 2); ctx.fill();
+
+    // (2) 实体球体（漫反射）
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.px, p.py, radius, 0, Math.PI * 2); ctx.clip();
+    const lightX = p.px - radius * 0.45, lightY = p.py - radius * 0.45;
+    const diffuseGrad = ctx.createRadialGradient(
+      lightX, lightY, radius * 0.08,
+      p.px + radius * 0.2, p.py + radius * 0.2, radius * 1.05
+    );
+    diffuseGrad.addColorStop(0, "#f8fafc");
+    diffuseGrad.addColorStop(0.2, hexColor);
+    diffuseGrad.addColorStop(0.65, hexToRgba(hexColor, 0.35));
+    diffuseGrad.addColorStop(0.85, "#0b0f19");
+    diffuseGrad.addColorStop(1.0, "#010308");
+    ctx.fillStyle = diffuseGrad;
+    ctx.fillRect(p.px - radius, p.py - radius, radius * 2, radius * 2);
+
+    // (3) 地表纹理条带
+    ctx.globalCompositeOperation = "overlay";
+    const bands = 10;
+    const bandHeight = (radius * 2) / bands;
+    for (let i = 0; i < bands; i++) {
+      const yOffset = -radius + i * bandHeight;
+      const waveOffset = Math.sin(i * 0.9 + rotAngle) * (radius * 0.4);
+      ctx.fillStyle = hexToRgba(hexColor, 0.25);
+      ctx.beginPath();
+      ctx.ellipse(p.px + waveOffset, p.py + yOffset, radius * 1.08, bandHeight * 1.1, 0.08, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // (4) 晨昏线终结者阴影
+    ctx.globalCompositeOperation = "source-over";
+    const terminatorGrad = ctx.createRadialGradient(
+      lightX, lightY, radius * 0.6,
+      lightX + radius * 0.5, lightY + radius * 0.5, radius * 1.35
+    );
+    terminatorGrad.addColorStop(0, "rgba(0,0,0,0)");
+    terminatorGrad.addColorStop(0.45, "rgba(2,6,23,0.4)");
+    terminatorGrad.addColorStop(0.8, "rgba(1,2,8,0.92)");
+    terminatorGrad.addColorStop(1.0, "rgba(0,0,2,0.98)");
+    ctx.fillStyle = terminatorGrad;
+    ctx.beginPath(); ctx.arc(p.px, p.py, radius, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+
+    // (5) 菲涅尔迎光边缘
+    ctx.globalCompositeOperation = "screen";
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = Math.max(1.0, radius * 0.05);
+    ctx.beginPath();
+    ctx.arc(p.px, p.py, radius * 0.98, Math.PI * 0.85, Math.PI * 1.65);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // --- 背景星云与微尘（原作规格：20 团星云 + 900 颗微尘） ---
+  let nebulaClouds = [];
+  function generateNebulaGases() {
+    nebulaClouds = [];
+    const cloudColors = ["rgba(30, 58, 138, ", "rgba(88, 28, 135, ", "rgba(15, 23, 42, ", "rgba(14, 116, 144, "];
+    for (let i = 0; i < 20; i++) {
+      nebulaClouds.push({
+        x: (Math.random() - .5) * 1600, y: (Math.random() - .5) * 1200,
+        z: (Math.random() - .5) * 1000 - 100, radius: 300 + Math.random() * 350,
+        color: cloudColors[i % 4], alpha: 0.03 + Math.random() * 0.035
+      });
+    }
+  }
+  const deepFieldStars = [];
+  for (let i = 0; i < 900; i++) {
+    deepFieldStars.push({
+      x: (Math.random() - .5) * 4000, y: (Math.random() - .5) * 4000, z: (Math.random() - .5) * 4000,
+      size: Math.random() * 1.4 + 0.3, alpha: Math.random() * 0.5 + 0.15,
+      twinklePhase: Math.random() * Math.PI * 2, twinkleSpeed: 0.005 + Math.random() * 0.007
+    });
+  }
+  generateNebulaGases();
+
+  // =====================================================================
+  // 3. 物理：递归轨道更新（支持任意深度，替代原作硬编码三层）
+  // =====================================================================
+  let globalTime = 0;
+  function updateCelestialPhysics(dt) {
+    globalTime += dt;
+    for (const star of graph.stars) {
+      star.wx = star.x; star.wy = star.y; star.wz = star.z;
+      star.rotAngle = (star.rotAngle || 0) + dt * 0.12;
+      updateOrbit(star, dt);
+    }
+  }
+  function updateOrbit(center, dt) {
+    if (!center.children || !center.children.length) return;
+    for (const child of center.children) {
+      child.rotAngle = (child.rotAngle || 0) + dt * 0.25;
+      child.orbitAngle = (child.orbitAngle || 0) + child.orbitSpeed * dt * 60;
+      child.wx = center.wx + Math.cos(child.orbitAngle) * child.orbitR;
+      child.wy = center.wy + Math.sin(child.orbitAngle * 2) * (child.orbitR * 0.06);
+      child.wz = center.wz + Math.sin(child.orbitAngle) * child.orbitR;
+      if (child.children) updateOrbit(child, dt);   // 递归：行星也能有卫星
+    }
+  }
+
+  // =====================================================================
+  // 4. 引力桥（三元组边）：发光贝塞尔曲线 + 悬停高亮邻域
+  // =====================================================================
+  function drawEdges() {
+    if (!edgesVisible || !graph.edges.length) return;
+    for (const edge of graph.edges) {
+      const s = graph.byId.get(edge.source), t = graph.byId.get(edge.target);
+      if (!s || !t || s.wx == null || t.wx == null) continue;
+      const ps = project3D(s.wx, s.wy, s.wz), pt = project3D(t.wx, t.wy, t.wz);
+      if (ps.scale <= 0 || pt.scale <= 0) continue;
+      const isHot = hoverNodeRef && (hoverNodeRef.id === s.id || hoverNodeRef.id === t.id);
+      const dimmed = hoverNodeRef && !isHot;
+      const alpha = dimmed ? 0.04 : (isHot ? 0.9 : 0.16 + Math.min(0.2, (edge.confidence || 1) * 0.2));
+      if (alpha <= 0.05) continue;
+      const mx = (ps.px + pt.px) / 2, my = (ps.py + pt.py) / 2;
+      const dx = pt.px - ps.px, dy = pt.py - ps.py;
+      const len = Math.hypot(dx, dy) || 1;
+      const curve = Math.min(80, len * 0.16);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(ps.px, ps.py);
+      ctx.quadraticCurveTo(mx - (dy / len) * curve, my + (dx / len) * curve, pt.px, pt.py);
+      ctx.strokeStyle = hexToRgba(s.color || "#38bdf8", alpha);
+      ctx.lineWidth = isHot ? 2.2 : 1;
+      if ((edge.confidence || 1) < 0.6) ctx.setLineDash([5, 7]);
+      if (isHot) { ctx.shadowColor = s.color || "#38bdf8"; ctx.shadowBlur = 14; }
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // =====================================================================
+  // 5. 主渲染循环（原作结构：底色→微尘→星云→轨道→星球）
+  // =====================================================================
+  let hoverNodeRef = null, lastFrameTime = performance.now();
+  let sortedRenderList = [];
+
+  function render() {
+    requestAnimationFrame(render);
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+    lastFrameTime = now;
+
+    updateCelestialPhysics(dt);
+
+    // 摄像机平滑插值飞越 (Warp Flight Interpolation)
+    if (currentFocusNode) {
+      camTargetX = currentFocusNode.wx;
+      camTargetY = currentFocusNode.wy;
+      camTargetZ = currentFocusNode.wz;
+    }
+    camX += (camTargetX - camX) * 0.08;
+    camY += (camTargetY - camY) * 0.08;
+    camZ += (camTargetZ - camZ) * 0.08;
+    camDistance += (targetCamDistance - camDistance) * 0.08;
+    rotX += (targetRotX - rotX) * 0.08;
+    rotY += (targetRotY - rotY) * 0.08;
+    if (!isDragging && !currentFocusNode) targetRotY += 0.0003;
+
+    ctx.clearRect(0, 0, width, height);
+
+    // (1) 深空底色
+    const bgGrad = ctx.createRadialGradient(width / 2, height / 2, 60, width / 2, height / 2, width * 0.75);
+    bgGrad.addColorStop(0, "#040714");
+    bgGrad.addColorStop(0.6, "#02030a");
+    bgGrad.addColorStop(1, "#010206");
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, width, height);
+
+    // (2) 背景微尘星
+    for (const s of deepFieldStars) {
+      const p = project3D(s.x, s.y, s.z);
+      if (p.scale <= 0) continue;
+      s.twinklePhase += s.twinkleSpeed;
+      const alpha = s.alpha * (0.7 + 0.3 * Math.sin(s.twinklePhase));
+      ctx.fillStyle = `rgba(224, 242, 254, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(p.px, p.py, s.size * p.scale, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // (3) 弥散星云气体
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    for (const c of nebulaClouds) {
+      const p = project3D(c.x, c.y, c.z);
+      if (p.scale <= 0) continue;
+      const r = c.radius * p.scale;
+      if (r < 4 || p.px < -r || p.px > width + r || p.py < -r || p.py > height + r) continue;
+      const grad = ctx.createRadialGradient(p.px, p.py, 0, p.px, p.py, r);
+      grad.addColorStop(0, c.color + (c.alpha * 1.3) + ")");
+      grad.addColorStop(0.4, c.color + (c.alpha * 0.6) + ")");
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(p.px, p.py, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+
+    if (!graph.stars.length) return;
+
+    // (4) 公转轨道线（虚线圆环）
+    ctx.save();
+    ctx.setLineDash([4, 6]);
+    for (const star of graph.stars) {
+      for (const child of star.children || []) {
+        if (child.kind !== "entity") continue;
+        const center = project3D(star.wx, star.wy, star.wz);
+        if (center.scale <= 0) continue;
+        ctx.strokeStyle = hexToRgba(star.color || "#38bdf8", 0.13);
+        ctx.lineWidth = Math.max(0.6, 1.0 * center.scale);
+        ctx.beginPath();
+        ctx.arc(center.px, center.py, child.orbitR * center.scale, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+
+    // (4.5) 引力桥（画在星球之下）
+    drawEdges();
+
+    // (5) 深度排序绘制星球（排序一次，渲染与命中测试共用）
+    const nodes = [];
+    for (const star of graph.stars) collectTree(star, nodes);
+    nodes.sort((a, b) => {
+      return project3D(b.wx, b.wy, b.wz).depth - project3D(a.wx, a.wy, a.wz).depth;
+    });
+    sortedRenderList = nodes;
+
+    let hoveredNode = null;
+    for (const n of nodes) {
+      const p = project3D(n.wx, n.wy, n.wz);
+      if (p.scale <= 0) continue;
+      n.renderedRadius = Math.max(2.5, n.radius * p.scale);
+      n._px = p.px; n._py = p.py;
+      const isFocused = currentFocusNode && currentFocusNode.id === n.id;
+      const isHover = Math.hypot(mouseX - p.px, mouseY - p.py) < Math.max(14, n.renderedRadius * 1.3);
+      if (isHover && !isDragging) hoveredNode = n;
+
+      const dimmed = hoveredNode && hoveredNode.id !== n.id && !areNeighbors(hoveredNode, n);
+      if (dimmed) ctx.globalAlpha = 0.15;
+      drawCelestialBody(p, n.renderedRadius, n.color, n.rotAngle || 0, isFocused || isHover);
+      ctx.globalAlpha = 1;
+
+      if (n.renderedRadius > 6.0) {
+        ctx.fillStyle = (isFocused || isHover) ? "#38bdf8" : "#f1f5f9";
+        const fontSize = Math.min(13, Math.max(9, 10 * p.scale));
+        ctx.font = `${fontSize}px -apple-system, 'Microsoft YaHei', sans-serif`;
+        ctx.textAlign = "center";
+        ctx.fillText(shortTitle(n.title), p.px, p.py + n.renderedRadius + 13);
+      }
+    }
+    hoverNodeRef = hoveredNode;
+    canvas.style.cursor = hoveredNode ? "pointer" : (isDragging ? "grabbing" : "grab");
+  }
+
+  function collectTree(node, acc) {
+    acc.push(node);
+    if (node.children) for (const c of node.children) collectTree(c, acc);
+  }
+  function areNeighbors(a, b) {
+    if (!a || !b) return false;
+    if (!graph._adjacency) {
+      const set = new Set();
+      for (const e of graph.edges) {
+        set.add(e.source + "|" + e.target); set.add(e.target + "|" + e.source);
+      }
+      graph._adjacency = set;
+    }
+    return graph._adjacency.has(a.id + "|" + b.id);
+  }
+
+  // =====================================================================
+  // 6. 下钻 / 面包屑 / 抽屉（复刻原作交互流）
+  // =====================================================================
+  const drawer = $("detail-drawer");
+  const reopenTrigger = $("drawer-reopen-trigger");
+  const triggerLabel = $("trigger-label");
+  const triggerDot = $("trigger-dot");
+
+  function drillIntoNode(node) {
+    currentFocusNode = node;
+    camTargetX = node.wx; camTargetY = node.wy; camTargetZ = node.wz;
+    if (node.level === 1) targetCamDistance = 450;
+    else if (node.level === 2) targetCamDistance = 200;
+    else targetCamDistance = 90;
+    updateBreadcrumb();
+    renderDrawer(node);
+    reopenTrigger.classList.remove("show");
+  }
+  window.directDrill = (id) => {
+    const node = graph.byId.get(id);
+    if (node) drillIntoNode(node);
+  };
+
+  function zoomToLevel(lvl) {
+    if (lvl === -1) {
+      currentFocusNode = null;
+      camTargetX = 0; camTargetY = 0; camTargetZ = 0;
+      targetCamDistance = 850;
+      drawer.classList.remove("visible");
+      reopenTrigger.classList.remove("show");
+      updateBreadcrumb();
+    } else {
+      const path = getBreadcrumbPath();
+      if (path[lvl]) drillIntoNode(path[lvl]);
+    }
+  }
+
+  function getBreadcrumbPath() {
+    const path = [];
+    let cur = currentFocusNode;
+    while (cur) { path.unshift(cur); cur = cur.treeParent || null; }
+    return path;
+  }
+
+  function updateBreadcrumb() {
+    const path = getBreadcrumbPath();
+    const container = $("breadcrumb");
+    container.innerHTML = `<span class="crumb-item ${path.length === 0 ? 'active' : ''}" data-lvl="-1">全景星系群 (Galactic View)</span>`;
+    path.forEach((node, idx) => {
+      const isLast = idx === path.length - 1;
+      container.innerHTML += `
+        <span class="crumb-sep">/</span>
+        <span class="crumb-item ${isLast ? 'active' : ''}" data-lvl="${idx}">${escapeHtml(shortTitle(node.title))}</span>
+      `;
+    });
+    container.querySelectorAll(".crumb-item").forEach(el => {
+      el.addEventListener("click", () => zoomToLevel(parseInt(el.dataset.lvl, 10)));
+    });
+  }
+
+  function renderDrawer(node) {
+    const parentContainer = $("parent-uplink-container");
+    const badge = $("drawer-badge");
+    const title = $("drawer-title");
+    const date = $("drawer-date");
+    const depth = $("drawer-depth");
+    const content = $("drawer-content");
+    const agent = $("drawer-agent");
+    const subSection = $("subnodes-section");
+    const subList = $("subnodes-list");
+    const subCount = $("subnodes-count");
+    const relSection = $("relations-section");
+    const relList = $("relations-list");
+    const relCount = $("relations-count");
+
+    parentContainer.innerHTML = "";
+    if (node.treeParent) {
+      const upBtn = document.createElement("div");
+      upBtn.className = "parent-uplink-btn";
+      upBtn.innerHTML = `<span>← 飞向母星:</span> <b>${escapeHtml(shortTitle(node.treeParent.title))}</b>`;
+      upBtn.addEventListener("click", () => drillIntoNode(node.treeParent));
+      parentContainer.appendChild(upBtn);
+    }
+
+    badge.textContent = node.tierName || node.kind;
+    badge.style.background = hexToRgba(node.color, 0.15);
+    badge.style.color = node.color || "#38bdf8";
+    badge.style.border = `1px solid ${hexToRgba(node.color || "#38bdf8", 0.4)}`;
+
+    title.textContent = node.title || "(未命名)";
+    date.textContent = node.date || "—";
+    depth.textContent = `领域: ${node.domain || UNCLASSIFIED} · 重要度 ${(node.importance ?? 0.5).toFixed(2)}`;
+    content.textContent = node.content || "（暂无正文）";
+    agent.textContent = node.source
+      ? `来源：${node.source}。${node.meta && node.meta.predicate ? `关系：${node.meta.subject} —${node.meta.predicate}→ ${node.meta.object}` : ""}`
+      : "此天体的语义注记将随知识库积累而生长。";
+
+    // 因果引力关联
+    relList.innerHTML = "";
+    const relEdges = graph.edges.filter(e => e.source === node.id || e.target === node.id);
+    if (relEdges.length) {
+      relSection.style.display = "block";
+      relCount.textContent = `${relEdges.length} 条关联`;
+      for (const e of relEdges) {
+        const other = e.source === node.id ? graph.byId.get(e.target) : graph.byId.get(e.source);
+        const card = document.createElement("div");
+        card.className = "subnode-card";
+        const dir = e.source === node.id ? "→" : "←";
+        card.innerHTML = `
+          <div class="subnode-card-top">
+            <span class="subnode-card-title">${escapeHtml(dir + " " + e.relation)}</span>
+            <span class="subnode-card-badge">${escapeHtml(shortTitle(other ? other.title : "?"))}</span>
+          </div>`;
+        card.addEventListener("click", () => { if (other) drillIntoNode(other); });
+        relList.appendChild(card);
+      }
+    } else {
+      relSection.style.display = "none";
+    }
+
+    // 伴生子节点
+    subList.innerHTML = "";
+    const kids = node.children || [];
+    if (kids.length) {
+      subSection.style.display = "block";
+      subCount.textContent = `${kids.length} 个天体`;
+      for (const child of kids) {
+        const card = document.createElement("div");
+        card.className = "subnode-card";
+        card.innerHTML = `
+          <div class="subnode-card-top">
+            <span class="subnode-card-title">
+              <span class="subnode-dot" style="background: ${escapeHtml(child.color || "#38bdf8")}; box-shadow: 0 0 6px ${escapeHtml(child.color || "#38bdf8")};"></span>
+              ${escapeHtml(shortTitle(child.title))}
+            </span>
+            <span class="subnode-card-badge">${escapeHtml(child.tierName || child.kind)}</span>
+          </div>
+          ${child.content ? `<div class="subnode-card-desc">${escapeHtml(child.content)}</div>` : ""}`;
+        card.addEventListener("click", () => drillIntoNode(child));
+        subList.appendChild(card);
+      }
+    } else {
+      subSection.style.display = "block";
+      subCount.textContent = "终末天体";
+      subList.innerHTML = `
+        <div style="font-size: 11px; color: #64748b; font-style: italic; padding: 6px 0;">
+          ✦ 此天体为当前星系最内层微观模块，已完整展现。
+        </div>`;
+    }
+
+    // 添加知识表单的领域默认值
+    $("fact-domain").placeholder = `领域（默认：${node.domain || UNCLASSIFIED}）`;
+    drawer.classList.add("visible");
+    reopenTrigger.classList.remove("show");
+  }
+
+  function closeDrawer() {
+    drawer.classList.remove("visible");
+    if (currentFocusNode) {
+      triggerLabel.textContent = `视界详情: ${shortTitle(currentFocusNode.title)}`;
+      triggerDot.style.background = currentFocusNode.color;
+      triggerDot.style.boxShadow = `0 0 8px ${currentFocusNode.color}`;
+      reopenTrigger.classList.add("show");
+    }
+  }
+  $("drawer-close").addEventListener("click", closeDrawer);
+  reopenTrigger.addEventListener("click", () => {
+    if (currentFocusNode) renderDrawer(currentFocusNode);
+  });
+
+  // =====================================================================
+  // 7. 点击命中（修复原 bug：与渲染共用同一份深度排序数组）
+  // =====================================================================
+  let downPos = null;
+  canvas.addEventListener("mousedown", (e) => { downPos = { x: e.clientX, y: e.clientY }; });
+  canvas.addEventListener("click", (e) => {
+    if (downPos && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 6) return;
+    for (let i = sortedRenderList.length - 1; i >= 0; i--) {
+      const n = sortedRenderList[i];
+      if (n._px === undefined) continue;
+      if (Math.hypot(e.clientX - n._px, e.clientY - n._py) < Math.max(14, n.renderedRadius * 1.3)) {
+        drillIntoNode(n);
+        return;
+      }
+    }
+  });
+
+  $("btn-reset").addEventListener("click", () => zoomToLevel(-1));
+  $("edge-toggle-btn").addEventListener("click", (e) => {
+    edgesVisible = !edgesVisible;
+    e.currentTarget.classList.toggle("active", edgesVisible);
+    e.currentTarget.textContent = `引力桥 ${edgesVisible ? "ON" : "OFF"}`;
+  });
+
+  // =====================================================================
+  // 8. 搜索
+  // =====================================================================
+  const searchInput = $("search-input"), searchResults = $("search-results");
+  let searchTimer = null;
+  searchInput.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(doSearch, 150); });
+  searchInput.addEventListener("focus", doSearch);
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".searchwrap")) searchResults.style.display = "none";
+  });
+
+  function doSearch() {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) { searchResults.style.display = "none"; return; }
+    const hits = [];
+    for (const n of graph.nodes) {
+      const hay = `${n.title} ${n.content || ""} ${n.domain || ""}`.toLowerCase();
+      if (hay.includes(q)) { hits.push(n); if (hits.length >= 30) break; }
+    }
+    searchResults.innerHTML = "";
+    if (!hits.length) {
+      searchResults.innerHTML = `<div class="search-empty">没有找到与「${escapeHtml(searchInput.value.trim())}」相关的天体</div>`;
+    } else {
+      for (const hit of hits) {
+        const row = document.createElement("div");
+        row.className = "search-hit";
+        row.innerHTML = `<span class="k">${escapeHtml(hit.kind)}</span><span class="t">${escapeHtml(shortTitle(hit.title))}</span>`;
+        row.addEventListener("click", () => {
+          searchResults.style.display = "none";
+          searchInput.value = "";
+          drillIntoNode(hit);
+        });
+        searchResults.appendChild(row);
+      }
+    }
+    searchResults.style.display = "block";
+  }
+
+  // =====================================================================
+  // 9. 添加知识（三元组）→ POST /api/facts → 刷新星图
+  // =====================================================================
+  async function submitFact() {
+    const subject = $("fact-subject").value.trim();
+    const predicate = $("fact-predicate").value.trim();
+    const object = $("fact-object").value.trim();
+    const domain = $("fact-domain").value.trim() || (currentFocusNode && currentFocusNode.domain) || UNCLASSIFIED;
+    const note = $("fact-note").value.trim();
+    if (!subject || !predicate || !object) {
+      toast("主语、谓语、宾语都要填哦", "err");
+      return;
+    }
+    const btn = $("fact-submit");
+    btn.disabled = true; btn.textContent = "点亮中…";
+    try {
+      await apiPostJson("/api/facts", { subject, predicate, object, domain, note }, 30000);
+      toast(`新知识已点亮：${shortTitle(subject)} —${predicate}→ ${shortTitle(object)}`, "ok");
+      ["fact-subject", "fact-predicate", "fact-object", "fact-note"].forEach(id => $(id).value = "");
+      await loadGraph();
+      if (currentFocusNode) {
+        const fresh = graph.byId.get(currentFocusNode.id);
+        if (fresh) { currentFocusNode = fresh; renderDrawer(fresh); }
+      }
+    } catch (err) {
+      toast("添加失败：" + err.message, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = "✦ 点亮新的知识节点";
+    }
+  }
+  $("fact-submit").addEventListener("click", submitFact);
+
+  // 顶栏「＋ 添加知识」：打开抽屉并聚焦表单
+  $("btn-add-knowledge").addEventListener("click", () => {
+    if (currentFocusNode) renderDrawer(currentFocusNode);
+    else drawer.classList.add("visible");
+    drawer.classList.add("visible");
+    setTimeout(() => $("fact-subject").focus(), 500);
+    $("fact-subject").scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+
+  // =====================================================================
+  // 10. 导入 / 导出 / 聊天
+  // =====================================================================
+  $("btn-ingest").addEventListener("click", () => $("file-input").click());
+  $("file-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    toast(`正在摄取《${file.name}》…`);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await apiPostForm("/api/ingest", form, 120000);
+      toast(`《${res.filename}》已入库，星云长出 ${res.chunks} 个知识块 ✦`, "ok");
+      await loadGraph();
+    } catch (err) {
+      toast("导入失败：" + err.message, "err");
+    }
+  });
+
+  $("btn-export").addEventListener("click", () => window.open("/api/export", "_blank"));
+
+  // 聊天
+  let chatReady = false;
+  const chatPanel = $("chat-panel");
+  const chatMsgs = $("chat-msgs");
+  const chatText = $("chat-textarea");
+  const chatSendBtn = $("chat-send-btn");
+
+  async function checkHealth() {
+    try {
+      const h = await apiGet("/api/health", 8000);
+      chatReady = !!h.chat_ready;
+      $("chat-status-dot").classList.toggle("on", chatReady);
+      $("chat-status-text").textContent = chatReady
+        ? "在线 · 已接入你的知识库"
+        : "未配置聊天模型（provider.toml）";
+      chatSendBtn.disabled = !chatReady;
+    } catch (_) {
+      chatReady = false;
+      $("chat-status-text").textContent = "服务不可达";
+      chatSendBtn.disabled = true;
+    }
+  }
+
+  function appendBubble(text, who) {
+    const b = document.createElement("div");
+    b.className = "bubble " + who;
+    b.textContent = text;
+    chatMsgs.appendChild(b);
+    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+    return b;
+  }
+
+  async function sendChat() {
+    const text = chatText.value.trim();
+    if (!text || !chatReady) return;
+    chatText.value = "";
+    appendBubble(text, "me");
+    const think = appendBubble("正在检索知识库并思考…", "ai");
+    think.classList.add("thinking");
+    chatSendBtn.disabled = true;
+    try {
+      const res = await apiPostJson("/api/chat", { message: text }, 180000);
+      think.classList.remove("thinking");
+      think.textContent = res.answer || "(空回复)";
+    } catch (err) {
+      think.classList.remove("thinking");
+      think.textContent = "调用失败：" + err.message;
+    } finally {
+      chatSendBtn.disabled = false;
+      chatMsgs.scrollTop = chatMsgs.scrollHeight;
+    }
+  }
+  chatSendBtn.addEventListener("click", sendChat);
+  chatText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+
+  $("btn-chat").addEventListener("click", () => {
+    chatPanel.classList.toggle("open");
+    if (chatPanel.classList.contains("open")) chatText.focus();
+  });
+  $("chat-close").addEventListener("click", () => chatPanel.classList.remove("open"));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { chatPanel.classList.remove("open"); }
+  });
+
+  // =====================================================================
+  // 11. 启动
+  // =====================================================================
+  async function boot() {
+    try {
+      await loadGraph();
+      await checkHealth();
+      $("boot-overlay").classList.add("hide");
+      const empty = !graph.nodes.length;
+      if (empty) {
+        toast("星云还很空旷：导入文档或添加第一条知识，点亮第一颗星");
+      } else {
+        toast(`星图就绪：${graph.stars.length} 个恒星系 / ${graph.nodes.length} 个天体 / ${graph.edges.length} 条引力桥`, "ok");
+      }
+    } catch (err) {
+      $("boot-text").textContent = "星图测绘失败";
+      $("boot-sub").textContent = `无法连接后端（/api/graph）：${err.message}。请先启动服务：.venv\\Scripts\\python.exe -m web.app`;
+      setTimeout(() => $("boot-overlay").classList.add("hide"), 3000);
+      toast("后端不可达：" + err.message, "err");
+    }
+  }
+  boot();
+  render();
+})();
+</script>
+</body>
+</html>
