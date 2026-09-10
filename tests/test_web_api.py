@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from memory import MemoryConfig, MemoryManager  # noqa: E402
 from web import create_app  # noqa: E402
 from web.support import HashEmbedding  # noqa: E402
+from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 
 
 @pytest.fixture()
@@ -81,6 +82,26 @@ def test_ingest_grows_nebula(client: TestClient) -> None:
     assert kinds.get("chunk", 0) >= 1
     assert kinds.get("domain", 0) >= 1
     assert any("note.txt" in (node.get("source") or "") for node in graph["nodes"])
+
+
+def test_graph_rag_endpoint_returns_vector_evidence_and_paths(client: TestClient) -> None:
+    from memory.rag import RAGPipeline
+
+    class Extractor:
+        def extract(self, text: str, *, metadata=None) -> ExtractionResult:
+            return ExtractionResult(
+                domain="测试",
+                entities=[EntityCandidate(name="A"), EntityCandidate(name="B")],
+                relations=[RelationCandidate(subject="A", predicate="关联", object="B", confidence=0.9)],
+            )
+
+    client.app.state.pipeline = RAGPipeline(client.app.state.manager, extractor=Extractor())
+    client.post("/api/ingest", files=_make_ingest_payload("graph.txt", "A关联B"))
+    response = client.post("/api/graph-rag", json={"query": "A", "hops": 1})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["evidence"]
+    assert any(path["target"] == "B" for path in payload["paths"])
 
 
 def test_export_import_roundtrip_idempotent(client: TestClient) -> None:

@@ -35,7 +35,7 @@ from memory.rag import RAGPipeline
 
 from .graph_builder import build_graph
 from .seed import seed
-from .support import chat_ready, close_manager, get_agent, get_manager, STATIC_DIR
+from .support import build_knowledge_extractor, chat_ready, close_manager, get_agent, get_manager, STATIC_DIR
 
 
 class ChatBody(BaseModel):
@@ -51,6 +51,12 @@ class FactBody(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
 
 
+class GraphRAGBody(BaseModel):
+    query: str = Field(min_length=1, max_length=8000)
+    limit: int = Field(default=5, ge=1, le=50)
+    hops: int = Field(default=1, ge=0, le=3)
+
+
 def create_app(manager: MemoryManager | None = None) -> FastAPI:
     """应用工厂。``manager`` 可注入（测试用内存库）；默认用共享单例。"""
 
@@ -58,7 +64,10 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         owns_manager = manager is None
         app.state.manager = manager if manager is not None else get_manager()
-        app.state.pipeline = RAGPipeline(app.state.manager)
+        app.state.pipeline = RAGPipeline(
+            app.state.manager,
+            extractor=build_knowledge_extractor(),
+        )
         if os.getenv("WEB_AUTOSEED", "1") != "0":
             # 首次启动自动播种，让星云图一打开就有内容。
             seed(app.state.manager)
@@ -78,6 +87,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     def graph() -> dict[str, Any]:
         return build_graph(the_manager())
 
+    @app.post("/api/graph-rag")
+    def graph_rag(body: GraphRAGBody) -> dict[str, Any]:
+        result = app.state.pipeline.graph_retrieve(
+            body.query,
+            limit=body.limit,
+            hops=body.hops,
+        )
+        return result.to_dict() | {"context": result.build_context()}
+
     # ------------------------------------------------------------------
     # 聊天（得力助手）
     # ------------------------------------------------------------------
@@ -92,7 +110,20 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             answer = await asyncio.to_thread(agent.run, body.message)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}")
-        return {"answer": answer}
+        retrieval = app.state.pipeline.graph_retrieve(body.message, limit=5, hops=1)
+        return {
+            "answer": answer,
+            "sources": [
+                {
+                    "memory_id": result.item.id,
+                    "score": result.score,
+                    "source": result.item.metadata.get("filename") or result.item.metadata.get("source"),
+                    "chunk_id": result.item.metadata.get("chunk_id") or result.item.metadata.get("document_id"),
+                }
+                for result in retrieval.evidence
+            ],
+            "paths": [path.to_dict() for path in retrieval.paths],
+        }
 
     # ------------------------------------------------------------------
     # 文档导入（RAG 摄取）
@@ -122,7 +153,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             f"上传并导入了文档《{filename}》（{len(items)} 个知识块）",
             metadata={"title": "导入文档", "filename": filename},
         )
-        return {"filename": filename, "chunks": len(items)}
+        return {
+            "filename": filename,
+            "chunks": len(items),
+            "extraction": dict(app.state.pipeline.last_ingest_report),
+        }
 
     # ------------------------------------------------------------------
     # 手工添加三元组

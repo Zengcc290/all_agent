@@ -26,10 +26,19 @@ class Neo4jGraphStore:
             raise ValueError("source, relation and target must be non-empty strings")
         props = dict(properties or {})
         if self.driver is None:
-            edge = {"source": source, "relation": relation, "target": target, "properties": props}
             edges = self._local.setdefault(source, [])
-            if edge not in edges:
-                edges.append(edge)
+            existing = next(
+                (
+                    edge
+                    for edge in edges
+                    if edge["relation"] == relation and edge["target"] == target
+                ),
+                None,
+            )
+            if existing is None:
+                edges.append({"source": source, "relation": relation, "target": target, "properties": props})
+            else:
+                existing["properties"].update(props)
             return
         query = "MERGE (a:MemoryEntity {name: $source}) MERGE (b:MemoryEntity {name: $target}) MERGE (a)-[r:RELATED {kind: $relation}]->(b) SET r += $properties"
         with self.driver.session(database=self.database) as session:

@@ -62,6 +62,11 @@ with MemoryManager(MemoryConfig(sqlite_path="memory.sqlite3")) as memory:
 JSON/JSONL、CSV、HTML，以及可选的 PDF 解析（需 `pypdf`）；文档会按块写入
 语义记忆，并可通过 `retrieve`/`build_context` 取回上下文。
 
+导入管道可以注入 `LLMKnowledgeExtractor`，自动抽取领域、实体和有证据的
+三元组关系，并通过稳定实体 ID 合并重复实体。`GraphRAGPipeline` 在向量命中
+之后扩展实体关系路径，把原文证据与图路径一起构建上下文；没有配置聊天模型
+时默认使用 `NullKnowledgeExtractor`，只保存原始知识块，不会伪造关系。
+
 ## Embedding 接口
 
 嵌入层只保留一个通用实现 `APIEmbedding`，实现 `BaseEmbedding` 的

@@ -22,6 +22,7 @@ from threading import Lock
 from dotenv import load_dotenv
 
 from memory import APIEmbedding, MemoryConfig, MemoryManager
+from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
@@ -68,6 +69,31 @@ def build_embedding():
     return HashEmbedding()
 
 
+def build_knowledge_extractor():
+    """Create the configured extractor, or a safe offline no-op fallback."""
+
+    from agents.llm import LLM
+    from agents.providers import ProviderRegistry
+
+    path = ProviderRegistry.default_config_path()
+    if path.name != "provider.toml" or not path.is_file():
+        return NullKnowledgeExtractor()
+    try:
+        registry = ProviderRegistry(path)
+        profile = registry.get(registry.active_profile)
+        api_key = registry.resolve_api_key(profile.name)
+        if not api_key or api_key.startswith("replace-with"):
+            return NullKnowledgeExtractor()
+        client = LLM(
+            api_key=api_key,
+            base_url=profile.base_url,
+            model=profile.default_model,
+        )
+        return LLMKnowledgeExtractor(client.complete, model=profile.default_model)
+    except Exception:
+        return NullKnowledgeExtractor()
+
+
 _manager: MemoryManager | None = None
 _manager_lock = Lock()
 
@@ -98,9 +124,9 @@ _agent_lock = Lock()
 #: 知识管家的行为约束：先检索记忆再回答。
 SYSTEM_PROMPT = (
     "你是『星图』——用户的个人知识管家，管理着用户的知识库与记忆。遵守：\n"
-    "1. 回答与用户知识、经历、文档相关的问题前，先用 memory.rag 的 retrieve/context"
+    "1. 回答与用户知识、经历、文档相关的问题前，先用 memory.rag 的 graph_retrieve/context"
     " 行动检索知识库，必要时用 memory.manage 的 search 补充记忆检索。\n"
-    "2. 用中文简洁回答；引用知识库内容时注明来源文件（若有）。\n"
+    "2. 用中文简洁回答；引用知识库内容时注明来源文件和关系证据（若有）。\n"
     "3. 不编造知识库里没有的内容；检索不到就如实说明。\n"
     "4. 用户明确让你记住某件事时，用 memory.manage 的 add 写入 episodic 记忆。"
 )
@@ -114,9 +140,19 @@ def get_agent():
         with _agent_lock:
             if _agent is None:
                 from agents import ReActAgent
+                from tool.rag_tool import RAGTool
 
                 agent = ReActAgent("knowledge-butler")
                 agent.set_system_prompt(SYSTEM_PROMPT)
+                agent.register_tool(
+                    RAGTool(
+                        pipeline=RAGPipeline(
+                            get_manager(),
+                            extractor=build_knowledge_extractor(),
+                        )
+                    ),
+                    replace=True,
+                )
                 _agent = agent
     return _agent
 

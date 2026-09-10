@@ -1718,7 +1718,9 @@
       const form = new FormData();
       form.append("file", file);
       const res = await apiPostForm("/api/ingest", form, 120000);
-      toast(`《${res.filename}》已入库，星云长出 ${res.chunks} 个知识块 ✦`, "ok");
+      const extraction = res.extraction || {};
+      const extracted = `${extraction.entities || 0} 个实体 / ${extraction.relations || 0} 条连接`;
+      toast(`《${res.filename}》已入库，${res.chunks} 个知识块，自动识别 ${extracted} ✦`, "ok");
       await loadGraph();
     } catch (err) {
       toast("导入失败：" + err.message, "err");
@@ -1770,7 +1772,14 @@
     try {
       const res = await apiPostJson("/api/chat", { message: text }, 180000);
       think.classList.remove("thinking");
-      think.textContent = res.answer || "(空回复)";
+      const sources = (res.sources || [])
+        .filter(item => item.source)
+        .map(item => `${item.source} (${Number(item.score || 0).toFixed(2)})`);
+      const paths = (res.paths || []).slice(0, 3).map(path =>
+        `关系：${(path.entities || []).join(" → ")}`
+      );
+      const suffix = [...sources.map(value => `来源：${value}`), ...paths].join("\n");
+      think.textContent = [res.answer || "(空回复)", suffix].filter(Boolean).join("\n\n");
     } catch (err) {
       think.classList.remove("thinking");
       think.textContent = "调用失败：" + err.message;

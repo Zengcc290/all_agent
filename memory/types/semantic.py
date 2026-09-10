@@ -21,15 +21,36 @@ class SemanticMemory(BaseMemory):
             graph_store = Neo4jGraphStore()
         self.graph_store = graph_store
 
-    def add_fact(self, subject: str, predicate: str, object: str, *, metadata: Mapping[str, Any] | None = None, confidence: float = 1.0) -> MemoryItem:
+    def add_fact(
+        self,
+        subject: str,
+        predicate: str,
+        object: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        confidence: float = 1.0,
+        item_id: str | None = None,
+    ) -> MemoryItem:
         if not all(isinstance(value, str) and value.strip() for value in (subject, predicate, object)):
             raise ValueError("subject, predicate and object must be non-empty strings")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
         item_metadata = dict(metadata or {})
         item_metadata.update({"subject": subject, "predicate": predicate, "object": object, "confidence": confidence})
-        item = self.add(f"{subject} {predicate} {object}", metadata=item_metadata, importance=confidence)
-        self.graph_store.add_relation(subject, predicate, object, properties={"memory_id": item.id, "confidence": confidence})
+        item = self.add(
+            f"{subject} {predicate} {object}",
+            metadata=item_metadata,
+            importance=confidence,
+            item_id=item_id,
+        )
+        graph_properties = {
+            "memory_id": item.id,
+            "confidence": confidence,
+        }
+        for key in ("evidence", "source", "source_document", "chunk_id"):
+            if key in item_metadata:
+                graph_properties[key] = item_metadata[key]
+        self.graph_store.add_relation(subject, predicate, object, properties=graph_properties)
         return item
 
     def add_relation(self, source: str, relation: str, target: str, *, metadata: Mapping[str, Any] | None = None) -> MemoryItem:

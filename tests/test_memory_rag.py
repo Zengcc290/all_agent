@@ -5,7 +5,15 @@ from pathlib import Path
 import pytest
 
 from memory import MemoryConfig, MemoryManager
-from memory.rag import Document, DocumentProcessor, RAGPipeline
+from memory.rag import (
+    Document,
+    DocumentProcessor,
+    EntityCandidate,
+    ExtractionResult,
+    GraphRAGPipeline,
+    RelationCandidate,
+    RAGPipeline,
+)
 
 from conftest import HashEmbedding
 
@@ -95,6 +103,63 @@ def test_pipeline_ingest_retrieve_and_context(pipeline: RAGPipeline):
     context = pipeline.build_context("mantis shrimp runtime", limit=2)
     assert context
     assert context.count("\n\n") <= 1
+
+
+class StaticExtractor:
+    def extract(self, text: str, *, metadata=None) -> ExtractionResult:
+        return ExtractionResult(
+            domain="人工智能",
+            topics=["检索"],
+            entities=[
+                EntityCandidate(name="Qdrant", entity_type="数据库", confidence=0.95),
+                EntityCandidate(name="语义检索", entity_type="能力", confidence=0.9),
+            ],
+            relations=[
+                RelationCandidate(
+                    subject="Qdrant",
+                    predicate="用于",
+                    object="语义检索",
+                    confidence=0.92,
+                    evidence="Qdrant用于语义检索",
+                )
+            ],
+        )
+
+
+def test_pipeline_auto_extracts_entities_and_graph_paths(manager: MemoryManager):
+    pipeline = RAGPipeline(manager, extractor=StaticExtractor())
+    items = pipeline.ingest(
+        Document("Qdrant用于语义检索。", id="doc-qdrant", metadata={"filename": "qdrant.txt"}),
+        chunk_size=100,
+        overlap=0,
+    )
+
+    assert len(items) == 1
+    assert pipeline.last_ingest_report["entities"] == 2
+    assert pipeline.last_ingest_report["relations"] == 1
+    facts = manager.semantic.facts()
+    assert any(item.metadata.get("predicate") == "用于" for item in facts)
+
+    result = GraphRAGPipeline(manager).retrieve("Qdrant", limit=3, hops=1)
+    assert result.entities == ["Qdrant"]
+    assert any(path.target == "语义检索" for path in result.paths)
+    assert "Qdrant用于语义检索" in result.build_context()
+
+
+def test_pipeline_reuses_relation_id_and_accumulates_evidence(manager: MemoryManager):
+    pipeline = RAGPipeline(manager, extractor=StaticExtractor())
+    for index in range(2):
+        pipeline.ingest(
+            Document(f"Qdrant用于语义检索。{index}", id=f"doc-{index}", metadata={"filename": f"{index}.txt"}),
+            chunk_size=100,
+            overlap=0,
+        )
+    relations = [
+        item for item in manager.semantic.facts()
+        if item.metadata.get("predicate") == "用于"
+    ]
+    assert len(relations) == 1
+    assert len(relations[0].metadata["evidence_items"]) == 2
 
 
 def test_pipeline_ingest_source_and_delete_document(pipeline: RAGPipeline, tmp_path: Path):

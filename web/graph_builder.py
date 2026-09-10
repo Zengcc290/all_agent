@@ -144,6 +144,9 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
             "target": target_id,
             "relation": predicate,
             "confidence": md.get("confidence", item.importance),
+            "evidence": md.get("evidence", ""),
+            "source_document": md.get("source_document") or md.get("source") or "",
+            "chunk_id": md.get("chunk_id") or "",
         })
 
     # --- 实体备注（kind=note）：挂到所属实体的卫星 ---

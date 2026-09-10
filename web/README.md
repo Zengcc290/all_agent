@@ -26,7 +26,8 @@
 |---|---|---|
 | GET | `/api/graph` | 全图节点+边（星云图数据源） |
 | POST | `/api/chat` | 与知识管家对话（ReAct，未配置模型时 503） |
-| POST | `/api/ingest` | 上传文档 → RAG 切块入库（multipart 字段 `file`） |
+| POST | `/api/ingest` | 上传文档 → RAG 切块、LLM 自动分类、实体关系抽取 |
+| POST | `/api/graph-rag` | 向量证据 + 图关系路径混合检索 |
 | POST | `/api/facts` | 手工添加三元组 `{subject, predicate, object, domain?, note?}` |
 | POST | `/api/seed` | 重新播种种子数据（幂等） |
 | GET | `/api/export` | 导出全部记忆为 JSON 文件 |
@@ -39,7 +40,10 @@
 上传文档/添加事实/聊天沉淀
         │
         ▼
-memory.sqlite3（四层记忆） ── graph_builder 压扁 ──▶ /api/graph
+        │                    ▲
+        │                    │ GraphRAG 一跳/多跳关系扩展
+        ▼                    │
+LLM 抽取 domain/entity/relation ────────────────┘
         │                                            │
         ▼                                            ▼
 Agent 工具 memory.manage / memory.rag          星云图 nodes+edges
