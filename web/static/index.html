@@ -926,6 +926,7 @@
 
   async function loadGraph() {
     const data = await apiGet("/api/graph", 30000);
+    const focusId = currentFocusNode ? currentFocusNode.id : null;   // 数据刷新后旧引用会失去物理更新
     graph.nodes = data.nodes || [];
     graph.edges = data.edges || [];
     graph.byId = new Map(graph.nodes.map(n => [n.id, n]));
@@ -933,6 +934,13 @@
     buildStarSystem();
     renderTourPanel();
     updateStats(data.stats || {});
+    // 按 id 重新绑定焦点节点：旧对象已不在渲染树里，其 wx/wy/wz 冻结会导致
+    // 相机停在死位置、目标天体"消失"的假象；找不到则回到全景
+    if (focusId) {
+      currentFocusNode = graph.byId.get(focusId) || null;
+      if (currentFocusNode) updateBreadcrumb();
+      else zoomToLevel(-1);
+    }
   }
 
   // 扁平 nodes/edges → 嵌套星系树
@@ -1068,6 +1076,7 @@
   let currentFocusNode = null, isDragging = false;
   let lastMouseX = 0, lastMouseY = 0, mouseX = -9999, mouseY = -9999;
   let edgesVisible = true;
+  let flightSettleDistance = 850;   // 飞越结束后回落的目标视距
 
   function project3D(wx, wy, wz) {
     const dx = wx - camX, dy = wy - camY, dz = wz - camZ;
@@ -1289,6 +1298,13 @@
     camY += (camTargetY - camY) * 0.08;
     camZ += (camTargetZ - camZ) * 0.08;
     camDistance += (targetCamDistance - camDistance) * 0.08;
+    // 已贴近目标：回落到该层级的舒适视距（跃迁弧的第二段）
+    if (currentFocusNode && currentFocusNode.wx != null) {
+      const gapNow = Math.hypot(
+        currentFocusNode.wx - camX, currentFocusNode.wy - camY, currentFocusNode.wz - camZ
+      );
+      if (gapNow < flightSettleDistance * 1.05) targetCamDistance = flightSettleDistance;
+    }
     rotX += (targetRotX - rotX) * 0.08;
     rotY += (targetRotY - rotY) * 0.08;
     if (!isDragging && !currentFocusNode) targetRotY += 0.0003;
@@ -1365,7 +1381,7 @@
     let hoveredNode = null;
     for (const n of nodes) {
       const p = project3D(n.wx, n.wy, n.wz);
-      if (p.scale <= 0) continue;
+      if (p.scale <= 0 || p.scale > 8) { n._px = undefined; continue; }  // 近裁剪面穿越帧不画，防巨型黑球
       n.renderedRadius = Math.max(2.5, n.radius * p.scale);
       n._px = p.px; n._py = p.py;
       const isFocused = currentFocusNode && currentFocusNode.id === n.id;
@@ -1415,10 +1431,21 @@
 
   function drillIntoNode(node) {
     currentFocusNode = node;
-    camTargetX = node.wx; camTargetY = node.wy; camTargetZ = node.wz;
-    if (node.level === 1) targetCamDistance = 450;
-    else if (node.level === 2) targetCamDistance = 200;
-    else targetCamDistance = 90;
+    const desired = node.level === 1 ? 450 : node.level === 2 ? 200 : 90;
+    flightSettleDistance = desired;
+    // 修复黑球/消失伪影：先"跃迁拉远"到安全视距再飞入。
+    // 若直接飞向目标且视角恰好与飞行方向对齐，目标会穿越近裁剪面
+    // (denom = camDistance + z2 落入 0~60 区间)——要么不绘制(凭空消失)，
+    // 要么 scale 爆到 20~40 倍变成盖满全屏的巨型暗面球体(变黑)。
+    const gx = (node.wx ?? camX) - camX;
+    const gy = (node.wy ?? camY) - camY;
+    const gz = (node.wz ?? camZ) - camZ;
+    const gap = Math.hypot(gx, gy, gz);
+    if (isFinite(gap) && gap > 0) {
+      targetCamDistance = Math.min(2200, Math.max(desired, gap * 1.25 + 120));
+    } else {
+      targetCamDistance = desired;
+    }
     updateBreadcrumb();
     renderDrawer(node);
     reopenTrigger.classList.remove("show");
