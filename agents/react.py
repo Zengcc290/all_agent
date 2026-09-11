@@ -401,6 +401,19 @@ def _declared_schema_types(subschema: Mapping[str, Any]) -> frozenset[str]:
     return frozenset()
 
 
+def _run_sync(coro: Any) -> Any:
+    """Run a coroutine to completion from a synchronous context.
+
+    ``asyncio.run`` cannot be called from a thread that already has a running
+    event loop (for example a FastAPI request thread), so the coroutine is
+    dispatched to a dedicated worker thread instead. The worker thread exits
+    once the request completes.
+    """
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
 class ReActAgent(Agent):
     """An ``Agent`` variant using a textual ReAct protocol.
 

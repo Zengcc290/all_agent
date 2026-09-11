@@ -155,6 +155,40 @@ def test_chat_disabled_without_provider(client: TestClient) -> None:
     assert "provider" in response.json()["detail"]
 
 
+def test_knowledge_sentence_ingests_and_extracts(client: TestClient) -> None:
+    from memory.rag import RAGPipeline
+
+    class Extractor:
+        def extract(self, text: str, *, metadata=None) -> ExtractionResult:
+            return ExtractionResult(
+                domain="Technology",
+                entities=[EntityCandidate(name="向量数据库"), EntityCandidate(name="语义检索")],
+                relations=[RelationCandidate(subject="向量数据库", predicate="用于", object="语义检索", confidence=0.9)],
+            )
+
+    client.app.state.pipeline = RAGPipeline(client.app.state.manager, extractor=Extractor())
+
+    response = client.post(
+        "/api/knowledge",
+        json={"text": "向量数据库把非结构化文本编码成稠密向量，用于语义检索。"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["chunks"] >= 1
+    assert payload["extraction"]["entities"] >= 2
+    assert payload["extraction"]["relations"] >= 1
+
+    graph = client.get("/api/graph").json()
+    assert any(edge["relation"] == "用于" for edge in graph["edges"])
+    assert any(node["kind"] == "chunk" for node in graph["nodes"])
+
+
+def test_knowledge_sentence_requires_text(client: TestClient) -> None:
+    response = client.post("/api/knowledge", json={"text": "   "})
+    assert response.status_code == 422
+
+
 def test_health(client: TestClient) -> None:
     health = client.get("/api/health").json()
     assert health["ok"] is True

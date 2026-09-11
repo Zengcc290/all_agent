@@ -542,6 +542,19 @@
     }
     .form-submit:hover { background: rgba(52, 211, 153, 0.25); }
     .form-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+    .form-divider {
+      margin: 12px 0 10px;
+      text-align: center;
+      color: rgba(148, 163, 184, 0.7);
+      font-size: 11px;
+      letter-spacing: 1px;
+    }
+    .form-submit.alt {
+      border-color: rgba(192, 132, 252, 0.5);
+      background: rgba(192, 132, 252, 0.12);
+      color: #e9d5ff;
+    }
+    .form-submit.alt:hover { background: rgba(192, 132, 252, 0.25); }
 
     /* 聊天面板 */
     #chat-panel {
@@ -839,6 +852,11 @@
           <textarea id="fact-note" placeholder="备注 / 背后的思考（可选）"></textarea>
         </div>
         <button id="fact-submit" class="form-submit">✦ 点亮新的知识节点</button>
+        <div class="form-divider">— 或者直接丢一句话 —</div>
+        <div class="form-row">
+          <textarea id="knowledge-text" placeholder="粘贴一句话，AI 自动识别实体与关系并入库，例如：向量数据库把非结构化文本编码成稠密向量，用于语义检索。"></textarea>
+        </div>
+        <button id="knowledge-submit" class="form-submit alt">✦ AI 一句话入库</button>
       </div>
     </div>
   </div>
@@ -1698,6 +1716,39 @@
     }
   }
   $("fact-submit").addEventListener("click", submitFact);
+
+  // =====================================================================
+  // 9.1 一句话添加知识 → POST /api/knowledge → 向量化 + LLM 抽取图结构 → 刷新星图
+  // =====================================================================
+  async function submitKnowledgeSentence() {
+    const text = $("knowledge-text").value.trim();
+    if (!text) {
+      toast("先写一句话再入库哦", "err");
+      return;
+    }
+    const btn = $("knowledge-submit");
+    btn.disabled = true; btn.textContent = "AI 解析中…";
+    try {
+      const res = await apiPostJson("/api/knowledge", { text }, 60000);
+      const extraction = res.extraction || {};
+      const extracted = `${extraction.entities || 0} 个实体 / ${extraction.relations || 0} 条连接`;
+      const fallback = (extraction.entities || 0) === 0 && (extraction.relations || 0) === 0
+        ? "（未配置聊天模型，仅向量化入库）"
+        : "";
+      toast(`已入库 ${res.chunks} 个知识块，识别 ${extracted} ✦ ${fallback}`, "ok");
+      $("knowledge-text").value = "";
+      await loadGraph();
+      if (currentFocusNode) {
+        const fresh = graph.byId.get(currentFocusNode.id);
+        if (fresh) { currentFocusNode = fresh; renderDrawer(fresh); }
+      }
+    } catch (err) {
+      toast("入库失败：" + err.message, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = "✦ AI 一句话入库";
+    }
+  }
+  $("knowledge-submit").addEventListener("click", submitKnowledgeSentence);
 
   // 顶栏「＋ 添加知识」：打开抽屉并聚焦表单
   $("btn-add-knowledge").addEventListener("click", () => {

@@ -2,12 +2,15 @@
 
 路由一览：
 - GET  /api/graph    全图 nodes+edges（星云图数据源）
+- GET  /api/graph-rag 向量证据 + 图关系路径混合检索
 - POST /api/chat     与知识管家对话（未配置聊天模型时 503）
 - POST /api/ingest   上传文档 → RAG 切块入库（星云长出新星星）
 - POST /api/facts    手工添加三元组知识
+- POST /api/knowledge 一句话入库：原文向量化 + LLM 自动抽取实体/关系 → 图结构
 - POST /api/seed     （重新）播种 Aetheria 种子数据（幂等）
 - GET  /api/export   导出全部记忆为 JSON 文件（课设「库→文件」要求）
 - POST /api/import   导入此前导出的 JSON（课设「文件→库」要求）
+- GET  /api/health   健康检查：嵌入模式、聊天可用性
 - /                星云图前端静态页（web/static/index.html）
 
 运行：``python -m web.app``（默认 http://127.0.0.1:8765）
@@ -63,6 +66,10 @@ class GraphRAGBody(BaseModel):
     query: str = Field(min_length=1, max_length=8000)
     limit: int = Field(default=5, ge=1, le=50)
     hops: int = Field(default=1, ge=0, le=3)
+
+
+class KnowledgeBody(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
 
 
 def create_app(manager: MemoryManager | None = None) -> FastAPI:
@@ -196,6 +203,41 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             confidence=body.confidence,
         )
         return {"ok": True, "item_id": item.id}
+
+    # ------------------------------------------------------------------
+    # 一句话添加知识（原文向量化 + LLM 自动抽取实体/关系 → 图结构）
+    # ------------------------------------------------------------------
+    @app.post("/api/knowledge")
+    def add_knowledge(body: KnowledgeBody) -> dict[str, Any]:
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="一句话内容不能为空")
+        pipeline = app.state.pipeline
+        from memory.rag import Document
+
+        items = pipeline.ingest(
+            Document(
+                text,
+                metadata={
+                    "source": "一句话入库",
+                    "filename": "一句话入库",
+                    "note": text[:400],
+                },
+            ),
+            chunk_size=1000,
+            overlap=100,
+        )
+        report = pipeline.last_ingest_report
+        the_manager().episodic.record(
+            f"添加了一条知识：{text[:80]}",
+            metadata={"title": "一句话入库", "source": "一句话入库"},
+        )
+        return {
+            "ok": True,
+            "chunks": len(items),
+            "items": [item.to_dict() for item in items],
+            "extraction": report,
+        }
 
     # ------------------------------------------------------------------
     # 播种 / 导出 / 导入（课设硬性要求）

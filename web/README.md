@@ -29,6 +29,7 @@
 | POST | `/api/ingest` | 上传文档 → RAG 切块、LLM 自动分类、实体关系抽取 |
 | POST | `/api/graph-rag` | 向量证据 + 图关系路径混合检索 |
 | POST | `/api/facts` | 手工添加三元组 `{subject, predicate, object, domain?, note?}` |
+| POST | `/api/knowledge` | 一句话入库：原文向量化 + LLM 自动抽取实体/三元组 → 图结构（未配置聊天模型时仅向量化） |
 | POST | `/api/seed` | 重新播种种子数据（幂等） |
 | GET | `/api/export` | 导出全部记忆为 JSON 文件 |
 | POST | `/api/import` | 导入导出过的 JSON（幂等去重） |

@@ -739,3 +739,42 @@ async def test_small_observations_are_saved_verbatim():
     assert observation.startswith("Observation: ")
     assert '"blob": "small"' in observation
     assert "[已压缩的历史工具结果" not in observation
+
+
+class SyncEntryLLM:
+    """Minimal sync ``complete`` transport for the synchronous entry point."""
+
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages, **_options):
+        self.calls += 1
+        return "Final Answer: sync-ok"
+
+
+def test_react_agent_sync_run_entrypoint():
+    """``ReActAgent.run()`` must work from a plain synchronous context.
+
+    Regression for the missing ``_run_sync`` helper: the sync entry point used
+    to raise ``NameError`` before any network request happened.  The helper
+    dispatches the coroutine to a worker thread so ``asyncio.run`` never
+    collides with a caller's running event loop.
+    """
+
+    llm = SyncEntryLLM()
+    agent = ReActAgent(
+        "sync-entry-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    answer = agent.run(
+        "hello",
+        max_rounds=2,
+        use_history=False,
+        defer_tool_loading=False,
+    )
+    assert answer == "sync-ok"
+    assert llm.calls == 1
