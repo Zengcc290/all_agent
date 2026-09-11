@@ -994,26 +994,28 @@
       }
     }
     // 5) 半径/速度/角度按同层序号错开（避免遮挡，保持原作轨道美学）
-    for (const star of graph.stars) {
-      let pIdx = 0, mIdx = 0;
-      for (const child of star.children) {
-        if (child.kind === "entity") {
-          child.orbitR = 150 + pIdx * 55;
-          child.orbitSpeed = (pIdx % 2 ? -1 : 1) * (0.002 + pIdx * 0.0005);
-          child.orbitAngle = pIdx * 2.4;
+    // 任意树深度都要初始化轨道，尤其是挂在行星下的卫星。
+    const initializeOrbits = (center, centerKind) => {
+      let planetIndex = 0, moonIndex = 0;
+      for (const child of center.children || []) {
+        if (child.kind === "entity" && centerKind !== "entity") {
+          child.orbitR = 150 + planetIndex * 55;
+          child.orbitSpeed = (planetIndex % 2 ? -1 : 1) * (0.002 + planetIndex * 0.0005);
+          child.orbitAngle = planetIndex * 2.4;
           child.radius = 16 + Math.min(8, (child.importance || 0.5) * 8);
-          pIdx++;
-        }
-      }
-      for (const child of star.children) {
-        if (child.kind !== "entity") {
-          child.orbitR = 55 + (mIdx % 8) * 13 + Math.floor(mIdx / 8) * 32;
-          child.orbitSpeed = ((mIdx % 5) - 2) * 0.0012;
-          child.orbitAngle = mIdx * 1.7;
+          planetIndex++;
+        } else {
+          child.orbitR = 55 + (moonIndex % 8) * 13 + Math.floor(moonIndex / 8) * 32;
+          child.orbitSpeed = ((moonIndex % 5) - 2) * 0.0012;
+          child.orbitAngle = moonIndex * 1.7;
           child.radius = 6.5 + (child.importance || 0.5) * 4;
-          mIdx++;
+          moonIndex++;
         }
+        initializeOrbits(child, child.kind);
       }
+    };
+    for (const star of graph.stars) {
+      initializeOrbits(star, "domain");
       star.radius = 44;
     }
   }
@@ -1119,6 +1121,7 @@
   // --- 天体绘制：原作五层光照（光晕/漫反射/纹理/晨昏线/菲涅尔），远景 LOD ---
   function drawCelestialBody(p, radius, hexColor, rotAngle, isFocused) {
     if (radius < 1.0) return;
+    if (!Number.isFinite(p.px) || !Number.isFinite(p.py) || !Number.isFinite(radius)) return;
 
     ctx.save();
 
