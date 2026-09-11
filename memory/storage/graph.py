@@ -8,10 +8,19 @@ from typing import Any, Mapping
 class Neo4jGraphStore:
     """Neo4j relation store with an in-memory fallback for local development."""
 
-    def __init__(self, uri: str | None = None, username: str | None = None, password: str | None = None, *, driver: Any = None, database: str | None = None) -> None:
+    def __init__(
+        self,
+        uri: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        *,
+        driver: Any = None,
+        database: str | None = None,
+    ) -> None:
         self.database = database
         self.driver = driver
         self._local: dict[str, list[dict[str, Any]]] = {}
+        self._reverse: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         if self.driver is None and uri:
             try:
                 from neo4j import GraphDatabase
@@ -21,8 +30,18 @@ class Neo4jGraphStore:
                 raise ValueError("username and password are required for Neo4j")
             self.driver = GraphDatabase.driver(uri, auth=(username, password))
 
-    def add_relation(self, source: str, relation: str, target: str, *, properties: Mapping[str, Any] | None = None) -> None:
-        if not all(isinstance(value, str) and value.strip() for value in (source, relation, target)):
+    def add_relation(
+        self,
+        source: str,
+        relation: str,
+        target: str,
+        *,
+        properties: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (source, relation, target)
+        ):
             raise ValueError("source, relation and target must be non-empty strings")
         props = dict(properties or {})
         if self.driver is None:
@@ -36,24 +55,47 @@ class Neo4jGraphStore:
                 None,
             )
             if existing is None:
-                edges.append({"source": source, "relation": relation, "target": target, "properties": props})
+                edge = {
+                    "source": source,
+                    "relation": relation,
+                    "target": target,
+                    "properties": props,
+                }
+                edges.append(edge)
+                self._reverse.setdefault(target, []).append((source, edge))
             else:
                 existing["properties"].update(props)
             return
         query = "MERGE (a:MemoryEntity {name: $source}) MERGE (b:MemoryEntity {name: $target}) MERGE (a)-[r:RELATED {kind: $relation}]->(b) SET r += $properties"
         with self.driver.session(database=self.database) as session:
-            session.run(query, source=source, target=target, relation=relation, properties=props).consume()
+            session.run(
+                query, source=source, target=target, relation=relation, properties=props
+            ).consume()
 
     # Common aliases used by graph-oriented clients.
     upsert_relation = add_relation
 
-    def get_relations(self, entity: str, *, relation: str | None = None, direction: str = "both") -> list[dict[str, Any]]:
+    def get_relations(
+        self, entity: str, *, relation: str | None = None, direction: str = "both"
+    ) -> list[dict[str, Any]]:
         if direction not in {"in", "out", "both"}:
             raise ValueError("direction must be in, out, or both")
         if self.driver is None:
-            values = list(self._local.get(entity, [])) if direction in ("out", "both") else []
+            values = (
+                list(self._local.get(entity, []))
+                if direction in ("out", "both")
+                else []
+            )
             if direction in ("in", "both"):
-                values += [edge for edges in self._local.values() for edge in edges if edge["target"] == entity]
+                values += [
+                    {
+                        "source": source,
+                        "relation": edge["relation"],
+                        "target": entity,
+                        "properties": edge["properties"],
+                    }
+                    for source, edge in self._reverse.get(entity, [])
+                ]
             if relation is not None:
                 values = [edge for edge in values if edge["relation"] == relation]
             return values
@@ -62,24 +104,43 @@ class Neo4jGraphStore:
         elif direction == "in":
             match, condition = "(a)-[r:RELATED]->(b)", "b.name = $entity"
         else:
-            match, condition = "(a)-[r:RELATED]->(b)", "a.name = $entity OR b.name = $entity"
+            match, condition = (
+                "(a)-[r:RELATED]->(b)",
+                "a.name = $entity OR b.name = $entity",
+            )
         clauses = [condition]
         if relation is not None:
             clauses.append("r.kind = $relation")
         query = f"MATCH {match} WHERE {' AND '.join(clauses)} RETURN a.name AS source, r.kind AS relation, b.name AS target, properties(r) AS properties"
         with self.driver.session(database=self.database) as session:
-            return [dict(record) for record in session.run(query, entity=entity, relation=relation)]
+            return [
+                dict(record)
+                for record in session.run(query, entity=entity, relation=relation)
+            ]
 
     related = get_relations
 
     def delete_relation(self, source: str, relation: str, target: str) -> bool:
         if self.driver is None:
             before = len(self._local.get(source, []))
-            self._local[source] = [e for e in self._local.get(source, []) if not (e["relation"] == relation and e["target"] == target)]
+            kept = [
+                e
+                for e in self._local.get(source, [])
+                if not (e["relation"] == relation and e["target"] == target)
+            ]
+            removed = [e for e in self._local.get(source, []) if e not in kept]
+            self._reverse[target] = [
+                (edge_source, edge)
+                for edge_source, edge in self._reverse.get(target, [])
+                if edge not in removed
+            ]
+            self._local[source] = kept
             return len(self._local[source]) < before
         query = "MATCH (a:MemoryEntity {name: $source})-[r:RELATED {kind: $relation}]->(b:MemoryEntity {name: $target}) DELETE r"
         with self.driver.session(database=self.database) as session:
-            result = session.run(query, source=source, relation=relation, target=target).consume()
+            result = session.run(
+                query, source=source, relation=relation, target=target
+            ).consume()
             return bool(getattr(result.counters, "relationships_deleted", 0))
 
     def delete_memory_relation(self, memory_id: str) -> bool:
@@ -89,7 +150,21 @@ class Neo4jGraphStore:
         if self.driver is None:
             removed = False
             for source, edges in list(self._local.items()):
-                kept = [edge for edge in edges if edge.get("properties", {}).get("memory_id") != memory_id]
+                kept = [
+                    edge
+                    for edge in edges
+                    if edge.get("properties", {}).get("memory_id") != memory_id
+                ]
+                for edge in edges:
+                    if edge in kept:
+                        continue
+                    self._reverse[edge["target"]] = [
+                        (edge_source, indexed_edge)
+                        for edge_source, indexed_edge in self._reverse.get(
+                            edge["target"], []
+                        )
+                        if indexed_edge is not edge
+                    ]
                 removed = removed or len(kept) != len(edges)
                 if kept:
                     self._local[source] = kept

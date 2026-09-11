@@ -49,8 +49,12 @@ class GraphRAGResult:
         parts: list[str] = []
         for result in self.evidence:
             item = result.item
-            source = item.metadata.get("filename") or item.metadata.get("source") or "记忆库"
-            parts.append(f"[证据|来源={source}|相似度={result.score:.3f}]\n{item.content}")
+            source = (
+                item.metadata.get("filename") or item.metadata.get("source") or "记忆库"
+            )
+            parts.append(
+                f"[证据|来源={source}|相似度={result.score:.3f}]\n{item.content}"
+            )
         for path in self.paths:
             relation = " -".join(path.relations)
             parts.append(
@@ -85,7 +89,11 @@ class GraphRAGPipeline:
             raise ValueError("limit must be a positive integer")
         if isinstance(hops, bool) or not isinstance(hops, int) or not 0 <= hops <= 3:
             raise ValueError("hops must be an integer between 0 and 3")
-        if isinstance(path_limit, bool) or not isinstance(path_limit, int) or path_limit < 1:
+        if (
+            isinstance(path_limit, bool)
+            or not isinstance(path_limit, int)
+            or path_limit < 1
+        ):
             raise ValueError("path_limit must be a positive integer")
 
         evidence = self.manager.search(
@@ -103,10 +111,16 @@ class GraphRAGPipeline:
             entities=seeds,
         )
 
-    def build_context(self, query: str, *, limit: int = 5, hops: int = 1, max_chars: int = 12000) -> str:
-        return self.retrieve(query, limit=limit, hops=hops).build_context(max_chars=max_chars)
+    def build_context(
+        self, query: str, *, limit: int = 5, hops: int = 1, max_chars: int = 12000
+    ) -> str:
+        return self.retrieve(query, limit=limit, hops=hops).build_context(
+            max_chars=max_chars
+        )
 
-    def _find_seed_entities(self, query: str, evidence: list[MemorySearchResult]) -> list[str]:
+    def _find_seed_entities(
+        self, query: str, evidence: list[MemorySearchResult]
+    ) -> list[str]:
         names: list[str] = []
         known = self.manager.semantic.list()
         query_folded = query.casefold()
@@ -114,7 +128,13 @@ class GraphRAGPipeline:
             item = result.item
             metadata = item.metadata
             if metadata.get("kind") == "entity":
-                names.append(str(metadata.get("canonical_name") or metadata.get("title") or item.content))
+                names.append(
+                    str(
+                        metadata.get("canonical_name")
+                        or metadata.get("title")
+                        or item.content
+                    )
+                )
             for key in ("subject", "object"):
                 value = metadata.get(key)
                 if value and str(value).casefold() in query_folded:
@@ -124,17 +144,28 @@ class GraphRAGPipeline:
                 continue
             name = str(item.metadata.get("canonical_name") or item.content)
             aliases = [str(value) for value in item.metadata.get("aliases", [])]
-            if any(value.casefold() in query_folded for value in [name, *aliases] if value):
+            if any(
+                value.casefold() in query_folded for value in [name, *aliases] if value
+            ):
                 names.append(name)
         return list(dict.fromkeys(names))
 
-    def _expand(self, seeds: list[str], *, hops: int, path_limit: int) -> list[GraphPath]:
+    def _expand(
+        self, seeds: list[str], *, hops: int, path_limit: int
+    ) -> list[GraphPath]:
         if hops == 0 or not seeds:
             return []
         paths: list[GraphPath] = []
-        queue: deque[tuple[str, tuple[str, ...], tuple[str, ...], tuple[dict[str, Any], ...], int, float]] = deque(
-            (seed, (seed,), (), (), 0, 1.0) for seed in seeds
-        )
+        queue: deque[
+            tuple[
+                str,
+                tuple[str, ...],
+                tuple[str, ...],
+                tuple[dict[str, Any], ...],
+                int,
+                float,
+            ]
+        ] = deque((seed, (seed,), (), (), 0, 1.0) for seed in seeds)
         visited: set[tuple[str, tuple[str, ...]]] = set()
         while queue and len(paths) < path_limit:
             current, entities, relations, evidence, depth, confidence = queue.popleft()
@@ -152,6 +183,8 @@ class GraphRAGPipeline:
                 marker = (neighbor, next_relations)
                 if marker in visited:
                     continue
+                if neighbor in entities:
+                    continue
                 visited.add(marker)
                 next_confidence = min(confidence, edge_confidence or confidence)
                 next_evidence = (*evidence, props)
@@ -165,8 +198,19 @@ class GraphRAGPipeline:
                         evidence=next_evidence,
                     )
                 )
-                queue.append((neighbor, next_entities, next_relations, next_evidence, depth + 1, next_confidence))
-        paths.sort(key=lambda item: (-item.confidence, len(item.relations), item.target))
+                queue.append(
+                    (
+                        neighbor,
+                        next_entities,
+                        next_relations,
+                        next_evidence,
+                        depth + 1,
+                        next_confidence,
+                    )
+                )
+        paths.sort(
+            key=lambda item: (-item.confidence, len(item.relations), item.target)
+        )
         return paths[:path_limit]
 
 

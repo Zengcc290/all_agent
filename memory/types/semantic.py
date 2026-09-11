@@ -13,7 +13,9 @@ if TYPE_CHECKING:
 class SemanticMemory(BaseMemory):
     memory_type = MemoryType.SEMANTIC
 
-    def __init__(self, *, graph_store: "Neo4jGraphStore | None" = None, **kwargs: Any) -> None:
+    def __init__(
+        self, *, graph_store: "Neo4jGraphStore | None" = None, **kwargs: Any
+    ) -> None:
         super().__init__(memory_type=self.memory_type, **kwargs)
         if graph_store is None:
             from ..storage import Neo4jGraphStore
@@ -31,17 +33,44 @@ class SemanticMemory(BaseMemory):
         confidence: float = 1.0,
         item_id: str | None = None,
     ) -> MemoryItem:
-        if not all(isinstance(value, str) and value.strip() for value in (subject, predicate, object)):
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (subject, predicate, object)
+        ):
             raise ValueError("subject, predicate and object must be non-empty strings")
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1
+        ):
             raise ValueError("confidence must be between 0 and 1")
+        fact_id = (
+            item_id or f"fact:{subject.strip()}|{predicate.strip()}|{object.strip()}"
+        )
+        existing = self.document_store.get(fact_id)
+        if existing is not None and existing.memory_type == self.memory_type:
+            merged_metadata = dict(existing.metadata)
+            merged_metadata.update(dict(metadata or {}))
+            return self.add(
+                f"{subject} {predicate} {object}",
+                metadata=merged_metadata,
+                importance=max(existing.importance, confidence),
+                item_id=fact_id,
+            )
         item_metadata = dict(metadata or {})
-        item_metadata.update({"subject": subject, "predicate": predicate, "object": object, "confidence": confidence})
+        item_metadata.update(
+            {
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
+                "confidence": confidence,
+            }
+        )
         item = self.add(
             f"{subject} {predicate} {object}",
             metadata=item_metadata,
             importance=confidence,
-            item_id=item_id,
+            item_id=fact_id,
         )
         graph_properties = {
             "memory_id": item.id,
@@ -50,10 +79,19 @@ class SemanticMemory(BaseMemory):
         for key in ("evidence", "source", "source_document", "chunk_id"):
             if key in item_metadata:
                 graph_properties[key] = item_metadata[key]
-        self.graph_store.add_relation(subject, predicate, object, properties=graph_properties)
+        self.graph_store.add_relation(
+            subject, predicate, object, properties=graph_properties
+        )
         return item
 
-    def add_relation(self, source: str, relation: str, target: str, *, metadata: Mapping[str, Any] | None = None) -> MemoryItem:
+    def add_relation(
+        self,
+        source: str,
+        relation: str,
+        target: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> MemoryItem:
         return self.add_fact(source, relation, target, metadata=metadata)
 
     def delete(self, item_id: str) -> bool:
@@ -67,14 +105,20 @@ class SemanticMemory(BaseMemory):
                 remove_relation(item_id)
         return removed
 
-    def related(self, entity: str, *, relation: str | None = None) -> list[dict[str, Any]]:
+    def related(
+        self, entity: str, *, relation: str | None = None
+    ) -> list[dict[str, Any]]:
         return self.graph_store.get_relations(entity, relation=relation)
 
     def facts(self, entity: str | None = None) -> list[MemoryItem]:
         items = self.list()
         if entity is None:
             return items
-        return [item for item in items if entity in (item.metadata.get("subject"), item.metadata.get("object"))]
+        return [
+            item
+            for item in items
+            if entity in (item.metadata.get("subject"), item.metadata.get("object"))
+        ]
 
 
 __all__ = ["SemanticMemory"]

@@ -30,12 +30,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from memory import MemoryManager, MemoryType
-from memory.base import utc_now
 from memory.rag import RAGPipeline
 
 from .graph_builder import build_graph
 from .seed import seed
-from .support import build_knowledge_extractor, chat_ready, close_manager, get_agent, get_manager, STATIC_DIR
+from .support import (
+    build_knowledge_extractor,
+    chat_ready,
+    close_manager,
+    get_agent,
+    get_manager,
+    STATIC_DIR,
+)
+
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
 class ChatBody(BaseModel):
@@ -109,7 +117,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             # agent.run 是同步阻塞调用，丢进线程避免卡住事件循环。
             answer = await asyncio.to_thread(agent.run, body.message)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}")
+            raise HTTPException(
+                status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"
+            )
         retrieval = app.state.pipeline.graph_retrieve(body.message, limit=5, hops=1)
         return {
             "answer": answer,
@@ -117,8 +127,10 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 {
                     "memory_id": result.item.id,
                     "score": result.score,
-                    "source": result.item.metadata.get("filename") or result.item.metadata.get("source"),
-                    "chunk_id": result.item.metadata.get("chunk_id") or result.item.metadata.get("document_id"),
+                    "source": result.item.metadata.get("filename")
+                    or result.item.metadata.get("source"),
+                    "chunk_id": result.item.metadata.get("chunk_id")
+                    or result.item.metadata.get("document_id"),
                 }
                 for result in retrieval.evidence
             ],
@@ -130,13 +142,23 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.post("/api/ingest")
     async def ingest(file: UploadFile) -> dict[str, Any]:
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="上传的文件是空的")
         filename = file.filename or "untitled"
         suffix = Path(filename).suffix or ".txt"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="nebula-ingest-") as tmp:
-            tmp.write(data)
+        total_size = 0
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=suffix, prefix="nebula-ingest-"
+        ) as tmp:
+            while chunk := await file.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > MAX_UPLOAD_BYTES:
+                    tmp.close()
+                    os.unlink(tmp.name)
+                    raise HTTPException(status_code=413, detail="???????? 64MB")
+                tmp.write(chunk)
+            if total_size == 0:
+                tmp.close()
+                os.unlink(tmp.name)
+                raise HTTPException(status_code=400, detail="????????")
             tmp_path = tmp.name
         try:
             items = app.state.pipeline.ingest_source(
@@ -146,7 +168,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 overlap=100,
             )
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"文档解析失败：{type(exc).__name__}: {exc}")
+            raise HTTPException(
+                status_code=422, detail=f"文档解析失败：{type(exc).__name__}: {exc}"
+            )
         finally:
             os.unlink(tmp_path)
         the_manager().episodic.record(
@@ -189,15 +213,21 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "counts": {
                 "total": len(items),
-                "semantic": sum(1 for item in items if item["memory_type"] == "semantic"),
-                "episodic": sum(1 for item in items if item["memory_type"] == "episodic"),
+                "semantic": sum(
+                    1 for item in items if item["memory_type"] == "semantic"
+                ),
+                "episodic": sum(
+                    1 for item in items if item["memory_type"] == "episodic"
+                ),
             },
             "items": items,
         }
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         return JSONResponse(
             payload,
-            headers={"Content-Disposition": f'attachment; filename="knowledge_export_{stamp}.json"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="knowledge_export_{stamp}.json"'
+            },
         )
 
     @app.post("/api/import")
@@ -213,9 +243,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
         manager = the_manager()
         existing_facts = {
-            (item.metadata.get("subject"), item.metadata.get("predicate"), item.metadata.get("object"))
+            (
+                item.metadata.get("subject"),
+                item.metadata.get("predicate"),
+                item.metadata.get("object"),
+            )
             for item in manager.list(memory_type=MemoryType.SEMANTIC)
-            if item.metadata.get("subject") and item.metadata.get("predicate") and item.metadata.get("object")
+            if item.metadata.get("subject")
+            and item.metadata.get("predicate")
+            and item.metadata.get("object")
         }
         imported = skipped = 0
         for raw_item in entries:
@@ -232,7 +268,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             md = raw_item.get("metadata") or {}
             memory_type = raw_item.get("memory_type") or "semantic"
             importance = raw_item.get("importance", 0.5)
-            subject, predicate, obj = md.get("subject"), md.get("predicate"), md.get("object")
+            subject, predicate, obj = (
+                md.get("subject"),
+                md.get("predicate"),
+                md.get("object"),
+            )
             try:
                 if subject and predicate and obj:
                     # 事实：按三元组幂等，避免重复导入时长出重边。
@@ -241,7 +281,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                         continue
                     existing_facts.add((subject, predicate, obj))
                     manager.semantic.add_fact(
-                        subject, predicate, obj, metadata=md, confidence=float(importance),
+                        subject,
+                        predicate,
+                        obj,
+                        metadata=md,
+                        confidence=float(importance),
                     )
                 else:
                     manager.add(

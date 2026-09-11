@@ -40,7 +40,9 @@ def test_graph_empty_then_seeded(client: TestClient) -> None:
     graph = client.get("/api/graph").json()
     # 空库也有内置的「时间线」恒星与实体，但没有任何边和事实
     assert graph["edges"] == []
-    assert not [n for n in graph["nodes"] if n["kind"] in ("fact", "chunk", "note", "event")]
+    assert not [
+        n for n in graph["nodes"] if n["kind"] in ("fact", "chunk", "note", "event")
+    ]
 
     seeded = client.post("/api/seed").json()
     assert seeded["seeded"] is True
@@ -57,8 +59,13 @@ def test_graph_empty_then_seeded(client: TestClient) -> None:
 
 
 def test_facts_add_and_appear(client: TestClient) -> None:
-    body = {"subject": "Qdrant", "predicate": "支持", "object": "本地嵌入式模式",
-            "domain": "Technology", "note": "测试事实"}
+    body = {
+        "subject": "Qdrant",
+        "predicate": "支持",
+        "object": "本地嵌入式模式",
+        "domain": "Technology",
+        "note": "测试事实",
+    }
     response = client.post("/api/facts", json=body)
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -84,7 +91,14 @@ def test_ingest_grows_nebula(client: TestClient) -> None:
     assert any("note.txt" in (node.get("source") or "") for node in graph["nodes"])
 
 
-def test_graph_rag_endpoint_returns_vector_evidence_and_paths(client: TestClient) -> None:
+def test_ingest_rejects_empty_file(client: TestClient) -> None:
+    response = client.post("/api/ingest", files=_make_ingest_payload("empty.txt", ""))
+    assert response.status_code == 400
+
+
+def test_graph_rag_endpoint_returns_vector_evidence_and_paths(
+    client: TestClient,
+) -> None:
     from memory.rag import RAGPipeline
 
     class Extractor:
@@ -92,10 +106,16 @@ def test_graph_rag_endpoint_returns_vector_evidence_and_paths(client: TestClient
             return ExtractionResult(
                 domain="测试",
                 entities=[EntityCandidate(name="A"), EntityCandidate(name="B")],
-                relations=[RelationCandidate(subject="A", predicate="关联", object="B", confidence=0.9)],
+                relations=[
+                    RelationCandidate(
+                        subject="A", predicate="关联", object="B", confidence=0.9
+                    )
+                ],
             )
 
-    client.app.state.pipeline = RAGPipeline(client.app.state.manager, extractor=Extractor())
+    client.app.state.pipeline = RAGPipeline(
+        client.app.state.manager, extractor=Extractor()
+    )
     client.post("/api/ingest", files=_make_ingest_payload("graph.txt", "A关联B"))
     response = client.post("/api/graph-rag", json={"query": "A", "hops": 1})
     assert response.status_code == 200
@@ -114,7 +134,13 @@ def test_export_import_roundtrip_idempotent(client: TestClient) -> None:
     assert "attachment" in export.headers["content-disposition"]
 
     # 全量回导：既有的 item_id/三元组应全部跳过
-    files = {"file": ("export.json", io.BytesIO(json.dumps(payload).encode("utf-8")), "application/json")}
+    files = {
+        "file": (
+            "export.json",
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+            "application/json",
+        )
+    }
     imported = client.post("/api/import", files=files).json()
     assert imported["imported"] == 0
     assert imported["skipped"] == payload["counts"]["total"]

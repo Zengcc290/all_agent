@@ -20,7 +20,9 @@ from conftest import HashEmbedding
 
 @pytest.fixture()
 def manager() -> MemoryManager:
-    return MemoryManager(MemoryConfig(sqlite_path=":memory:"), embedding=HashEmbedding())
+    return MemoryManager(
+        MemoryConfig(sqlite_path=":memory:"), embedding=HashEmbedding()
+    )
 
 
 @pytest.fixture()
@@ -69,7 +71,9 @@ def test_processor_chunk_validation():
         ("notes.txt", "plain text", "plain text"),
     ],
 )
-def test_processor_parses_local_formats(tmp_path: Path, filename: str, raw: str, expected_fragment: str):
+def test_processor_parses_local_formats(
+    tmp_path: Path, filename: str, raw: str, expected_fragment: str
+):
     path = tmp_path / filename
     path.write_text(raw, encoding="utf-8")
 
@@ -129,7 +133,9 @@ class StaticExtractor:
 def test_pipeline_auto_extracts_entities_and_graph_paths(manager: MemoryManager):
     pipeline = RAGPipeline(manager, extractor=StaticExtractor())
     items = pipeline.ingest(
-        Document("Qdrant用于语义检索。", id="doc-qdrant", metadata={"filename": "qdrant.txt"}),
+        Document(
+            "Qdrant用于语义检索。", id="doc-qdrant", metadata={"filename": "qdrant.txt"}
+        ),
         chunk_size=100,
         overlap=0,
     )
@@ -150,19 +156,45 @@ def test_pipeline_reuses_relation_id_and_accumulates_evidence(manager: MemoryMan
     pipeline = RAGPipeline(manager, extractor=StaticExtractor())
     for index in range(2):
         pipeline.ingest(
-            Document(f"Qdrant用于语义检索。{index}", id=f"doc-{index}", metadata={"filename": f"{index}.txt"}),
+            Document(
+                f"Qdrant用于语义检索。{index}",
+                id=f"doc-{index}",
+                metadata={"filename": f"{index}.txt"},
+            ),
             chunk_size=100,
             overlap=0,
         )
     relations = [
-        item for item in manager.semantic.facts()
+        item
+        for item in manager.semantic.facts()
         if item.metadata.get("predicate") == "用于"
     ]
     assert len(relations) == 1
     assert len(relations[0].metadata["evidence_items"]) == 2
 
 
-def test_pipeline_ingest_source_and_delete_document(pipeline: RAGPipeline, tmp_path: Path):
+def test_graph_rag_does_not_return_cycles(manager: MemoryManager):
+    manager.semantic.add_fact("A", "knows", "B", confidence=0.9)
+    manager.semantic.add_fact("B", "knows", "A", confidence=0.8)
+
+    paths = GraphRAGPipeline(manager)._expand(["A"], hops=2, path_limit=20)
+
+    assert paths
+    assert all(len(set(path.entities)) == len(path.entities) for path in paths)
+
+
+def test_add_fact_without_item_id_is_idempotent(manager: MemoryManager):
+    manager.semantic.add_fact("A", "knows", "B", confidence=0.8)
+    manager.semantic.add_fact("A", "knows", "B", confidence=0.9)
+
+    facts = manager.semantic.facts("A")
+    assert len(facts) == 1
+    assert facts[0].importance == 0.9
+
+
+def test_pipeline_ingest_source_and_delete_document(
+    pipeline: RAGPipeline, tmp_path: Path
+):
     path = tmp_path / "facts.txt"
     path.write_text("The memory package stores semantic facts.", encoding="utf-8")
 
@@ -180,7 +212,9 @@ def test_pipeline_answer_requires_callable_generator(pipeline: RAGPipeline):
         pipeline.answer("anything", "not-callable")  # type: ignore[arg-type]
 
     pipeline.ingest(Document("React answers use thoughts and actions.", id="doc-react"))
-    answer = pipeline.answer("thoughts and actions", lambda prompt: f"answer-of:{len(prompt)}")
+    answer = pipeline.answer(
+        "thoughts and actions", lambda prompt: f"answer-of:{len(prompt)}"
+    )
     assert answer.startswith("answer-of:")
 
 
@@ -193,42 +227,70 @@ def test_tool_default_sqlite_path_prefers_env(monkeypatch: pytest.MonkeyPatch):
     assert default_sqlite_path() == "memory.sqlite3"
 
 
-def test_memory_tool_persists_across_instances(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_memory_tool_persists_across_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "tool-memory.sqlite3"))
     from memory import default_sqlite_path
     from tool.memory_tool import MemoryTool, MemoryToolInput
 
     def make_tool() -> MemoryTool:
-        manager = MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path()), embedding=HashEmbedding())
+        manager = MemoryManager(
+            MemoryConfig(sqlite_path=default_sqlite_path()), embedding=HashEmbedding()
+        )
         return MemoryTool(manager=manager)
 
     first = make_tool()
-    first.execute(MemoryToolInput(action="add", content="persistent fact", memory_type="semantic"))
+    first.execute(
+        MemoryToolInput(action="add", content="persistent fact", memory_type="semantic")
+    )
 
     second = make_tool()
-    output = second.execute(MemoryToolInput(action="search", query="persistent fact", memory_type="semantic"))
+    output = second.execute(
+        MemoryToolInput(
+            action="search", query="persistent fact", memory_type="semantic"
+        )
+    )
 
     assert output.count >= 1
     assert any("persistent fact" in item["content"] for item in output.items)
 
 
-def test_rag_tool_ingest_and_retrieve_with_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_rag_tool_ingest_and_retrieve_with_persistence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "rag-memory.sqlite3"))
     from memory import default_sqlite_path
     from tool.rag_tool import RAGTool, RAGToolInput
 
     def make_tool() -> RAGTool:
-        pipeline = RAGPipeline(MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path()), embedding=HashEmbedding()))
+        pipeline = RAGPipeline(
+            MemoryManager(
+                MemoryConfig(sqlite_path=default_sqlite_path()),
+                embedding=HashEmbedding(),
+            )
+        )
         return RAGTool(pipeline=pipeline)
 
     tool = make_tool()
-    ingest = tool.execute(RAGToolInput(action="ingest", text="The zebra lives in savannah. " * 20, chunk_size=100, overlap=20))
+    ingest = tool.execute(
+        RAGToolInput(
+            action="ingest",
+            text="The zebra lives in savannah. " * 20,
+            chunk_size=100,
+            overlap=20,
+        )
+    )
     assert ingest.count >= 2
 
-    retrieved = tool.execute(RAGToolInput(action="retrieve", query="zebra savannah", limit=2))
+    retrieved = tool.execute(
+        RAGToolInput(action="retrieve", query="zebra savannah", limit=2)
+    )
     assert retrieved.count >= 1
     assert "zebra" in " ".join(item["content"] for item in retrieved.items)
 
-    context = tool.execute(RAGToolInput(action="context", query="zebra savannah", limit=2))
+    context = tool.execute(
+        RAGToolInput(action="context", query="zebra savannah", limit=2)
+    )
     assert context.count == 1
     assert "zebra" in context.context
