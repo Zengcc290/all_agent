@@ -1150,6 +1150,11 @@
         e.target.closest(".breadcrumb-nav") || e.target.closest(".top-actions") ||
         e.target.closest("#chat-panel") || e.target.closest("#stats-bar")) return;
     isDragging = true; lastMouseX = e.clientX; lastMouseY = e.clientY;
+    // 手动拖动 = 脱离焦点锁定：否则渲染循环每帧把相机拽回焦点，拖拽无效
+    if (currentFocusNode) {
+      currentFocusNode = null;
+      updateBreadcrumb();
+    }
   });
   window.addEventListener("mousemove", (e) => {
     mouseX = e.clientX; mouseY = e.clientY;
@@ -1247,8 +1252,8 @@
     lastFrameTime = now;
     globalTime += dt;
 
-    // 锁定焦点天体：相机中心始终追随
-    if (currentFocusNode && currentFocusNode.wx != null) {
+    // 锁定焦点天体：相机中心始终追随（拖拽期间不锁定，保证可自由平移）
+    if (currentFocusNode && currentFocusNode.wx != null && !isDragging) {
       camTargetX = currentFocusNode.wx;
       camTargetY = currentFocusNode.wy;
     }
