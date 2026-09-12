@@ -952,7 +952,12 @@
     buildStarSystem();
     renderTourPanel();
     updateStats(data.stats || {});
-    // 按 id 重新绑定焦点节点：旧对象已不在渲染树里，其 wx/wy/wz 冻结会导致
+    // 首次加载或数据刷新后无焦点：相机对准全景 fit
+    if (!currentFocusNode) {
+      camTargetX = overviewX; camTargetY = overviewY;
+      targetZoom = overviewZoom;
+    }
+    // 按 id 重新绑定焦点节点：旧对象已不在渲染树里，其 wx/wy 冻结会导致
     // 相机停在死位置、目标天体"消失"的假象；找不到则回到全景
     if (focusId) {
       currentFocusNode = graph.byId.get(focusId) || null;
@@ -961,20 +966,22 @@
     }
   }
 
-  // 扁平 nodes/edges → 嵌套星系树
+  // 扁平 nodes/edges → 嵌套星系树 + 静态 2D 布局
+  // 布局只算一次（wx/wy 固定），渲染零物理开销——这是支撑万级节点的根基。
   function buildStarSystem() {
     // 1) 恒星 = kind=domain，沿环带分布
     graph.stars = graph.nodes.filter(n => n.kind === "domain");
-    const RING = 430;
+    const RING = 900;
     graph.stars.forEach((star, i) => {
       const a = (i / Math.max(1, graph.stars.length)) * Math.PI * 2 - Math.PI / 2;
-      star.x = Math.cos(a) * RING;
-      star.y = (i % 2 ? 1 : -1) * 60;
-      star.z = Math.sin(a) * RING;
+      star.wx = Math.cos(a) * RING;
+      star.wy = Math.sin(a) * RING;
+      star.x = star.wx; star.y = star.wy;
       star.children = [];
       star.parent = null;
       star.tierName = "恒星系 (Star System)";
       star.level = 1;
+      star.radius = 22 + Math.min(10, (star.importance || 0.5) * 10);
     });
     // 2) 其余节点找归属恒星：沿 parent 链向上（最多 8 层）
     const starById = new Map(graph.stars.map(s => [s.id, s]));
@@ -993,7 +1000,6 @@
       const star = findStar(n);
       if (!star) continue;  // 孤儿节点由补种兜底恒星收容
       n.parentStar = star;
-      // 面包屑/母星上溯用的树形父指针
       const parentEntity = graph.byId.get(n.parent);
       n.treeParent = (n.kind === "entity" || !parentEntity || parentEntity === n) ? star : parentEntity;
       if (n.kind === "entity") { star.children.push(n); n.level = 2; }
@@ -1008,34 +1014,64 @@
       if (parentEntity && parentEntity.kind === "entity") {
         parentEntity.children.push(n);
       } else if (n.parentStar) {
-        n.parentStar.children.push(n);  // 绕恒星转的卫星
+        n.parentStar.children.push(n);
       }
     }
-    // 5) 半径/速度/角度按同层序号错开（避免遮挡，保持原作轨道美学）
-    // 任意树深度都要初始化轨道，尤其是挂在行星下的卫星。
-    const initializeOrbits = (center, centerKind) => {
-      let planetIndex = 0, moonIndex = 0;
-      for (const child of center.children || []) {
-        if (child.kind === "entity" && centerKind !== "entity") {
-          child.orbitR = 150 + planetIndex * 55;
-          child.orbitSpeed = (planetIndex % 2 ? -1 : 1) * (0.002 + planetIndex * 0.0005);
-          child.orbitAngle = planetIndex * 2.4;
-          child.radius = 16 + Math.min(8, (child.importance || 0.5) * 8);
-          planetIndex++;
-        } else {
-          child.orbitR = 55 + (moonIndex % 8) * 13 + Math.floor(moonIndex / 8) * 32;
-          child.orbitSpeed = ((moonIndex % 5) - 2) * 0.0012;
-          child.orbitAngle = moonIndex * 1.7;
-          child.radius = 6.5 + (child.importance || 0.5) * 4;
-          moonIndex++;
-        }
-        initializeOrbits(child, child.kind);
+    // 5) 静态 2D 摆放：多环带 + 黄金角，同层序号错开避免重叠。
+    // 行星绕恒星、卫星绕行星/恒星，全部一次算定，运行时只读不写。
+    const GOLDEN = 2.399963;
+    const place = (center, children, ringBase, ringStep, perRing, kind) => {
+      let idx = 0;
+      for (const child of children || []) {
+        const ring = Math.floor(idx / perRing);
+        const orbitR = ringBase + ring * ringStep;
+        const angle = (idx % perRing) * (Math.PI * 2 / perRing) + ring * 0.7;
+        child.wx = center.wx + Math.cos(angle) * orbitR;
+        child.wy = center.wy + Math.sin(angle * GOLDEN) * orbitR;
+        child.orbitR = orbitR;
+        child.radius = kind === "entity"
+          ? 8 + Math.min(6, (child.importance || 0.5) * 6)
+          : 3 + (child.importance || 0.5) * 2.5;
+        child.twinklePhase = Math.random() * Math.PI * 2;
+        child.twinkleSpeed = 0.6 + Math.random() * 1.4;
+        idx++;
       }
     };
     for (const star of graph.stars) {
-      initializeOrbits(star, "domain");
-      star.radius = 44;
+      const entities = star.children.filter(c => c.kind === "entity");
+      place(star, entities, 170, 130, 12, "entity");
+      for (const ent of entities) {
+        const moons = ent.children || [];
+        place(ent, moons, 42, 26, 8, "moon");
+      }
+      const stray = star.children.filter(c => c.kind !== "entity");
+      place(star, stray, 150, 110, 10, "moon");
     }
+    // 6) 扁平渲染数组（一次建好，每帧遍历零递归）
+    graph._flat = [];
+    const collect = (n) => { graph._flat.push(n); if (n.children) for (const c of n.children) collect(c); };
+    for (const star of graph.stars) collect(star);
+    graph._flat.sort((a, b) => (b.importance || 0) - (a.importance || 0));
+    // 全景视口：按所有节点包围盒自动 fit
+    computeOverview();
+  }
+
+  // 计算全景视角（fit 全部节点 + 留白）
+  function computeOverview() {
+    if (!graph._flat || !graph._flat.length) {
+      overviewZoom = 0.5; overviewX = 0; overviewY = 0;
+      return;
+    }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of graph._flat) {
+      if (n.wx < minX) minX = n.wx; if (n.wx > maxX) maxX = n.wx;
+      if (n.wy < minY) minY = n.wy; if (n.wy > maxY) maxY = n.wy;
+    }
+    const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
+    overviewX = (minX + maxX) / 2;
+    overviewY = (minY + maxY) / 2;
+    overviewZoom = Math.min(width / spanX, height / spanY) * 0.82;
+    overviewZoom = Math.max(0.08, Math.min(1.6, overviewZoom));
   }
 
   function updateStats(stats) {
@@ -1069,14 +1105,14 @@
   }
 
   // =====================================================================
-  // 2. 渲染引擎（完整保留原作：投影/五层光照/摄像机阻尼/星尘星云）
+  // 2. 渲染引擎（静态 2D：布局一次算好、视口剔除、闪烁、缩放平移）
   // =====================================================================
   const canvas = $("universe"), ctx = canvas.getContext("2d");
   let width = (canvas.width = window.innerWidth), height = (canvas.height = window.innerHeight);
   window.addEventListener("resize", () => {
     width = canvas.width = window.innerWidth;
     height = canvas.height = window.innerHeight;
-    generateNebulaGases();
+    computeOverview();
   });
 
   function hexToRgba(hex, alpha) {
@@ -1088,30 +1124,26 @@
     return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
   }
 
-  // --- 摄像机（修复原 bug：投影统一用平滑后的 camDistance） ---
-  let camTargetX = 0, camTargetY = 0, camTargetZ = 0;
-  let camX = 0, camY = 0, camZ = 0;
-  let camDistance = 850, targetCamDistance = 850;
-  let rotX = 0.35, targetRotX = 0.35, rotY = -0.3, targetRotY = -0.3;
+  // --- 2D 相机：视口中心世界坐标 + 缩放（像素/世界单位），平滑阻尼 ---
+  let camX = 0, camY = 0, zoom = 0.5;
+  let camTargetX = 0, camTargetY = 0, targetZoom = 0.5;
+  let overviewX = 0, overviewY = 0, overviewZoom = 0.5;   // 全景 fit 值
   let currentFocusNode = null, isDragging = false;
   let lastMouseX = 0, lastMouseY = 0, mouseX = -9999, mouseY = -9999;
   let edgesVisible = true;
-  let flightSettleDistance = 850;   // 飞越结束后回落的目标视距
+  let globalTime = 0;
+  let hoverNodeRef = null, lastFrameTime = performance.now();
+  let sortedRenderList = [];
 
-  function project3D(wx, wy, wz) {
-    const dx = wx - camX, dy = wy - camY, dz = wz - camZ;
-    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-    const x1 = dx * cosY - dz * sinY;
-    const z1 = dz * cosY + dx * sinY;
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-    const y2 = dy * cosX - z1 * sinX;
-    const z2 = z1 * cosX + dy * sinX;
-    const denom = camDistance + z2;   // ← 修复：用平滑值，缩放有过渡
-    if (denom <= 20) return { px: -9999, py: -9999, scale: 0, depth: z2 };
-    const fov = camDistance / denom;
-    return { px: width / 2 + x1 * fov, py: height / 2 + y2 * fov, scale: fov, depth: z2 };
+  function project2D(wx, wy) {
+    return {
+      px: width / 2 + (wx - camX) * zoom,
+      py: height / 2 + (wy - camY) * zoom,
+      scale: zoom,
+    };
   }
 
+  // 鼠标：拖拽平移，滚轮以光标为锚点缩放
   window.addEventListener("mousedown", (e) => {
     if (e.target.closest("#detail-drawer") || e.target.closest("#drawer-reopen-trigger") ||
         e.target.closest(".controls") || e.target.closest(".tour-panel") ||
@@ -1122,9 +1154,8 @@
   window.addEventListener("mousemove", (e) => {
     mouseX = e.clientX; mouseY = e.clientY;
     if (!isDragging) return;
-    targetRotY += (e.clientX - lastMouseX) * 0.0035;
-    targetRotX -= (e.clientY - lastMouseY) * 0.0035;
-    targetRotX = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, targetRotX));
+    camTargetX -= (e.clientX - lastMouseX) / zoom;
+    camTargetY -= (e.clientY - lastMouseY) / zoom;
     lastMouseX = e.clientX; lastMouseY = e.clientY;
   });
   window.addEventListener("mouseup", () => { isDragging = false; });
@@ -1133,159 +1164,70 @@
     if (e.target.closest("#detail-drawer") || e.target.closest("#chat-panel") ||
         e.target.closest(".top-actions") || e.target.closest(".tour-panel")) return;
     e.preventDefault();
-    targetCamDistance = Math.max(120, Math.min(2200, targetCamDistance * (e.deltaY < 0 ? 0.88 : 1.14)));
+    const factor = e.deltaY < 0 ? 1.15 : 0.87;
+    const newZoom = Math.max(0.03, Math.min(30, targetZoom * factor));
+    // 保持光标下的世界点不动
+    const wx = camX + (e.clientX - width / 2) / zoom;
+    const wy = camY + (e.clientY - height / 2) / zoom;
+    targetZoom = newZoom;
+    camTargetX = wx - (e.clientX - width / 2) / newZoom;
+    camTargetY = wy - (e.clientY - height / 2) / newZoom;
   }, { passive: false });
 
-  // --- 天体绘制：原作五层光照（光晕/漫反射/纹理/晨昏线/菲涅尔），远景 LOD ---
-  function drawCelestialBody(p, radius, hexColor, rotAngle, isFocused) {
+  // --- 天体绘制：2D 光点 + 闪烁（替代原作五层光照，一节点两笔） ---
+  function drawCelestialBody(p, radius, hexColor, isFocused, twinkle) {
     if (radius < 1.0) return;
     if (!Number.isFinite(p.px) || !Number.isFinite(p.py) || !Number.isFinite(radius)) return;
-
+    const alpha = isFocused ? 1 : 0.55 + 0.45 * twinkle;
     ctx.save();
-
-    // 远景 LOD：只画光点，保住帧率
-    if (camDistance > 1500) {
-      ctx.beginPath();
-      ctx.arc(p.px, p.py, Math.max(1.5, radius * 0.5), 0, Math.PI * 2);
-      ctx.fillStyle = hexColor; ctx.fill();
-      ctx.restore();
-      return;
+    if (isFocused) {
+      const outerR = radius * 2.4;
+      const glowGrad = ctx.createRadialGradient(p.px, p.py, radius * 0.5, p.px, p.py, outerR);
+      glowGrad.addColorStop(0, hexToRgba(hexColor, 0.6));
+      glowGrad.addColorStop(0.5, hexToRgba(hexColor, 0.15));
+      glowGrad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.globalCompositeOperation = "screen";
+      ctx.fillStyle = glowGrad;
+      ctx.beginPath(); ctx.arc(p.px, p.py, outerR, 0, Math.PI * 2); ctx.fill();
+      ctx.globalCompositeOperation = "source-over";
     }
-
-    // (1) 外围柔和发光大气光晕
-    ctx.globalCompositeOperation = "screen";
-    const outerR = radius * (isFocused ? 2.3 : 1.7);
-    const glowGrad = ctx.createRadialGradient(p.px, p.py, radius * 0.75, p.px, p.py, outerR);
-    glowGrad.addColorStop(0, hexToRgba(hexColor, 0.45));
-    glowGrad.addColorStop(0.4, hexToRgba(hexColor, 0.15));
-    glowGrad.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = glowGrad;
-    ctx.beginPath(); ctx.arc(p.px, p.py, outerR, 0, Math.PI * 2); ctx.fill();
-
-    // (2) 实体球体（漫反射）
-    ctx.save();
-    ctx.beginPath(); ctx.arc(p.px, p.py, radius, 0, Math.PI * 2); ctx.clip();
-    const lightX = p.px - radius * 0.45, lightY = p.py - radius * 0.45;
-    const diffuseGrad = ctx.createRadialGradient(
-      lightX, lightY, radius * 0.08,
-      p.px + radius * 0.2, p.py + radius * 0.2, radius * 1.05
-    );
-    diffuseGrad.addColorStop(0, "#f8fafc");
-    diffuseGrad.addColorStop(0.2, hexColor);
-    diffuseGrad.addColorStop(0.65, hexToRgba(hexColor, 0.35));
-    diffuseGrad.addColorStop(0.85, "#0b0f19");
-    diffuseGrad.addColorStop(1.0, "#010308");
-    ctx.fillStyle = diffuseGrad;
-    ctx.fillRect(p.px - radius, p.py - radius, radius * 2, radius * 2);
-
-    // (3) 地表纹理条带
-    ctx.globalCompositeOperation = "overlay";
-    const bands = 10;
-    const bandHeight = (radius * 2) / bands;
-    for (let i = 0; i < bands; i++) {
-      const yOffset = -radius + i * bandHeight;
-      const waveOffset = Math.sin(i * 0.9 + rotAngle) * (radius * 0.4);
-      ctx.fillStyle = hexToRgba(hexColor, 0.25);
-      ctx.beginPath();
-      ctx.ellipse(p.px + waveOffset, p.py + yOffset, radius * 1.08, bandHeight * 1.1, 0.08, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // (4) 晨昏线终结者阴影
-    ctx.globalCompositeOperation = "source-over";
-    const terminatorGrad = ctx.createRadialGradient(
-      lightX, lightY, radius * 0.6,
-      lightX + radius * 0.5, lightY + radius * 0.5, radius * 1.35
-    );
-    terminatorGrad.addColorStop(0, "rgba(0,0,0,0)");
-    terminatorGrad.addColorStop(0.45, "rgba(2,6,23,0.4)");
-    terminatorGrad.addColorStop(0.8, "rgba(1,2,8,0.92)");
-    terminatorGrad.addColorStop(1.0, "rgba(0,0,2,0.98)");
-    ctx.fillStyle = terminatorGrad;
+    ctx.fillStyle = hexToRgba(hexColor, alpha);
     ctx.beginPath(); ctx.arc(p.px, p.py, radius, 0, Math.PI * 2); ctx.fill();
-
-    ctx.restore();
-
-    // (5) 菲涅尔迎光边缘
-    ctx.globalCompositeOperation = "screen";
-    ctx.strokeStyle = "rgba(255,255,255,0.55)";
-    ctx.lineWidth = Math.max(1.0, radius * 0.05);
-    ctx.beginPath();
-    ctx.arc(p.px, p.py, radius * 0.98, Math.PI * 0.85, Math.PI * 1.65);
-    ctx.stroke();
-
     ctx.restore();
   }
 
-  // --- 背景星云与微尘（原作规格：20 团星云 + 900 颗微尘） ---
-  let nebulaClouds = [];
-  function generateNebulaGases() {
-    nebulaClouds = [];
-    const cloudColors = ["rgba(30, 58, 138, ", "rgba(88, 28, 135, ", "rgba(15, 23, 42, ", "rgba(14, 116, 144, "];
-    for (let i = 0; i < 20; i++) {
-      nebulaClouds.push({
-        x: (Math.random() - .5) * 1600, y: (Math.random() - .5) * 1200,
-        z: (Math.random() - .5) * 1000 - 100, radius: 300 + Math.random() * 350,
-        color: cloudColors[i % 4], alpha: 0.03 + Math.random() * 0.035
-      });
-    }
-  }
+  // 背景深空微尘（屏幕空间，闪烁，量少开销低）
   const deepFieldStars = [];
-  for (let i = 0; i < 900; i++) {
+  for (let i = 0; i < 220; i++) {
     deepFieldStars.push({
-      x: (Math.random() - .5) * 4000, y: (Math.random() - .5) * 4000, z: (Math.random() - .5) * 4000,
-      size: Math.random() * 1.4 + 0.3, alpha: Math.random() * 0.5 + 0.15,
-      twinklePhase: Math.random() * Math.PI * 2, twinkleSpeed: 0.005 + Math.random() * 0.007
+      x: Math.random() * 1600 - 800, y: Math.random() * 1200 - 600,
+      size: Math.random() * 1.2 + 0.4, alpha: Math.random() * 0.4 + 0.15,
+      twinklePhase: Math.random() * Math.PI * 2, twinkleSpeed: 0.4 + Math.random() * 1.2,
     });
   }
-  generateNebulaGases();
 
   // =====================================================================
-  // 3. 物理：递归轨道更新（支持任意深度，替代原作硬编码三层）
-  // =====================================================================
-  let globalTime = 0;
-  function updateCelestialPhysics(dt) {
-    globalTime += dt;
-    for (const star of graph.stars) {
-      star.wx = star.x; star.wy = star.y; star.wz = star.z;
-      star.rotAngle = (star.rotAngle || 0) + dt * 0.12;
-      updateOrbit(star, dt);
-    }
-  }
-  function updateOrbit(center, dt) {
-    if (!center.children || !center.children.length) return;
-    for (const child of center.children) {
-      child.rotAngle = (child.rotAngle || 0) + dt * 0.25;
-      child.orbitAngle = (child.orbitAngle || 0) + child.orbitSpeed * dt * 60;
-      child.wx = center.wx + Math.cos(child.orbitAngle) * child.orbitR;
-      child.wy = center.wy + Math.sin(child.orbitAngle * 2) * (child.orbitR * 0.06);
-      child.wz = center.wz + Math.sin(child.orbitAngle) * child.orbitR;
-      if (child.children) updateOrbit(child, dt);   // 递归：行星也能有卫星
-    }
-  }
-
-  // =====================================================================
-  // 4. 引力桥（三元组边）：发光贝塞尔曲线 + 悬停高亮邻域
+  // 3. 引力桥（三元组边）：视口剔除 + 悬停高亮邻域
   // =====================================================================
   function drawEdges() {
     if (!edgesVisible || !graph.edges.length) return;
+    const pad = 60 / zoom;
+    const viewL = camX - width / 2 / zoom - pad, viewR = camX + width / 2 / zoom + pad;
+    const viewT = camY - height / 2 / zoom - pad, viewB = camY + height / 2 / zoom + pad;
     for (const edge of graph.edges) {
       const s = graph.byId.get(edge.source), t = graph.byId.get(edge.target);
       if (!s || !t || s.wx == null || t.wx == null) continue;
-      const ps = project3D(s.wx, s.wy, s.wz), pt = project3D(t.wx, t.wy, t.wz);
-      if (ps.scale <= 0 || pt.scale <= 0) continue;
+      if (s.wx < viewL || s.wx > viewR || s.wy < viewT || s.wy > viewB ||
+          t.wx < viewL || t.wx > viewR || t.wy < viewT || t.wy > viewB) continue;
+      const ps = project2D(s.wx, s.wy), pt = project2D(t.wx, t.wy);
       const isHot = hoverNodeRef && (hoverNodeRef.id === s.id || hoverNodeRef.id === t.id);
       const dimmed = hoverNodeRef && !isHot;
       const alpha = dimmed ? 0.04 : (isHot ? 0.9 : 0.16 + Math.min(0.2, (edge.confidence || 1) * 0.2));
       if (alpha <= 0.05) continue;
-      const mx = (ps.px + pt.px) / 2, my = (ps.py + pt.py) / 2;
-      const dx = pt.px - ps.px, dy = pt.py - ps.py;
-      const len = Math.hypot(dx, dy) || 1;
-      const curve = Math.min(80, len * 0.16);
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(ps.px, ps.py);
-      ctx.quadraticCurveTo(mx - (dy / len) * curve, my + (dx / len) * curve, pt.px, pt.py);
+      ctx.quadraticCurveTo((ps.px + pt.px) / 2, (ps.py + pt.py) / 2, pt.px, pt.py);
       ctx.strokeStyle = hexToRgba(s.color || "#38bdf8", alpha);
       ctx.lineWidth = isHot ? 2.2 : 1;
       if ((edge.confidence || 1) < 0.6) ctx.setLineDash([5, 7]);
@@ -1296,39 +1238,24 @@
   }
 
   // =====================================================================
-  // 5. 主渲染循环（原作结构：底色→微尘→星云→轨道→星球）
+  // 4. 主渲染循环（静态 2D：底色 → 微尘 → 边 → 星点 → 标签）
   // =====================================================================
-  let hoverNodeRef = null, lastFrameTime = performance.now();
-  let sortedRenderList = [];
-
   function render() {
     requestAnimationFrame(render);
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
     lastFrameTime = now;
+    globalTime += dt;
 
-    updateCelestialPhysics(dt);
-
-    // 摄像机平滑插值飞越 (Warp Flight Interpolation)
-    if (currentFocusNode) {
+    // 锁定焦点天体：相机中心始终追随
+    if (currentFocusNode && currentFocusNode.wx != null) {
       camTargetX = currentFocusNode.wx;
       camTargetY = currentFocusNode.wy;
-      camTargetZ = currentFocusNode.wz;
     }
-    camX += (camTargetX - camX) * 0.08;
-    camY += (camTargetY - camY) * 0.08;
-    camZ += (camTargetZ - camZ) * 0.08;
-    camDistance += (targetCamDistance - camDistance) * 0.08;
-    // 已贴近目标：回落到该层级的舒适视距（跃迁弧的第二段）
-    if (currentFocusNode && currentFocusNode.wx != null) {
-      const gapNow = Math.hypot(
-        currentFocusNode.wx - camX, currentFocusNode.wy - camY, currentFocusNode.wz - camZ
-      );
-      if (gapNow < flightSettleDistance * 1.05) targetCamDistance = flightSettleDistance;
-    }
-    rotX += (targetRotX - rotX) * 0.08;
-    rotY += (targetRotY - rotY) * 0.08;
-    if (!isDragging && !currentFocusNode) targetRotY += 0.0003;
+    // 平滑阻尼
+    camX += (camTargetX - camX) * 0.09;
+    camY += (camTargetY - camY) * 0.09;
+    zoom += (targetZoom - zoom) * 0.09;
 
     ctx.clearRect(0, 0, width, height);
 
@@ -1340,106 +1267,60 @@
     ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, width, height);
 
-    // (2) 背景微尘星
+    // (2) 背景微尘闪烁
     for (const s of deepFieldStars) {
-      const p = project3D(s.x, s.y, s.z);
-      if (p.scale <= 0) continue;
-      s.twinklePhase += s.twinkleSpeed;
-      const alpha = s.alpha * (0.7 + 0.3 * Math.sin(s.twinklePhase));
+      const alpha = s.alpha * (0.7 + 0.3 * Math.sin(globalTime * s.twinkleSpeed + s.twinklePhase));
       ctx.fillStyle = `rgba(224, 242, 254, ${alpha})`;
-      ctx.beginPath();
-      ctx.arc(p.px, p.py, s.size * p.scale, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(s.x, s.y, s.size, s.size);
     }
 
-    // (3) 弥散星云气体
-    ctx.save();
-    ctx.globalCompositeOperation = "screen";
-    for (const c of nebulaClouds) {
-      const p = project3D(c.x, c.y, c.z);
-      if (p.scale <= 0) continue;
-      const r = c.radius * p.scale;
-      if (r < 4 || p.px < -r || p.px > width + r || p.py < -r || p.py > height + r) continue;
-      const grad = ctx.createRadialGradient(p.px, p.py, 0, p.px, p.py, r);
-      grad.addColorStop(0, c.color + (c.alpha * 1.3) + ")");
-      grad.addColorStop(0.4, c.color + (c.alpha * 0.6) + ")");
-      grad.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = grad;
-      ctx.beginPath(); ctx.arc(p.px, p.py, r, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.restore();
+    if (!graph._flat || !graph._flat.length) return;
 
-    if (!graph.stars.length) return;
+    // (3) 视口世界范围（含少量余量）
+    const pad = 40 / zoom;
+    const viewL = camX - width / 2 / zoom - pad, viewR = camX + width / 2 / zoom + pad;
+    const viewT = camY - height / 2 / zoom - pad, viewB = camY + height / 2 / zoom + pad;
+    const showSatellites = zoom > 0.35;   // LOD：缩小时只画恒星/行星
 
-    // (4) 公转轨道线（虚线圆环）
-    ctx.save();
-    ctx.setLineDash([4, 6]);
-    for (const star of graph.stars) {
-      for (const child of star.children || []) {
-        if (child.kind !== "entity") continue;
-        const center = project3D(star.wx, star.wy, star.wz);
-        if (center.scale <= 0) continue;
-        ctx.strokeStyle = hexToRgba(star.color || "#38bdf8", 0.13);
-        ctx.lineWidth = Math.max(0.6, 1.0 * center.scale);
-        ctx.beginPath();
-        ctx.arc(center.px, center.py, child.orbitR * center.scale, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
-
-    // (4.5) 引力桥（画在星球之下）
+    // (4) 引力桥（画在星点之下）
     drawEdges();
 
-    // (5) 深度排序绘制星球（排序一次，渲染与命中测试共用）
-    const nodes = [];
-    for (const star of graph.stars) collectTree(star, nodes);
-    nodes.sort((a, b) => {
-      return project3D(b.wx, b.wy, b.wz).depth - project3D(a.wx, a.wy, a.wz).depth;
-    });
-    sortedRenderList = nodes;
-
+    // (5) 星点：视口剔除 + LOD + 闪烁
+    const visible = [];
+    for (const n of graph._flat) {
+      if (n.wx < viewL || n.wx > viewR || n.wy < viewT || n.wy > viewB) continue;
+      if (!showSatellites && n.level === 3) continue;
+      visible.push(n);
+    }
+    sortedRenderList = visible;
     let hoveredNode = null;
-    for (const n of nodes) {
-      const p = project3D(n.wx, n.wy, n.wz);
-      if (p.scale <= 0 || p.scale > 8) { n._px = undefined; continue; }  // 近裁剪面穿越帧不画，防巨型黑球
-      n.renderedRadius = Math.max(2.5, n.radius * p.scale);
+    for (const n of visible) {
+      const p = project2D(n.wx, n.wy);
+      n.renderedRadius = Math.max(1.8, n.radius * zoom);
       n._px = p.px; n._py = p.py;
       const isFocused = currentFocusNode && currentFocusNode.id === n.id;
       const isHover = Math.hypot(mouseX - p.px, mouseY - p.py) < Math.max(14, n.renderedRadius * 1.3);
       if (isHover && !isDragging) hoveredNode = n;
-
-      const dimmed = hoveredNode && hoveredNode.id !== n.id && !areNeighbors(hoveredNode, n);
-      if (dimmed) ctx.globalAlpha = 0.15;
-      drawCelestialBody(p, n.renderedRadius, n.color, n.rotAngle || 0, isFocused || isHover);
-      ctx.globalAlpha = 1;
-
-      if (n.renderedRadius > 6.0) {
-        ctx.fillStyle = (isFocused || isHover) ? "#38bdf8" : "#f1f5f9";
-        const fontSize = Math.min(13, Math.max(9, 10 * p.scale));
-        ctx.font = `${fontSize}px -apple-system, 'Microsoft YaHei', sans-serif`;
-        ctx.textAlign = "center";
-        ctx.fillText(shortTitle(n.title), p.px, p.py + n.renderedRadius + 13);
-      }
+      const twinkle = Math.sin(globalTime * n.twinkleSpeed + n.twinklePhase);
+      drawCelestialBody(p, n.renderedRadius, n.color, isFocused || isHover, twinkle);
     }
     hoverNodeRef = hoveredNode;
     canvas.style.cursor = hoveredNode ? "pointer" : (isDragging ? "grabbing" : "grab");
-  }
 
-  function collectTree(node, acc) {
-    acc.push(node);
-    if (node.children) for (const c of node.children) collectTree(c, acc);
-  }
-  function areNeighbors(a, b) {
-    if (!a || !b) return false;
-    if (!graph._adjacency) {
-      const set = new Set();
-      for (const e of graph.edges) {
-        set.add(e.source + "|" + e.target); set.add(e.target + "|" + e.source);
+    // (6) 标签分级：放大到一定程度才画，且只画重要节点（避免 fillText 卡顿）
+    if (zoom > 0.8) {
+      let labels = 0;
+      for (const n of visible) {
+        if (labels >= 60) break;
+        if (n.renderedRadius < 6 && n.kind !== "domain") continue;
+        if (n.kind === "chunk" || n.kind === "event") continue;  // 知识块/事件不标名
+        ctx.fillStyle = "#f1f5f9";
+        ctx.font = `${Math.min(13, Math.max(9, 9 + zoom * 0.9))}px -apple-system, 'Microsoft YaHei', sans-serif`;
+        ctx.textAlign = "center";
+        ctx.fillText(shortTitle(n.title), n._px, n._py + n.renderedRadius + 12);
+        labels++;
       }
-      graph._adjacency = set;
     }
-    return graph._adjacency.has(a.id + "|" + b.id);
   }
 
   // =====================================================================
@@ -1452,21 +1333,11 @@
 
   function drillIntoNode(node) {
     currentFocusNode = node;
-    const desired = node.level === 1 ? 450 : node.level === 2 ? 200 : 90;
-    flightSettleDistance = desired;
-    // 修复黑球/消失伪影：先"跃迁拉远"到安全视距再飞入。
-    // 若直接飞向目标且视角恰好与飞行方向对齐，目标会穿越近裁剪面
-    // (denom = camDistance + z2 落入 0~60 区间)——要么不绘制(凭空消失)，
-    // 要么 scale 爆到 20~40 倍变成盖满全屏的巨型暗面球体(变黑)。
-    const gx = (node.wx ?? camX) - camX;
-    const gy = (node.wy ?? camY) - camY;
-    const gz = (node.wz ?? camZ) - camZ;
-    const gap = Math.hypot(gx, gy, gz);
-    if (isFinite(gap) && gap > 0) {
-      targetCamDistance = Math.min(2200, Math.max(desired, gap * 1.25 + 120));
-    } else {
-      targetCamDistance = desired;
-    }
+    camTargetX = node.wx ?? camTargetX;
+    camTargetY = node.wy ?? camTargetY;
+    // 层级越深看得越近：恒星 2.4 → 行星 4.5 → 卫星 9
+    const desired = node.level === 1 ? 2.4 : node.level === 2 ? 4.5 : 9;
+    targetZoom = Math.max(targetZoom, desired);
     updateBreadcrumb();
     renderDrawer(node);
     reopenTrigger.classList.remove("show");
@@ -1479,8 +1350,8 @@
   function zoomToLevel(lvl) {
     if (lvl === -1) {
       currentFocusNode = null;
-      camTargetX = 0; camTargetY = 0; camTargetZ = 0;
-      targetCamDistance = 850;
+      camTargetX = overviewX; camTargetY = overviewY;
+      targetZoom = overviewZoom;
       drawer.classList.remove("visible");
       reopenTrigger.classList.remove("show");
       updateBreadcrumb();

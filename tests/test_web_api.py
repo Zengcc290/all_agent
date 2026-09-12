@@ -193,3 +193,28 @@ def test_health(client: TestClient) -> None:
     health = client.get("/api/health").json()
     assert health["ok"] is True
     assert "chat_ready" in health and "embedding_mode" in health
+
+
+def test_graph_cache_invalidates_on_writes(client: TestClient) -> None:
+    """/api/graph 结果缓存：未变化时命中缓存，写操作后正确失效重建。"""
+    import time
+
+    client.post("/api/seed")
+
+    # 冷构建（或缓存未命中）应较慢，命中缓存应显著更快
+    def timed_get() -> tuple[float, dict]:
+        t0 = time.perf_counter()
+        payload = client.get("/api/graph").json()
+        return (time.perf_counter() - t0) * 1000, payload
+
+    cold_ms, first = timed_get()
+    warm_ms, second = timed_get()
+    assert first == second  # 数据未变，负载必须一致
+    assert warm_ms < max(30.0, cold_ms)  # 缓存命中应显著更快
+
+    # 写入新事实 → 图必须反映新数据（缓存失效）
+    client.post("/api/facts", json={"subject": "缓存验证", "predicate": "使", "object": "缓存失效"})
+    _, after = timed_get()
+    titles = {node["title"] for node in after["nodes"] if node["kind"] == "entity"}
+    assert "缓存验证" in titles
+    assert after != second

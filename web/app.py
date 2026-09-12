@@ -96,11 +96,23 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         return app.state.manager
 
     # ------------------------------------------------------------------
+    # 星云图缓存：任何写操作递增 revision，/api/graph 命中缓存避免全量重建。
+    # 数据量大时 build_graph 是全库 O(N) 遍历，每请求重建会拖慢打开/刷新。
+    # ------------------------------------------------------------------
+    graph_cache: dict[str, Any] = {"revision": 0, "payload": None}
+
+    def invalidate_graph() -> None:
+        graph_cache["revision"] += 1
+        graph_cache["payload"] = None
+
+    # ------------------------------------------------------------------
     # 星云图数据
     # ------------------------------------------------------------------
     @app.get("/api/graph")
     def graph() -> dict[str, Any]:
-        return build_graph(the_manager())
+        if graph_cache["payload"] is None:
+            graph_cache["payload"] = build_graph(the_manager())
+        return graph_cache["payload"]
 
     @app.post("/api/graph-rag")
     def graph_rag(body: GraphRAGBody) -> dict[str, Any]:
@@ -127,6 +139,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"
             )
+        invalidate_graph()  # agent 可能写入 episodic 事件
         retrieval = app.state.pipeline.graph_retrieve(body.message, limit=5, hops=1)
         return {
             "answer": answer,
@@ -184,6 +197,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             f"上传并导入了文档《{filename}》（{len(items)} 个知识块）",
             metadata={"title": "导入文档", "filename": filename},
         )
+        invalidate_graph()
         return {
             "filename": filename,
             "chunks": len(items),
@@ -202,6 +216,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             metadata={"domain": body.domain or "未分类", "note": body.note or ""},
             confidence=body.confidence,
         )
+        invalidate_graph()
         return {"ok": True, "item_id": item.id}
 
     # ------------------------------------------------------------------
@@ -232,6 +247,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             f"添加了一条知识：{text[:80]}",
             metadata={"title": "一句话入库", "source": "一句话入库"},
         )
+        invalidate_graph()
         return {
             "ok": True,
             "chunks": len(items),
@@ -244,7 +260,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.post("/api/seed")
     def reseed() -> dict[str, Any]:
-        return seed(the_manager())
+        result = seed(the_manager())
+        invalidate_graph()
+        return result
 
     @app.get("/api/export")
     def export(request: Request) -> JSONResponse:
@@ -340,6 +358,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 imported += 1
             except Exception:
                 skipped += 1
+        if imported:
+            invalidate_graph()
         return {"imported": imported, "skipped": skipped}
 
     @app.get("/api/health")
