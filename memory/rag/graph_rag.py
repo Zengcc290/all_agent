@@ -60,8 +60,10 @@ class GraphRAGResult:
             source = (
                 item.metadata.get("filename") or item.metadata.get("source") or "记忆库"
             )
+            current = item.metadata.get("active", True) is not False
+            marker = "" if current else "|历史记录，已被更新"
             parts.append(
-                f"[证据|来源={source}|相似度={result.score:.3f}]\n{item.content}"
+                f"[证据|来源={source}|相似度={result.score:.3f}{marker}]\n{item.content}"
             )
         for path in self.paths:
             relation = " -".join(path.relations)
@@ -185,6 +187,12 @@ class GraphRAGPipeline:
                 neighbor = target if source == current else source
                 relation = str(edge.get("relation") or "关联")
                 props = dict(edge.get("properties") or {})
+                # Superseded or retracted edges stay in the store for audit,
+                # but they must never carry a retrieval hop. SQLite is the
+                # source of truth: the in-process/Neo4j edge copy can still
+                # hold the pre-retirement flag, so check the memory record too.
+                if props.get("active") is False or not self._edge_is_active(props):
+                    continue
                 edge_confidence = float(props.get("confidence", 0.0) or 0.0)
                 next_entities = (*entities, neighbor)
                 next_relations = (*relations, relation)
@@ -220,6 +228,17 @@ class GraphRAGPipeline:
             key=lambda item: (-item.confidence, len(item.relations), item.target)
         )
         return paths[:path_limit]
+
+    def _edge_is_active(self, properties: dict[str, Any]) -> bool:
+        """Confirm an edge against its memory record before it carries a hop."""
+
+        memory_id = properties.get("memory_id")
+        if not memory_id:
+            return True
+        item = self.manager.get(str(memory_id), memory_type=MemoryType.SEMANTIC)
+        if item is None:
+            return False
+        return item.metadata.get("active", True) is not False
 
 
 __all__ = ["GraphPath", "GraphRAGPipeline", "GraphRAGResult"]

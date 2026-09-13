@@ -51,6 +51,12 @@ class SemanticMemory(BaseMemory):
         if existing is not None and existing.memory_type == self.memory_type:
             merged_metadata = dict(existing.metadata)
             merged_metadata.update(dict(metadata or {}))
+            # Only reactivation clears the retired marker; an explicit
+            # active=False must survive the merge so retract is idempotent.
+            if metadata is None or "active" not in metadata:
+                merged_metadata["active"] = True
+                merged_metadata["superseded_by"] = []
+                merged_metadata["superseded_at"] = ""
             return self.add(
                 f"{subject} {predicate} {object}",
                 metadata=merged_metadata,
@@ -76,7 +82,19 @@ class SemanticMemory(BaseMemory):
             "memory_id": item.id,
             "confidence": confidence,
         }
-        for key in ("evidence", "source", "source_document", "chunk_id"):
+        for key in (
+            "evidence",
+            "source",
+            "source_document",
+            "chunk_id",
+            "predicate_key",
+            "action",
+            "cardinality",
+            "active",
+            "superseded_by",
+            "superseded_at",
+            "supersedes",
+        ):
             if key in item_metadata:
                 graph_properties[key] = item_metadata[key]
         self.graph_store.add_relation(

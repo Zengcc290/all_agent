@@ -164,6 +164,13 @@ ENTITY_DEFAULT_TYPE = "概念"
 ENTITY_NAME_MAX_LENGTH = 200
 ENTITY_CLEAN_MAX_LENGTH = 500
 
+#: 别名前缀匹配的最短公共前缀。低于该长度只接受精确匹配，避免
+#: 「we」这类过短前缀把「web 中转站」和「web 网关」错误合并成同一实体。
+ENTITY_PREFIX_MIN_LENGTH = 3
+
+#: 抽取前注入提示词的子图关系条数上限（按置信度排序）。
+GRAPH_CONTEXT_MAX_RELATIONS = 60
+
 # ---------------------------------------------------------------------------
 # ReAct 同步/文本协议容错（agents/react.py）
 #   所在文件：agents/react.py
@@ -200,6 +207,9 @@ WEB_KNOWLEDGE_MAX_CHARS = 20000
 
 #: /api/ingest 的 RAG 切块块长（比默认 1000 更细，用于文档）。
 WEB_INGEST_CHUNK_SIZE = 800
+
+#: 问答抽取的切块块长。问答通常很短，不需要按文档大小切。
+QA_EXTRACT_CHUNK_SIZE = 2000
 
 # ---------------------------------------------------------------------------
 # 星图构建（web/graph_builder.py）

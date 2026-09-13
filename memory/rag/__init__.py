@@ -9,9 +9,11 @@ from .knowledge import (
     LLMKnowledgeExtractor,
     NullKnowledgeExtractor,
     RelationCandidate,
+    build_graph_context,
     entity_id_for,
     materialize_extraction,
     normalize_entity_name,
+    predicate_key_for,
 )
 from .pipeline import RAGPipeline, RetrievedChunk
 
@@ -19,7 +21,7 @@ __all__ = [
     "Document", "DocumentProcessor", "EntityCandidate", "EntityResolver",
     "ExtractionResult", "GraphPath", "GraphRAGPipeline", "GraphRAGResult",
     "LLMKnowledgeExtractor", "NullKnowledgeExtractor", "RAGPipeline",
-    "RelationCandidate", "RetrievedChunk", "entity_id_for",
-    "materialize_extraction", "normalize_entity_name",
+    "RelationCandidate", "RetrievedChunk", "build_graph_context", "entity_id_for",
+    "materialize_extraction", "normalize_entity_name", "predicate_key_for",
     "relation_id_for",
 ]

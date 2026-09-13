@@ -11,13 +11,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
 from collections import Counter
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -26,10 +29,12 @@ from constants import (
     DEFAULT_MEMORY_DB_FILENAME,
     MEMORY_EMBEDDING_DIMENSION,
     NEBULA_EVENT_TITLE_CHARS,
+    QA_EXTRACT_CHUNK_SIZE,
 )
-
 from memory import APIEmbedding, MemoryConfig, MemoryItem, MemoryManager, utc_now
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
@@ -107,6 +112,23 @@ def build_knowledge_extractor():
 
 _manager: MemoryManager | None = None
 _manager_lock = Lock()
+_pipeline: RAGPipeline | None = None
+
+#: 每次问答/文档抽取实际写入图事实时递增。图缓存据此失效，避免为后台
+#: 抽取线程加锁，也避免抽取失败时白白重建星图。
+GRAPH_REVISION = 0
+_graph_revision_lock = Lock()
+
+
+def bump_graph_revision() -> None:
+    global GRAPH_REVISION
+    with _graph_revision_lock:
+        GRAPH_REVISION += 1
+
+
+def graph_revision() -> int:
+    with _graph_revision_lock:
+        return GRAPH_REVISION
 
 
 def get_manager() -> MemoryManager:
@@ -141,8 +163,23 @@ SYSTEM_PROMPT = (
     "回答「我这两天问过什么 / 计划是什么」这类问题时必须搜这里。\n"
     "2. 用中文简洁回答；引用知识库内容时注明来源文件和关系证据（若有）。\n"
     "3. 不编造知识库里没有的内容；检索不到就如实说明。\n"
-    "4. 用户明确让你记住某件事时，用 memory.manage 的 add 写入 episodic 记忆。"
+    "4. 用户明确让你记住某件事时，用 memory.manage 的 add 写入 episodic 记忆。\n"
+    "5. 关系有更新时只采信当前有效值（supersede 后的新值）。检索到旧值或被标记为"
+    "历史的记录，要说明它已被更新，不要把新旧值并列当作同时成立。"
 )
+
+
+def get_pipeline() -> RAGPipeline:
+    """进程级 RAG 管道：Web API、知识管家工具、问答抽取共用同一份记忆。"""
+    global _pipeline
+    if _pipeline is None:
+        with _manager_lock:
+            if _pipeline is None:
+                _pipeline = RAGPipeline(
+                    get_manager(),
+                    extractor=build_knowledge_extractor(),
+                )
+    return _pipeline
 
 
 def get_agent():
@@ -157,15 +194,7 @@ def get_agent():
 
                 agent = ReActAgent("knowledge-butler")
                 agent.set_system_prompt(SYSTEM_PROMPT)
-                agent.register_tool(
-                    RAGTool(
-                        pipeline=RAGPipeline(
-                            get_manager(),
-                            extractor=build_knowledge_extractor(),
-                        )
-                    ),
-                    replace=True,
-                )
+                agent.register_tool(RAGTool(pipeline=get_pipeline()), replace=True)
                 _agent = agent
     return _agent
 
@@ -238,6 +267,112 @@ def record_qa(
             "asked_at": now.isoformat(),
         },
         timestamp=now,
+    )
+
+
+def knowledge_extract_enabled() -> bool:
+    """问答是否触发图抽取。无真实聊天模型时自动关闭（没有抽取器可用）。"""
+    return os.getenv("WEB_QA_EXTRACT", "1").strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def extract_graph_patches(
+    question: str,
+    answer: str,
+    *,
+    manager: MemoryManager | None = None,
+) -> dict[str, Any] | None:
+    """把一次问答交给 LLM 转成图补丁并落库。
+
+    问答原文先以 episodic 留痕（调用方负责），这里只做图侧增量。抽取被刻意
+    排除在聊天延迟之外：调用方在响应返回后再调用本函数，且限定只从用户陈述
+    和助手依据知识库给出的事实里抽取，避免把模型自己的推测固化成边。
+
+    调用方传入自己的 ``manager``。后台线程绝不能再调 ``get_manager()``：
+    Web 应用关闭时全局单例会先被关闭，后台线程再抢同一把锁就会永久挂住。
+    """
+
+    if not isinstance(question, str) or not isinstance(answer, str):
+        return None
+    if not question.strip() or not answer.strip():
+        return None
+    if manager is None:
+        manager = get_manager()
+    pipeline = RAGPipeline(manager, extractor=build_knowledge_extractor())
+    from memory.rag import Document
+
+    text = (
+        "【用户陈述】\n"
+        f"{question.strip()}\n"
+        "【助手回答（只抽取其中依据知识库给出的事实，推测性表述不要抽取）】\n"
+        f"{answer.strip()}"
+    )
+    try:
+        pipeline.ingest(
+            Document(
+                text,
+                metadata={
+                    "source": "问答抽取",
+                    "filename": "问答抽取",
+                    "kind": "qa",
+                },
+            ),
+            chunk_size=QA_EXTRACT_CHUNK_SIZE,
+            overlap=0,
+        )
+    except Exception:  # 抽取失败不能影响问答本身
+        LOGGER.exception("QA graph extraction failed")
+        return None
+    report = dict(pipeline.last_ingest_report)
+    if report.get("entities") or report.get("relations"):
+        bump_graph_revision()
+    return report
+
+
+async def extract_graph_patches_async(
+    question: str,
+    answer: str,
+    *,
+    manager: MemoryManager | None = None,
+) -> None:
+    """Background wrapper: blocking LLM + SQLite work runs off the event loop."""
+    await asyncio.to_thread(
+        extract_graph_patches, question, answer, manager=manager
+    )
+
+
+def schedule_qa_extraction(
+    question: str,
+    answer: str,
+    *,
+    manager: MemoryManager | None = None,
+) -> None:
+    """Fire-and-forget QA graph extraction.
+
+    - 没有真实聊天模型时直接跳过：那时没有抽取器，抽取只会白跑一次。
+    - ``WEB_QA_EXTRACT_SYNC=1`` 改为内联执行；测试与脚本用它拿到确定顺序。
+    - 无事件循环时也只内联执行，避免创建永远不跑的协程。
+    """
+
+    if not knowledge_extract_enabled():
+        return
+    ready, _ = chat_ready()
+    if not ready:
+        return
+    if os.getenv("WEB_QA_EXTRACT_SYNC", "").strip().casefold() in {"1", "true", "yes", "on"}:
+        extract_graph_patches(question, answer, manager=manager)
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        extract_graph_patches(question, answer, manager=manager)
+        return
+    asyncio.create_task(
+        extract_graph_patches_async(question, answer, manager=manager)
     )
 
 

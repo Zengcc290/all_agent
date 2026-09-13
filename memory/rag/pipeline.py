@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
@@ -17,7 +18,13 @@ from ..base import MemoryItem, MemorySearchResult, MemoryType
 from ..manager import MemoryManager
 from .document import Document, DocumentProcessor
 from .graph_rag import GraphRAGPipeline, GraphRAGResult
-from .knowledge import KnowledgeExtractor, NullKnowledgeExtractor, materialize_extraction
+from .knowledge import (
+    EntityResolver,
+    KnowledgeExtractor,
+    NullKnowledgeExtractor,
+    build_graph_context,
+    materialize_extraction,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,23 @@ class RetrievedChunk:
     @classmethod
     def from_result(cls, result: MemorySearchResult) -> "RetrievedChunk":
         return cls(result.item.content, result.score, result.item.id, result.item.metadata)
+
+
+def _accepts_graph_context(extractor: KnowledgeExtractor) -> bool:
+    """True when the extractor can consume the pre-extraction subgraph.
+
+    Custom extractors written against the older two-argument contract keep
+    working; only implementations that opt in receive ``graph_context``.
+    """
+
+    try:
+        parameters = inspect.signature(extractor.extract).parameters
+    except (TypeError, ValueError):
+        return False
+    return "graph_context" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 class RAGPipeline:
@@ -51,7 +75,20 @@ class RAGPipeline:
     def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[MemoryItem]:
         values = [documents] if isinstance(documents, Document) else list(documents)
         items: list[MemoryItem] = []
-        report = {"chunks": 0, "domains": [], "entities": 0, "relations": 0, "skipped_relations": 0, "errors": []}
+        report = {
+            "chunks": 0,
+            "domains": [],
+            "entities": 0,
+            "relations": 0,
+            "superseded": 0,
+            "retracted": 0,
+            "skipped_relations": 0,
+            "errors": [],
+        }
+        # One resolver per ingest call: entities created by chunk 1 must be
+        # reusable and aliasable by chunk 2 without a full reload each time.
+        resolver = EntityResolver(self.manager)
+        accepts_context = _accepts_graph_context(self.extractor)
         for document in values:
             for chunk in self.processor.chunks(document, chunk_size=chunk_size, overlap=overlap):
                 metadata = dict(chunk.metadata)
@@ -62,16 +99,32 @@ class RAGPipeline:
                 if not self.auto_extract:
                     continue
                 try:
-                    extraction = self.extractor.extract(chunk.content, metadata=metadata)
+                    # Feed the relevant subgraph to the extractor first, so the
+                    # model reuses canonical entity names and retire the right
+                    # old value instead of inventing a second entity.
+                    graph_context = build_graph_context(self.manager, chunk.content)
+                    if accepts_context:
+                        extraction = self.extractor.extract(
+                            chunk.content,
+                            metadata=metadata,
+                            graph_context=graph_context,
+                        )
+                    else:
+                        extraction = self.extractor.extract(
+                            chunk.content, metadata=metadata
+                        )
                     materialized = materialize_extraction(
                         self.manager,
                         extraction,
                         source_item=item,
                         source_metadata=metadata,
+                        resolver=resolver,
                     )
                     report["domains"].append(materialized["domain"])
                     report["entities"] += materialized["entities"]
                     report["relations"] += materialized["relations"]
+                    report["superseded"] += materialized["superseded"]
+                    report["retracted"] += materialized["retracted"]
                     report["skipped_relations"] += materialized["skipped_relations"]
                 except Exception as exc:  # extraction failure must not lose source text
                     report["errors"].append(f"{type(exc).__name__}: {exc}")

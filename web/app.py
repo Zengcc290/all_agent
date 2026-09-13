@@ -51,22 +51,23 @@ from constants import (
     WEB_INGEST_CHUNK_SIZE,
     WEB_KNOWLEDGE_MAX_CHARS,
 )
-
 from memory import MemoryManager, MemoryType
 from memory.rag import RAGPipeline
 
 from .graph_builder import build_graph
 from .seed import seed
 from .support import (
+    STATIC_DIR,
     build_knowledge_extractor,
     chat_ready,
     chat_tool_names,
     close_manager,
     get_agent,
     get_manager,
+    graph_revision,
     record_qa,
+    schedule_qa_extraction,
     search_available,
-    STATIC_DIR,
 )
 
 
@@ -125,8 +126,14 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     # 星云图缓存：任何写操作递增 revision，/api/graph 命中缓存避免全量重建。
     # 数据量大时 build_graph 是全库 O(N) 遍历，每请求重建会拖慢打开/刷新。
+    # 后台问答抽取线程不改本字典，而是递增 support.GRAPH_REVISION；读请求
+    # 比对两个 revision，落后才重建。
     # ------------------------------------------------------------------
-    graph_cache: dict[str, Any] = {"revision": 0, "payload": None}
+    graph_cache: dict[str, Any] = {
+        "revision": 0,
+        "external": graph_revision(),
+        "payload": None,
+    }
 
     def invalidate_graph() -> None:
         graph_cache["revision"] += 1
@@ -137,8 +144,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.get("/api/graph")
     def graph() -> dict[str, Any]:
-        if graph_cache["payload"] is None:
+        current_external = graph_revision()
+        if (
+            graph_cache["payload"] is None
+            or graph_cache["external"] != current_external
+        ):
             graph_cache["payload"] = build_graph(the_manager())
+            graph_cache["external"] = current_external
         return graph_cache["payload"]
 
     @app.post("/api/graph-rag")
@@ -178,6 +190,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         # 问答留痕：每次问答都写进 episodic 记忆（带时间戳、可检索），
         # 时间线上会新增一颗「问：…」事件星。
         record_qa(the_manager(), body.message, answer, mode=effective_mode)
+        # 再把这次问答交给 LLM 转成图补丁，后台执行：抽取是第二次模型往返，
+        # 不能让用户为它多等一轮。抽取成功会递增 GRAPH_REVISION，图缓存自动失效。
+        schedule_qa_extraction(
+            body.message, answer, manager=the_manager()
+        )
         invalidate_graph()
         retrieval = app.state.pipeline.graph_retrieve(
             body.message, limit=RAG_RETRIEVE_LIMIT, hops=RAG_GRAPH_HOPS

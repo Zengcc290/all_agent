@@ -33,9 +33,9 @@ from constants import (
     TIMELINE_ENTITY,
     TIMELINE_ID,
 )
-
 from memory import MemoryItem, MemoryManager
 from web.domain_classifier import classify_domain, majority_domain
+
 
 #: 领域 → 稳定颜色（crc32，跨进程稳定，Python 内建 hash 不稳定）。
 def domain_color(name: str) -> str:
@@ -124,15 +124,28 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
         domain = md.get("domain") or DEFAULT_DOMAIN
         source_id = entity_node(subject, domain=domain)
         target_id = entity_node(obj, domain=domain)
+        active = md.get("active", True) is not False
+        label = f"{subject} —{predicate}→ {obj}" if active else f"{subject} —{predicate}→ {obj}（历史）"
         node = _node(
-            item.id, "fact", f"{subject} —{predicate}→ {obj}",
+            item.id, "fact", label,
             content=md.get("note") or item.content, domain=domain, date=_date(item),
-            importance=item.importance, parent=source_id,
+            importance=item.importance if active else min(item.importance, 0.3),
+            parent=source_id,
             source=md.get("filename") or md.get("source"),
         )
         node["meta"] = {"subject": subject, "predicate": predicate, "object": obj,
-                       "confidence": md.get("confidence", item.importance)}
+                       "confidence": md.get("confidence", item.importance),
+                       "active": active,
+                       "cardinality": md.get("cardinality", "multi"),
+                       "action": md.get("action", "assert"),
+                       "superseded_by": md.get("superseded_by", []),
+                       "supersedes": md.get("supersedes", []),
+                       "superseded_at": md.get("superseded_at", "")}
         nodes[item.id] = node
+        # Superseded and retracted facts stay visible as history satellites but
+        # produce no edge, so graph traversal only walks current values.
+        if not active:
+            continue
         edges.append({
             "id": f"edge:{item.id}",
             "source": source_id,
@@ -142,6 +155,8 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
             "evidence": md.get("evidence", ""),
             "source_document": md.get("source_document") or md.get("source") or "",
             "chunk_id": md.get("chunk_id") or "",
+            "active": active,
+            "cardinality": md.get("cardinality", "multi"),
         })
 
     # --- 实体备注（kind=note）：挂到所属实体的卫星 ---
@@ -221,6 +236,11 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
             "notes": kinds["note"],
             "events": kinds["event"],
             "edges": len(edges),
+            "historical_facts": sum(
+                1
+                for node in node_list
+                if node["kind"] == "fact" and not node["meta"].get("active", True)
+            ),
             "total": len(node_list),
         },
         "nodes": node_list,
