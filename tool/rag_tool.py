@@ -1,6 +1,12 @@
-"""Built-in Agent tool for retrieval augmented answers.
+"""Built-in Agent tool for ingesting text or files into agent memory.
 
-The default pipeline persists ingested documents to ``MEMORY_DB_PATH`` (or
+Split out of the former combined ``memory.rag`` tool so that read-only retrieval
+(``memory.rag_search``) never carries the ingest write confirmation. Ingestion
+stays ``side_effect="write"``.
+
+A model-supplied ``source`` is resolved through the same workspace sandbox as
+the ``fs.*`` tools, so the tool cannot be talked into reading an arbitrary path
+outside the workspace. The default pipeline persists to ``MEMORY_DB_PATH`` (or
 ``memory.sqlite3`` next to the project); inject a custom ``RAGPipeline`` for
 different backends.
 """
@@ -12,8 +18,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from core import BaseTool, ToolSpec
-from memory import MemoryConfig, MemoryManager, default_sqlite_path
-from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
+from memory.rag import Document, RAGPipeline
+
+from ._memory import build_default_pipeline
+from ._shared import resolve_path, workspace_root
 
 
 TOOL_ENABLED = True
@@ -22,34 +30,36 @@ TOOL_ENABLED = True
 class RAGToolInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    action: Literal["ingest", "retrieve", "context", "graph_retrieve", "graph_context"]
-    text: str | None = None
-    query: str | None = None
-    source: str | None = None
-    document_id: str | None = None
-    limit: int = Field(default=5, ge=1, le=50)
+    action: Literal["ingest"] = "ingest"
+    text: str | None = Field(default=None, description="Literal text to ingest.")
+    source: str | None = Field(
+        default=None,
+        description=(
+            "Workspace-relative path of a file to ingest. Provide either text or "
+            "source, never both; paths outside the workspace are rejected."
+        ),
+    )
     chunk_size: int = Field(default=1000, ge=1, le=100000)
     overlap: int = Field(default=100, ge=0)
-    hops: int = Field(default=1, ge=0, le=3)
 
 
 class RAGToolOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     action: str
-    context: str = ""
-    items: list[dict[str, Any]] = Field(default_factory=list)
     count: int = 0
-    entities: list[str] = Field(default_factory=list)
-    paths: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[dict[str, Any]] = Field(default_factory=list)
     report: dict[str, Any] = Field(default_factory=dict)
 
 
 class RAGTool(BaseTool):
     spec = ToolSpec(
         name="memory.rag",
-        description="Ingest text, automatically extract knowledge, and retrieve vector plus graph context from agent memory.",
-        version="1.1.0",
+        description=(
+            "Ingest text or a workspace file into agent memory, extracting "
+            "knowledge for later retrieval."
+        ),
+        version="2.0.0",
         input_model=RAGToolInput,
         output_model=RAGToolOutput,
         side_effect="write",
@@ -57,7 +67,7 @@ class RAGTool(BaseTool):
         timeout_seconds=30.0,
         idempotent=False,
         parallel_safe=False,
-        tags=("memory", "rag", "retrieval"),
+        tags=("memory", "rag", "ingest", "write"),
     )
 
     def __init__(self, pipeline: RAGPipeline | None = None) -> None:
@@ -67,64 +77,34 @@ class RAGTool(BaseTool):
     @property
     def pipeline(self) -> RAGPipeline:
         if self._pipeline is None:
-            extractor = NullKnowledgeExtractor()
-            try:
-                from agents.llm import LLM
-                from agents.providers import ProviderRegistry
-
-                registry = ProviderRegistry()
-                profile = registry.get(registry.active_profile)
-                key = registry.resolve_api_key(profile.name)
-                if key and not key.startswith("replace-with"):
-                    client = LLM(api_key=key, base_url=profile.base_url, model=profile.default_model)
-                    extractor = LLMKnowledgeExtractor(client.complete, model=profile.default_model)
-            except Exception:
-                pass
-            self._pipeline = RAGPipeline(
-                MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path())),
-                extractor=extractor,
-            )
+            self._pipeline = build_default_pipeline()
         return self._pipeline
 
     def execute(self, arguments: RAGToolInput) -> RAGToolOutput:
-        if arguments.action == "ingest":
-            if arguments.text is None and arguments.source is None:
-                raise ValueError("text or source is required for ingest")
-            if arguments.text is not None and arguments.source is not None:
-                raise ValueError("provide either text or source, not both")
-            if arguments.text is not None:
-                from memory.rag import Document
-                values = self.pipeline.ingest(Document(arguments.text), chunk_size=arguments.chunk_size, overlap=arguments.overlap)
-            else:
-                values = self.pipeline.ingest_source(arguments.source, chunk_size=arguments.chunk_size, overlap=arguments.overlap)
-            return RAGToolOutput(
-                action="ingest",
-                count=len(values),
-                items=[item.to_dict() for item in values],
-                report=self.pipeline.last_ingest_report,
+        if arguments.text is None and arguments.source is None:
+            raise ValueError("text or source is required for ingest")
+        if arguments.text is not None and arguments.source is not None:
+            raise ValueError("provide either text or source, not both")
+        if arguments.text is not None:
+            values = self.pipeline.ingest(
+                Document(arguments.text),
+                chunk_size=arguments.chunk_size,
+                overlap=arguments.overlap,
             )
-        if arguments.action == "retrieve":
-            if arguments.query is None:
-                raise ValueError("query is required for retrieve")
-            values = self.pipeline.retrieve(arguments.query, limit=arguments.limit)
-            return RAGToolOutput(action="retrieve", count=len(values), items=[{"content": item.content, "score": item.score, "memory_id": item.memory_id, "metadata": dict(item.metadata)} for item in values])
-        if arguments.query is None:
-            raise ValueError("query is required for context or graph retrieval")
-        if arguments.action == "graph_retrieve":
-            result = self.pipeline.graph_retrieve(arguments.query, limit=arguments.limit, hops=arguments.hops)
-            return RAGToolOutput(
-                action=arguments.action,
-                count=len(result.evidence),
-                items=[item.to_dict() for item in result.evidence],
-                entities=result.entities,
-                paths=[path.to_dict() for path in result.paths],
-                context=result.build_context(),
+        else:
+            assert arguments.source is not None  # narrowed by the check above
+            resolved = resolve_path(workspace_root(), arguments.source)
+            values = self.pipeline.ingest_source(
+                resolved,
+                chunk_size=arguments.chunk_size,
+                overlap=arguments.overlap,
             )
-        if arguments.action == "graph_context":
-            context = self.pipeline.graph_context(arguments.query, limit=arguments.limit, hops=arguments.hops)
-            return RAGToolOutput(action=arguments.action, count=1 if context else 0, context=context)
-        context = self.pipeline.build_context(arguments.query, limit=arguments.limit)
-        return RAGToolOutput(action="context", count=1 if context else 0, context=context)
+        return RAGToolOutput(
+            action="ingest",
+            count=len(values),
+            items=[item.to_dict() for item in values],
+            report=self.pipeline.last_ingest_report,
+        )
 
 
 def create_tool() -> BaseTool:

@@ -5,8 +5,8 @@
   （质量有限，仅演示用）；填入 ``DASHSCOPE_API_KEY`` 后自动升级到
   qwen3-embedding-0.6b。
 - ``MEMORY_DB_PATH`` 在导入时就被固定为项目根下的 ``memory.sqlite3``，
-  保证 Agent 工具（memory.manage / memory.rag）与 Web API 共享同一个
-  记忆库——「记忆共享」的数据面。
+  保证 Agent 工具（memory.query / memory.add / memory.rag）与 Web API 共享
+  同一个记忆库——「记忆共享」的数据面。
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ WEB_DIR = PROJECT_ROOT / "web"
 STATIC_DIR = WEB_DIR / "static"
 SEED_FILE = WEB_DIR / "seed_data.json"
 
-# .env 中的 key 优先级高于环境变量（本地开发惯例）
+#: 环境变量优先于 .env（``load_dotenv`` 默认 ``override=False``）。
 load_dotenv(PROJECT_ROOT / ".env")
 
 #: 统一记忆库路径：Web API 与 Agent 工具都读它。
@@ -154,16 +154,17 @@ def close_manager() -> None:
 _agent = None
 _agent_lock = Lock()
 
-#: 知识管家的行为约束：先检索记忆再回答。
+#: 知识管家的行为约束：先检索记忆再回答。只读工具（memory.rag_search /
+#: memory.query）不触发写确认，因此这条链路无需任何用户额外授权。
 SYSTEM_PROMPT = (
     "你是『星图』——用户的个人知识管家，管理着用户的知识库与记忆。遵守：\n"
-    "1. 回答与用户知识、经历、文档相关的问题前，先用 memory.rag 的 graph_retrieve/context"
-    " 行动检索知识库；再用 memory.manage 的 search 补充记忆检索——search 不指定 "
+    "1. 回答与用户知识、经历、文档相关的问题前，先用 memory.rag_search 的 graph_retrieve/context"
+    " 行动检索知识库；再用 memory.query 的 search 补充记忆检索——search 不指定 "
     "memory_type 会跨全部四层搜索，用户的提问历史与经历都存在 episodic，"
     "回答「我这两天问过什么 / 计划是什么」这类问题时必须搜这里。\n"
     "2. 用中文简洁回答；引用知识库内容时注明来源文件和关系证据（若有）。\n"
     "3. 不编造知识库里没有的内容；检索不到就如实说明。\n"
-    "4. 用户明确让你记住某件事时，用 memory.manage 的 add 写入 episodic 记忆。\n"
+    "4. 用户明确让你记住某件事时，用 memory.add 写入 episodic 记忆。\n"
     "5. 关系有更新时只采信当前有效值（supersede 后的新值）。检索到旧值或被标记为"
     "历史的记录，要说明它已被更新，不要把新旧值并列当作同时成立。"
 )
@@ -190,13 +191,56 @@ def get_agent():
         with _agent_lock:
             if _agent is None:
                 from agents import ReActAgent
+                from tool.memory_add import MemoryAddTool
+                from tool.memory_query import MemoryQueryTool
+                from tool.rag_search import RAGSearchTool
                 from tool.rag_tool import RAGTool
 
                 agent = ReActAgent("knowledge-butler")
                 agent.set_system_prompt(SYSTEM_PROMPT)
+                # 四个记忆工具统一注入 Web 单例后端，避免发现机制各自创建的
+                # 默认连接与嵌入配置和 Web API 漂移（同一份记忆库是硬要求）。
+                agent.register_tool(
+                    MemoryQueryTool(manager=get_manager()), replace=True
+                )
+                agent.register_tool(MemoryAddTool(manager=get_manager()), replace=True)
+                agent.register_tool(
+                    RagSearchTool(pipeline=get_pipeline()), replace=True
+                )
                 agent.register_tool(RAGTool(pipeline=get_pipeline()), replace=True)
                 _agent = agent
     return _agent
+
+
+#: 聊天回合只为「记住这件事」这一个增量写入提供确认。delete/clear/ingest
+#: 仍需人工确认，所以提示词注入最多让模型多记一条，不能删库或改库。
+CHAT_CONFIRMED_TOOLS = ("memory.add",)
+
+
+def chat_confirmed_side_effects(agent) -> frozenset[str]:
+    """Return confirmation keys for the writes one user chat turn may perform.
+
+    Fails closed: an unregistered or unknown tool simply contributes no key, so
+    the runtime keeps asking for confirmation instead of silently allowing it.
+    """
+
+    keys: set[str] = set()
+    for name in CHAT_CONFIRMED_TOOLS:
+        for lookup in (
+            getattr(agent, "tool_confirmation_key", None),
+            getattr(getattr(agent, "tools", None), "confirmation_key", None),
+        ):
+            if not callable(lookup):
+                continue
+            try:
+                keys.add(lookup(name))
+            except (KeyError, ValueError, TypeError):
+                continue
+            else:
+                break
+        else:
+            LOGGER.warning("chat confirmation key unavailable for tool %s", name)
+    return frozenset(keys)
 
 
 #: 联网搜索工具的注册名；聊天「联网/非联网」开关据此决定是否可见。
@@ -249,7 +293,7 @@ def record_qa(
     *,
     mode: str,
 ) -> MemoryItem:
-    """把一次问答写入 episodic 记忆，带时间戳、可被 memory.manage/search 检索。
+    """把一次问答写入 episodic 记忆，带时间戳、可被 memory.query/search 检索。
 
     写入内容以「问 / 答」为主，便于将来用「我这两天问过什么」这类问题检索；
     metadata 保留结构化字段，星图时间线上以「问：…」事件出现。

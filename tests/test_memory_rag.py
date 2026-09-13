@@ -232,24 +232,21 @@ def test_memory_tool_persists_across_instances(
 ):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "tool-memory.sqlite3"))
     from memory import default_sqlite_path
-    from tool.memory_tool import MemoryTool, MemoryToolInput
+    from tool.memory_add import MemoryAddTool, MemoryAddInput
+    from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
-    def make_tool() -> MemoryTool:
-        manager = MemoryManager(
+    def make_manager() -> MemoryManager:
+        return MemoryManager(
             MemoryConfig(sqlite_path=default_sqlite_path()), embedding=HashEmbedding()
         )
-        return MemoryTool(manager=manager)
 
-    first = make_tool()
-    first.execute(
-        MemoryToolInput(action="add", content="persistent fact", memory_type="semantic")
-    )
+    first = MemoryAddTool(manager=make_manager())
+    first.execute(MemoryAddInput(content="persistent fact", memory_type="semantic"))
 
-    second = make_tool()
+    # 第二个 manager 在写入之后构造，必须从 SQLite 恢复出可检索的向量。
+    second = MemoryQueryTool(manager=make_manager())
     output = second.execute(
-        MemoryToolInput(
-            action="search", query="persistent fact", memory_type="semantic"
-        )
+        MemoryQueryInput(action="search", query="persistent fact", memory_type="semantic")
     )
 
     assert output.count >= 1
@@ -262,26 +259,27 @@ def test_memory_tool_search_without_type_covers_episodic(manager: MemoryManager)
     历史缺陷：search 默认只搜 working，而问答留痕写在 episodic，导致
     「我这两天问过什么」这类问题永远检索不到。
     """
-    from tool.memory_tool import MemoryTool, MemoryToolInput
+    from tool.memory_add import MemoryAddTool, MemoryAddInput
+    from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
-    tool = MemoryTool(manager=manager)
-    tool.execute(
-        MemoryToolInput(
-            action="add",
+    writer = MemoryAddTool(manager=manager)
+    writer.execute(
+        MemoryAddInput(
             content="问：我这两天的计划\n答：先把后端修好",
             memory_type="episodic",
         )
     )
+    reader = MemoryQueryTool(manager=manager)
 
     # 注意：conftest 的 HashEmbedding 按 \w+ 分词，查询需与内容存在同 token
     # （未配置真实嵌入模型时中文语义检索能力有限，这里只验证跨层作用域）。
-    found = tool.execute(MemoryToolInput(action="search", query="我这两天的计划"))
+    found = reader.execute(MemoryQueryInput(action="search", query="我这两天的计划"))
     assert found.count >= 1
     assert any("先把后端修好" in item["content"] for item in found.items)
 
     # 显式限定 working 时仍然查不到（保持分层过滤语义）
-    scoped = tool.execute(
-        MemoryToolInput(action="search", query="我这两天的计划", memory_type="working")
+    scoped = reader.execute(
+        MemoryQueryInput(action="search", query="我这两天的计划", memory_type="working")
     )
     assert scoped.count == 0
 
@@ -290,15 +288,14 @@ def test_memory_tool_clear_without_type_only_touches_working(
     manager: MemoryManager,
 ):
     """安全回归：clear 省略 memory_type 时不得清空全库（仍只清 working）。"""
-    from tool.memory_tool import MemoryTool, MemoryToolInput
+    from tool.memory_add import MemoryAddTool, MemoryAddInput
+    from tool.memory_tool import MemoryManageInput, MemoryManageTool
 
-    tool = MemoryTool(manager=manager)
-    tool.execute(
-        MemoryToolInput(action="add", content="要保留的问答", memory_type="episodic")
-    )
-    tool.execute(MemoryToolInput(action="add", content="临时工作记忆"))
+    writer = MemoryAddTool(manager=manager)
+    writer.execute(MemoryAddInput(content="要保留的问答", memory_type="episodic"))
+    writer.execute(MemoryAddInput(content="临时工作记忆"))
 
-    tool.execute(MemoryToolInput(action="clear"))
+    MemoryManageTool(manager=manager).execute(MemoryManageInput(action="clear"))
 
     assert len(manager.list(memory_type="episodic")) == 1
     assert manager.list(memory_type="working") == []
@@ -309,19 +306,16 @@ def test_rag_tool_ingest_and_retrieve_with_persistence(
 ):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "rag-memory.sqlite3"))
     from memory import default_sqlite_path
+    from tool.rag_search import RAGSearchInput, RAGSearchTool
     from tool.rag_tool import RAGTool, RAGToolInput
 
-    def make_tool() -> RAGTool:
-        pipeline = RAGPipeline(
-            MemoryManager(
-                MemoryConfig(sqlite_path=default_sqlite_path()),
-                embedding=HashEmbedding(),
-            )
+    def make_manager() -> MemoryManager:
+        return MemoryManager(
+            MemoryConfig(sqlite_path=default_sqlite_path()),
+            embedding=HashEmbedding(),
         )
-        return RAGTool(pipeline=pipeline)
 
-    tool = make_tool()
-    ingest = tool.execute(
+    ingest = RAGTool(pipeline=RAGPipeline(make_manager())).execute(
         RAGToolInput(
             action="ingest",
             text="The zebra lives in savannah. " * 20,
@@ -331,14 +325,16 @@ def test_rag_tool_ingest_and_retrieve_with_persistence(
     )
     assert ingest.count >= 2
 
-    retrieved = tool.execute(
-        RAGToolInput(action="retrieve", query="zebra savannah", limit=2)
+    # 读取侧同样是「写入之后新建」的实例：验证落盘 → 恢复向量链路。
+    search = RAGSearchTool(pipeline=RAGPipeline(make_manager()))
+    retrieved = search.execute(
+        RAGSearchInput(action="retrieve", query="zebra savannah", limit=2)
     )
     assert retrieved.count >= 1
     assert "zebra" in " ".join(item["content"] for item in retrieved.items)
 
-    context = tool.execute(
-        RAGToolInput(action="context", query="zebra savannah", limit=2)
+    context = search.execute(
+        RAGSearchInput(action="context", query="zebra savannah", limit=2)
     )
     assert context.count == 1
     assert "zebra" in context.context

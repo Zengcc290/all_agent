@@ -1,60 +1,45 @@
-"""Built-in Agent tool for storing and retrieving agent memories.
+"""Built-in Agent tool for deleting or clearing agent memory.
 
-The default manager persists to ``MEMORY_DB_PATH`` (or ``memory.sqlite3``
-next to the project) so tool memories survive process restarts.  Applications
-that need a different backend can inject their own ``MemoryManager``.
+Administrative counterpart to ``memory.query``/``memory.add``. Both actions are
+destructive, so the tool is ``side_effect="write"`` and the runtime requires an
+explicit confirmation key; nothing in the web chat path grants one, which means
+a model cannot erase memory on its own.
+
+The default manager targets ``MEMORY_DB_PATH`` (or ``memory.sqlite3`` next to the
+project); applications that need a different backend inject their own
+``MemoryManager``.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from core import BaseTool, ToolSpec
-from memory import MemoryConfig, MemoryManager, MemoryType, default_sqlite_path
+from memory import MemoryManager, MemoryType
+
+from ._memory import MemoryScope, build_default_manager
 
 
 TOOL_ENABLED = True
 
 
-class MemoryToolInput(BaseModel):
+class MemoryManageInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    action: Literal["add", "search", "get", "delete", "list", "clear"]
-    content: str | None = Field(default=None, description="Text to store for add.")
-    memory_type: Literal["working", "episodic", "semantic", "perceptual"] | None = Field(
+    action: Literal["delete", "clear"]
+    memory_type: MemoryScope | None = Field(
         default=None,
         description=(
-            "Which memory layer to use. For 'search', leaving it null searches all "
-            "four layers (past Q&A and experiences live in 'episodic'); for the "
-            "other actions it defaults to 'working'."
+            "Which memory layer to target; defaults to 'working', so 'clear' "
+            "never wipes the whole store by accident."
         ),
     )
-    item_id: str | None = None
-    query: str | None = None
-    metadata: list["MemoryMetadata"] | None = None
-    importance: float = Field(default=0.5, ge=0, le=1)
-    ttl_seconds: float | None = Field(default=None, gt=0)
-    limit: int = Field(default=10, ge=1, le=100)
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_metadata(cls, value: Any) -> Any:
-        if isinstance(value, dict) and isinstance(value.get("metadata"), dict):
-            value = dict(value)
-            value["metadata"] = [{"key": key, "value": str(item)} for key, item in value["metadata"].items()]
-        return value
+    item_id: str | None = Field(default=None, description="Item id for 'delete'.")
 
 
-class MemoryMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    key: str = Field(min_length=1)
-    value: str
-
-
-class MemoryToolOutput(BaseModel):
+class MemoryManageOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     action: str
@@ -62,19 +47,22 @@ class MemoryToolOutput(BaseModel):
     items: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class MemoryTool(BaseTool):
+class MemoryManageTool(BaseTool):
     spec = ToolSpec(
         name="memory.manage",
-        description="Store, search, inspect, list, or delete information in the agent memory system.",
-        version="1.0.0",
-        input_model=MemoryToolInput,
-        output_model=MemoryToolOutput,
+        description=(
+            "Delete one memory item or clear an entire memory layer. Destructive; "
+            "requires explicit user confirmation."
+        ),
+        version="2.0.0",
+        input_model=MemoryManageInput,
+        output_model=MemoryManageOutput,
         side_effect="write",
         permissions=("memory.write",),
         timeout_seconds=10.0,
         idempotent=False,
         parallel_safe=False,
-        tags=("memory", "storage", "search"),
+        tags=("memory", "storage", "admin"),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:
@@ -84,52 +72,29 @@ class MemoryTool(BaseTool):
     @property
     def manager(self) -> MemoryManager:
         if self._manager is None:
-            self._manager = MemoryManager(MemoryConfig(sqlite_path=default_sqlite_path()))
+            self._manager = build_default_manager()
         return self._manager
 
-    def execute(self, arguments: MemoryToolInput) -> MemoryToolOutput:
+    def execute(self, arguments: MemoryManageInput) -> MemoryManageOutput:
         action = arguments.action
-        # ``search`` 留空表示跨四层检索（历史问答/经历存在 episodic，只搜 working
-        # 会查不到）；其余动作留空仍落到 working，避免 ``clear`` 误伤全库。
-        scope = arguments.memory_type
-        memory_type = MemoryType(scope or "working")
-        items: list[dict[str, Any]] = []
+        memory_type = MemoryType(arguments.memory_type or "working")
         count = 0
-        if action == "add":
-            if arguments.content is None:
-                raise ValueError("content is required for add")
-            metadata = {entry.key: entry.value for entry in (arguments.metadata or [])}
-            item = self.manager.add(arguments.content, memory_type=memory_type, metadata=metadata, importance=arguments.importance, ttl_seconds=arguments.ttl_seconds, item_id=arguments.item_id)
-            items = [item.to_dict()]
-            count = 1
-        elif action == "search":
-            if arguments.query is None:
-                raise ValueError("query is required for search")
-            metadata = {entry.key: entry.value for entry in (arguments.metadata or [])}
-            results = self.manager.search(arguments.query, memory_type=scope, limit=arguments.limit, metadata=metadata)
-            items = [result.to_dict() for result in results]
-            count = len(items)
-        elif action == "get":
-            if arguments.item_id is None:
-                raise ValueError("item_id is required for get")
-            item = self.manager.get(arguments.item_id, memory_type=memory_type)
-            items = [item.to_dict()] if item is not None else []
-            count = len(items)
-        elif action == "delete":
+        if action == "delete":
             if arguments.item_id is None:
                 raise ValueError("item_id is required for delete")
             count = int(self.manager.delete(arguments.item_id, memory_type=memory_type))
-        elif action == "list":
-            values = self.manager.list(memory_type=memory_type)
-            items = [item.to_dict() for item in values[: arguments.limit]]
-            count = len(items)
         else:
             count = self.manager.clear(memory_type=memory_type)
-        return MemoryToolOutput(action=action, count=count, items=items)
+        return MemoryManageOutput(action=action, count=count, items=[])
 
 
 def create_tool() -> BaseTool:
-    return MemoryTool()
+    return MemoryManageTool()
 
 
-__all__ = ["MemoryMetadata", "MemoryTool", "MemoryToolInput", "MemoryToolOutput", "create_tool"]
+__all__ = [
+    "MemoryManageInput",
+    "MemoryManageOutput",
+    "MemoryManageTool",
+    "create_tool",
+]

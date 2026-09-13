@@ -32,6 +32,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from core import ExecutionContext
+
 from constants import (
     DEFAULT_DOMAIN,
     MAX_UPLOAD_BYTES,
@@ -59,6 +61,7 @@ from .seed import seed
 from .support import (
     STATIC_DIR,
     build_knowledge_extractor,
+    chat_confirmed_side_effects,
     chat_ready,
     chat_tool_names,
     close_manager,
@@ -179,9 +182,17 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             # agent.run 是同步阻塞调用，丢进线程避免卡住事件循环。
             # chat_lock：agent 是共享单例且内部历史无锁，串行化避免并发问答
             # 互相污染上下文（后发请求排队，而不是并发改写同一份历史）。
+            # 上下文只为 memory.add 预置写确认：用户这一轮明确要求「记住」时
+            # 模型才能落库；删除/清空/入库仍需人工确认。
+            context = ExecutionContext(
+                confirmed_side_effects=chat_confirmed_side_effects(agent)
+            )
             async with app.state.chat_lock:
                 answer = await asyncio.to_thread(
-                    agent.run, body.message, tool_names=tool_names
+                    agent.run,
+                    body.message,
+                    tool_names=tool_names,
+                    context=context,
                 )
         except Exception as exc:
             raise HTTPException(

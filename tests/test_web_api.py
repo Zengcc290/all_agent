@@ -194,20 +194,27 @@ def _make_fake_agent():
     class FakeTools:
         def snapshot(self):
             return {
+                "memory.query": None,
+                "memory.add": None,
+                "memory.rag_search": None,
                 "memory.rag": None,
-                "memory.manage": None,
                 "system.current_time": None,
                 "web.search": None,
             }
+
+        def confirmation_key(self, name: str) -> str:
+            return f"{name}:test-generation"
 
     class FakeAgent:
         tools = FakeTools()
 
         def __init__(self) -> None:
             self.last_tool_names = None
+            self.last_context = None
 
         def run(self, query: str, **kwargs):
             self.last_tool_names = kwargs.get("tool_names")
+            self.last_context = kwargs.get("context")
             return "这是测试回答"
 
     return FakeAgent()
@@ -239,10 +246,10 @@ def test_chat_records_qa_into_episodic_memory(
     assert qa_items[0].timestamp is not None
 
     # 端到端：模拟 agent 用 memory.manage 检索（不指定 memory_type 应能命中）
-    from tool.memory_tool import MemoryTool, MemoryToolInput
+    from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
-    tool = MemoryTool(manager=client.app.state.manager)
-    found = tool.execute(MemoryToolInput(action="search", query="我这两天在忙什么"))
+    tool = MemoryQueryTool(manager=client.app.state.manager)
+    found = tool.execute(MemoryQueryInput(action="search", query="我这两天在忙什么"))
     assert found.count >= 1
     assert any("这是测试回答" in item["content"] for item in found.items)
 
@@ -271,6 +278,27 @@ def test_chat_tool_names_follow_mode(
     assert response.json()["mode"] == "offline"
     assert agent.last_tool_names is not None
     assert "web.search" not in agent.last_tool_names
+
+
+def test_chat_confirms_only_additive_memory_write(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """聊天回合只为 memory.add 预置写确认。
+
+    只读工具本就不需要确认（A1 拆分后）；delete/clear/ingest 属于破坏性或外部
+    写入，聊天层不得代用户授权，因此确认集合里必须只有 memory.add。
+    """
+    _force_search_env(monkeypatch, on=False)
+    agent = _make_fake_agent()
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: agent)
+
+    response = client.post("/api/chat", json={"message": "记住我偏好浅色主题"})
+    assert response.status_code == 200
+
+    context = agent.last_context
+    assert context is not None
+    assert context.confirmed_side_effects == frozenset({"memory.add:test-generation"})
 
 
 def test_chat_serializes_concurrent_requests(
