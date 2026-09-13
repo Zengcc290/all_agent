@@ -37,6 +37,7 @@ from .tool_loop import ToolLoop
 from .update_log import DEFAULT_UPDATE_LOG_FILENAME, UpdateLogRepository
 
 __all__ = [
+    "DEFAULT_UPDATE_LOG_FILENAME",
     "BaseTool",
     "BatchToolResult",
     "CatalogInput",
@@ -62,7 +63,6 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "ToolSpecRepository",
-    "DEFAULT_UPDATE_LOG_FILENAME",
     "UpdateLogRepository",
     "discover_skills",
     "discover_tools",

@@ -11,10 +11,11 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 _PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
@@ -168,11 +169,11 @@ def _parse_document(
     document: Mapping[str, Any], config_path: Path
 ) -> tuple[dict[str, ProviderProfile], str]:
     if not isinstance(document, Mapping):
-        raise ValueError(f"provider profile configuration must be a TOML table: {config_path}")
+        raise TypeError(f"provider profile configuration must be a TOML table: {config_path}")
     defaults = document.get("defaults")
     raw_profiles = document.get("profiles")
     if not isinstance(defaults, Mapping):
-        raise ValueError(f"provider profile configuration needs a [defaults] table: {config_path}")
+        raise TypeError(f"provider profile configuration needs a [defaults] table: {config_path}")
     if not isinstance(raw_profiles, Mapping) or not raw_profiles:
         raise ValueError(f"provider profile configuration needs one [profiles.<name>] table: {config_path}")
     active_profile = _required_string(defaults, "active_profile", "[defaults]")
@@ -184,7 +185,7 @@ def _parse_document(
                 "and start with a letter or number"
             )
         if not isinstance(raw_profile, Mapping):
-            raise ValueError(f"[profiles.{name}] must be a TOML table")
+            raise TypeError(f"[profiles.{name}] must be a TOML table")
         profiles[name] = _parse_profile(name, raw_profile)
     if active_profile not in profiles:
         raise ValueError(
@@ -224,7 +225,7 @@ def _parse_profile(name: str, raw_profile: Mapping[str, Any]) -> ProviderProfile
         else:
             raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
     if not isinstance(raw_api_key, str):
-        raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
+        raise TypeError(f"profile '{name}' requires non-empty 'api_key'")
     if not raw_api_key.strip() and api_key_env is None:
         raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
     default_model = _required_string(raw_profile, "default_model", f"profile '{name}'")

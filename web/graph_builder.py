@@ -24,7 +24,6 @@ from typing import Any
 
 from constants import (
     DEFAULT_DOMAIN,
-    DOC_DOMAIN,
     NEBULA_CONTENT_PREVIEW_CHARS,
     NEBULA_DATE_CHARS,
     NEBULA_EVENT_TITLE_CHARS,
@@ -256,4 +255,4 @@ def _date(item: MemoryItem) -> str:
         return str(created)[:NEBULA_DATE_CHARS]
 
 
-__all__ = ["build_graph", "domain_color", "NEBULA_PALETTE"]
+__all__ = ["NEBULA_PALETTE", "build_graph", "domain_color"]

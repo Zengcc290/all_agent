@@ -11,8 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from constants import DEFAULT_SKILLS_ROOT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from constants import DEFAULT_SKILLS_ROOT
 
 from .models import ExecutionContext, ToolSpec
 from .registry import BaseTool

@@ -6,8 +6,8 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from agents.react import ReActAgent
-from core.registry import BaseTool, ToolRegistry
 from core import ToolSpec
+from core.registry import BaseTool, ToolRegistry
 
 
 class EchoInput(BaseModel):

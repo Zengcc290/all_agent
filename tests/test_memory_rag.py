@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import HashEmbedding
 
 from memory import MemoryConfig, MemoryManager
 from memory.rag import (
@@ -11,11 +12,9 @@ from memory.rag import (
     EntityCandidate,
     ExtractionResult,
     GraphRAGPipeline,
-    RelationCandidate,
     RAGPipeline,
+    RelationCandidate,
 )
-
-from conftest import HashEmbedding
 
 
 @pytest.fixture()
@@ -286,7 +285,7 @@ def test_memory_tool_persists_across_instances(
 ):
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "tool-memory.sqlite3"))
     from memory import default_sqlite_path
-    from tool.memory_add import MemoryAddTool, MemoryAddInput
+    from tool.memory_add import MemoryAddInput, MemoryAddTool
     from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
     def make_manager() -> MemoryManager:
@@ -313,7 +312,7 @@ def test_memory_tool_search_without_type_covers_episodic(manager: MemoryManager)
     历史缺陷：search 默认只搜 working，而问答留痕写在 episodic，导致
     「我这两天问过什么」这类问题永远检索不到。
     """
-    from tool.memory_add import MemoryAddTool, MemoryAddInput
+    from tool.memory_add import MemoryAddInput, MemoryAddTool
     from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
     writer = MemoryAddTool(manager=manager)
@@ -342,7 +341,7 @@ def test_memory_tool_clear_without_type_only_touches_working(
     manager: MemoryManager,
 ):
     """安全回归：clear 省略 memory_type 时不得清空全库（仍只清 working）。"""
-    from tool.memory_add import MemoryAddTool, MemoryAddInput
+    from tool.memory_add import MemoryAddInput, MemoryAddTool
     from tool.memory_tool import MemoryManageInput, MemoryManageTool
 
     writer = MemoryAddTool(manager=manager)

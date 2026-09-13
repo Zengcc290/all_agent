@@ -21,7 +21,6 @@ from memory import MemoryManager, MemoryType
 
 from ._memory import MemoryScope, build_default_manager
 
-
 TOOL_ENABLED = True
 
 

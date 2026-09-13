@@ -10,9 +10,9 @@ from core import (
     UpdateLogRepository,
     discover_tools,
 )
-from tool.update_log import UpdateLogInput, UpdateLogTool
 from tool.read_update_log import ReadUpdateLogInput, ReadUpdateLogTool
 from tool.read_update_logs import ReadUpdateLogsInput, ReadUpdateLogsTool
+from tool.update_log import UpdateLogInput, UpdateLogTool
 
 
 def _payload() -> dict:

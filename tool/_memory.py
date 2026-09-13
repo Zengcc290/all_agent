@@ -17,7 +17,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from memory import MemoryConfig, MemoryManager, default_sqlite_path
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
-
 LOGGER = logging.getLogger(__name__)
 
 MemoryScope = Literal["working", "episodic", "semantic", "perceptual"]
@@ -71,7 +70,7 @@ def build_default_pipeline() -> RAGPipeline:
         if key and not key.startswith("replace-with"):
             client = LLM(api_key=key, base_url=profile.base_url, model=profile.default_model)
             extractor = LLMKnowledgeExtractor(client.complete, model=profile.default_model)
-    except Exception:  # noqa: BLE001 - fallback must survive any provider problem
+    except Exception:
         LOGGER.warning(
             "RAG 知识抽取器不可用，降级为 NullKnowledgeExtractor（仅做向量检索）",
             exc_info=True,

@@ -133,7 +133,12 @@ def test_result_json_prefers_json_mode_and_falls_back():
 
 
 def test_agent_reexports_the_shared_helpers():
-    """agent.py 保留私有别名，react.py 的既有导入路径不能断。"""
+    """agent.py 保留私有别名，react.py 的既有导入路径不能断。
+
+    ``_tool_call_dict`` 刻意不在 agent.py 重新导出：只有 ``message_dict``
+    内部会用到它，而 ``message_dict`` 已经搬进共享模块，别名会是死代码
+    （ruff F401 会正确删掉它）。
+    """
 
     import importlib
 
@@ -142,10 +147,15 @@ def test_agent_reexports_the_shared_helpers():
 
     assert agent_module._field is message_utils.field
     assert agent_module._message_dict is message_utils.message_dict
-    assert agent_module._tool_call_dict is message_utils.tool_call_dict
     assert agent_module._result_json is message_utils.result_json
     assert agent_module._safe_tool_name is message_utils.safe_tool_name
     assert agent_module._safe_tool_call_error is message_utils.safe_tool_call_error
+
+    # agents/__init__ 也导出了同样名为 ``agent``/``react`` 的工厂，按模块路径取。
+    react_module = importlib.import_module("agents.react")
+
+    assert react_module._field is message_utils.field
+    assert react_module._message_dict is message_utils.message_dict
 
 
 def test_llm_field_alias_matches_the_shared_helper():

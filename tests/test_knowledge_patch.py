@@ -576,7 +576,7 @@ def test_build_graph_context_reuses_the_supplied_resolver():
     original_init = EntityResolver.__init__
     calls: list[int] = []
 
-    def counting_init(self, *args, **kwargs):  # noqa: ANN001 - test double
+    def counting_init(self, *args, **kwargs):
         calls.append(1)
         return original_init(self, *args, **kwargs)
 
@@ -607,7 +607,7 @@ def test_ingest_builds_one_resolver_per_call(monkeypatch):
     created: list[int] = []
     original_init = EntityResolver.__init__
 
-    def counting_init(self, *args, **kwargs):  # noqa: ANN001 - test double
+    def counting_init(self, *args, **kwargs):
         created.append(1)
         return original_init(self, *args, **kwargs)
 

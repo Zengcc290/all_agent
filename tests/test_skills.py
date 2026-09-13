@@ -16,7 +16,6 @@ from core import (
 )
 from core.skill_discovery import read_skill_content
 
-
 VALID_SKILL_MD = """---
 description: Draft and polish weekly reports with a fixed structure.
 version: 1.2.0

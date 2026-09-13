@@ -12,9 +12,9 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from memory import MemoryConfig, MemoryManager  # noqa: E402
+from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 from web import create_app  # noqa: E402
 from web.support import HashEmbedding  # noqa: E402
-from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 
 
 @pytest.fixture()
@@ -497,3 +497,40 @@ def test_graph_cache_invalidates_on_writes(client: TestClient) -> None:
     titles = {node["title"] for node in after["nodes"] if node["kind"] == "entity"}
     assert "缓存验证" in titles
     assert after != second
+
+
+def test_get_agent_registers_the_four_memory_tools(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：web 知识管家的真实装配路径必须能跑通。
+
+    历史缺陷：装配代码写成 ``RagSearchTool(...)``，而 ``tool/rag_search.py``
+    导出的类名是 ``RAGSearchTool``（ruff F821 才暴露），于是 get_agent() 抛
+    NameError，Web 聊天在真实运行中直接 500。此前的测试都用 FakeAgent 替换了
+    get_agent，所以没有任何用例覆盖这段真实装配代码。
+    """
+
+    from web import support
+
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "agent-tools.sqlite3"))
+    monkeypatch.setattr(support, "DB_PATH", tmp_path / "agent-tools.sqlite3")
+    monkeypatch.setattr(support, "_manager", None)
+    monkeypatch.setattr(support, "_pipeline", None)
+    monkeypatch.setattr(support, "_agent", None)
+    try:
+        agent = support.get_agent()
+        names = {spec.name for spec in agent.tools.specs()}
+        assert {
+            "memory.query",
+            "memory.add",
+            "memory.rag_search",
+            "memory.rag",
+        } <= names
+        # 只读工具不该要求确认，memory.add 才是聊天唯一自动确认的写入。
+        assert support.chat_confirmed_side_effects(agent) == frozenset(
+            {agent.tools.confirmation_key("memory.add")}
+        )
+    finally:
+        support.close_manager()
+        monkeypatch.setattr(support, "_agent", None)
+        monkeypatch.setattr(support, "_pipeline", None)

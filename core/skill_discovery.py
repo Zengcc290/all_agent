@@ -310,11 +310,7 @@ def _parse_frontmatter(raw: str, skill_file: Path) -> dict[str, Any] | None:
             if value.lower() not in {"true", "false"}:
                 raise ValueError("'enabled' must be 'true' or 'false'")
             fields[key] = value.lower() == "true"
-        elif key == "description":
-            fields[key] = value
-        elif key == "version":
-            fields[key] = value
-        elif key == "triggers":
+        elif key == "description" or key == "version" or key == "triggers":
             fields[key] = value
         else:
             raise ValueError(

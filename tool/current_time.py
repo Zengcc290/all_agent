@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from core import BaseTool, ToolSpec
-
 
 TOOL_ENABLED = True
 
@@ -64,7 +63,7 @@ class CurrentTimeTool(BaseTool):
         del arguments
         local_now = datetime.now().astimezone()
         timezone_name = local_now.tzname() or "UTC"
-        unix_timestamp = int(local_now.astimezone(timezone.utc).timestamp())
+        unix_timestamp = int(local_now.astimezone(UTC).timestamp())
         return CurrentTimeOutput(
             local_time=local_now.isoformat(timespec="seconds"),
             timezone_name=timezone_name,

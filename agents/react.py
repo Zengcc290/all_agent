@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import inspect
 import json
 import re
 import time
@@ -25,18 +24,25 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
+from constants import (
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TIMEOUT,
+    REACT_MALFORMED_ANSWER_RETRY_LIMIT,
+    REACT_UNMARKED_ANSWER_RETRY_LIMIT,
+)
 from core import (
     ExecutionContext,
     ToolCall,
     ToolError,
+    ToolLoop,
+    ToolRegistry,
     ToolResult,
     ToolSpecRepository,
-    ToolRegistry,
-    ToolLoop,
+)
+from core import (
     discover_tools as discover_tool_modules,
 )
 from core.activity_log import (
-    log_model_completed,
     log_react_final_answer,
     log_react_parse_issue,
     log_react_round_started,
@@ -45,9 +51,8 @@ from core.activity_log import (
     log_tool_call_started,
     log_tool_registration,
 )
-from constants import DEFAULT_TEMPERATURE, DEFAULT_TIMEOUT
-from core.registry import BaseTool
 from core.parser import loads_model_json, parse_openai_tool_calls
+from core.registry import BaseTool
 
 from .agent import (
     Agent,
@@ -58,7 +63,6 @@ from .agent import (
     _safe_tool_name,
 )
 from .llm import EchoMode
-
 
 # Marker names accepted at the start of a ReAct line.  Chinese aliases cover
 # providers that translate the protocol; full-width and ASCII colons are both
@@ -89,12 +93,8 @@ _EXPLICIT_FINAL_RE = re.compile(
     r"(?im)^\s*(?:\*\*)?(?:final\s+answer|最终答案|最终回答|最终回复)(?:\*\*)?\s*[：:]"
 )
 # A provider that keeps emitting unmarked (or malformed) protocol answers even
-# after repeated corrections must not pin the loop until the round cap.
-# 常量来源：constants.py（agents/react.py）
-from constants import (
-    REACT_MALFORMED_ANSWER_RETRY_LIMIT,
-    REACT_UNMARKED_ANSWER_RETRY_LIMIT,
-)
+# after repeated corrections must not pin the loop until the round cap; the
+# retry limits live in constants.py with the rest of the tunables.
 
 
 @dataclass(frozen=True)
@@ -1052,9 +1052,11 @@ class ReActAgent(Agent):
         # 当前可调用范围。
         lines.extend(
             (
-                "Only the tools listed under `Available tools` below are callable "
-                "right now; other registered names above are either not loaded yet "
-                "or disabled for this request.",
+                (
+                    "Only the tools listed under `Available tools` below are callable "
+                    "right now; other registered names above are either not loaded yet "
+                    "or disabled for this request."
+                ),
                 "",
             )
         )
@@ -1124,8 +1126,10 @@ class ReActAgent(Agent):
         # still listable by name until they are re-registered or unloaded.
         renderable = [name for name in roster if name in hot_snapshot]
         lines = [
-            "Hot-loaded tools (newly registered during this conversation, "
-            "usable immediately):"
+            (
+                "Hot-loaded tools (newly registered during this conversation, "
+                "usable immediately):"
+            )
         ]
         full_names = set(renderable[-max_full:])
         for name in renderable:

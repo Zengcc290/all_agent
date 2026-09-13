@@ -23,7 +23,6 @@ from memory.rag import Document, RAGPipeline
 from ._memory import build_default_pipeline
 from ._shared import resolve_path, workspace_root
 
-
 TOOL_ENABLED = True
 
 

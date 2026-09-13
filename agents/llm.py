@@ -4,7 +4,6 @@ import logging
 import math
 import re
 import sys
-import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Literal
 
@@ -82,12 +81,12 @@ class _FinalAnswerEchoer:
         if not self.echoed and self._prefix:
             try:
                 self._write(self._prefix)
-            except Exception:  # noqa: BLE001 - echo must never break assembly
+            except Exception:
                 LOGGER.debug("stream echo write failed", exc_info=True)
         self.echoed = True
         try:
             self._write(text)
-        except Exception:  # noqa: BLE001 - echo must never break assembly
+        except Exception:
             LOGGER.debug("stream echo write failed", exc_info=True)
 
 
@@ -126,7 +125,7 @@ def _assemble_streaming_response(
                 if on_first_chunk is not None:
                     try:
                         on_first_chunk()
-                    except Exception:  # noqa: BLE001 - callback must not break the loop
+                    except Exception:
                         LOGGER.debug("on_first_chunk callback failed", exc_info=True)
             if (reason := _field(choice, "finish_reason")) is not None:
                 finish_reason = reason
@@ -164,7 +163,7 @@ def _assemble_streaming_response(
         if callable(close):
             try:
                 close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 LOGGER.debug("failed to close LLM stream", exc_info=True)
 
     message: dict[str, Any] = {
@@ -361,11 +360,13 @@ class LLM:
                     "prompt_cache_key must be a non-empty string of at most 64 characters"
                 )
             prompt_cache_key = prompt_cache_key.strip()
-        if prompt_cache_retention is not None:
-            if prompt_cache_retention not in {"in_memory", "24h"}:
-                raise ValueError(
-                    "prompt_cache_retention must be 'in_memory', '24h', or None"
-                )
+        if prompt_cache_retention is not None and prompt_cache_retention not in {
+            "in_memory",
+            "24h",
+        }:
+            raise ValueError(
+                "prompt_cache_retention must be 'in_memory', '24h', or None"
+            )
         reserved = {
             "messages",
             "model",

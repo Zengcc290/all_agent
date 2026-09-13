@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from types import TracebackType
+from typing import Any, Self
 
 from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType, make_default_embedding
 from .embedding import BaseEmbedding
-from .storage import BaseDocumentStore, BaseVectorStore, InMemoryVectorStore, Neo4jGraphStore, QdrantVectorStore, SQLiteDocumentStore
+from .storage import (
+    BaseDocumentStore,
+    BaseVectorStore,
+    InMemoryVectorStore,
+    Neo4jGraphStore,
+    QdrantVectorStore,
+    SQLiteDocumentStore,
+)
 from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
 
 
@@ -149,10 +158,15 @@ class MemoryManager:
         if callable(close):
             close()
 
-    def __enter__(self) -> "MemoryManager":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
 

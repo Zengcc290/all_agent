@@ -7,6 +7,7 @@ numeric ID, so historical logs do not consume model context.
 from __future__ import annotations
 
 import platform
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from core import BaseTool, ToolSpec

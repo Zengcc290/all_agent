@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 from constants import (
     RAG_CHUNK_OVERLAP,
@@ -36,7 +37,7 @@ class RetrievedChunk:
     metadata: Mapping[str, Any]
 
     @classmethod
-    def from_result(cls, result: MemorySearchResult) -> "RetrievedChunk":
+    def from_result(cls, result: MemorySearchResult) -> RetrievedChunk:
         return cls(result.item.content, result.score, result.item.id, result.item.metadata)
 
 
@@ -129,7 +130,7 @@ class RAGPipeline:
                     report["superseded"] += materialized["superseded"]
                     report["retracted"] += materialized["retracted"]
                     report["skipped_relations"] += materialized["skipped_relations"]
-                except Exception as exc:  # extraction failure must not lose source text
+                except Exception as exc:  # noqa: BLE001 - extraction failure must not lose source text
                     report["errors"].append(f"{type(exc).__name__}: {exc}")
         report["domains"] = list(dict.fromkeys(report["domains"]))
         self.last_ingest_report = report

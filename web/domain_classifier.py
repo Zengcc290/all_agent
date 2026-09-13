@@ -15,7 +15,8 @@
 
 from __future__ import annotations
 
-from constants import DEFAULT_DOMAIN as DEFAULT, DOMAIN_TITLE_WEIGHT
+from constants import DEFAULT_DOMAIN as DEFAULT
+from constants import DOMAIN_TITLE_WEIGHT
 
 #: 兜底领域：任何主题关键词都没命中时的归宿（常量来源：constants.py）。
 #: （DEFAULT 是 DEFAULT_DOMAIN 的供应商别名，下方两处函数签名仍用 DEFAULT 以保持兼容。）

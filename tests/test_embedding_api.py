@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from memory import APIEmbedding, DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL
+from memory import DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL, APIEmbedding
 
 
 @pytest.fixture()

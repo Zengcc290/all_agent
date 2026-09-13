@@ -34,3 +34,39 @@ web = ["static/*", "seed_data.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".venv", "build", "dist"]
+
+# Curated rule set. It keeps the bug-prone correctness and modernization checks
+# the repository is clean against, and deliberately leaves out the complexity /
+# refactor families (PLR09xx, C90) plus E501: this codebase has long descriptive
+# strings and refactoring it for those rules is not part of the current scope.
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "E402",
+    "F",
+    "I",
+    "UP017",
+    "UP035",
+    "UP037",
+    "BLE001",
+    "DTZ005",
+    "FURB162",
+    "ISC004",
+    "PIE807",
+    "PLR0402",
+    "PYI034",
+    "PYI036",
+    "RUF012",
+    "RUF022",
+    "RUF100",
+    "SIM102",
+    "SIM114",
+    "TRY004",
+]

@@ -89,7 +89,7 @@ def build_knowledge_extractor():
             model=profile.default_model,
         )
         return LLMKnowledgeExtractor(client.complete, model=profile.default_model)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 任何配置问题都退回无抽取器的可用状态
         return NullKnowledgeExtractor()
 
 
@@ -188,7 +188,7 @@ def get_agent():
                 )
                 agent.register_tool(MemoryAddTool(manager=get_manager()), replace=True)
                 agent.register_tool(
-                    RagSearchTool(pipeline=get_pipeline()), replace=True
+                    RAGSearchTool(pipeline=get_pipeline()), replace=True
                 )
                 agent.register_tool(RAGTool(pipeline=get_pipeline()), replace=True)
                 _agent = agent
@@ -427,6 +427,6 @@ def chat_ready() -> tuple[bool, str]:
             key = os.getenv(profile.api_key_env, "")
         if not key or str(key).startswith("replace-with"):
             return False, "provider.toml 已存在但 api_key 为空/占位符，请填入真实 key。"
-    except Exception as exc:  # 配置解析失败也要给用户可读的信息
+    except Exception as exc:  # noqa: BLE001 - 配置解析失败也要给用户可读的信息
         return False, f"provider.toml 解析失败：{type(exc).__name__}: {exc}"
     return True, ""

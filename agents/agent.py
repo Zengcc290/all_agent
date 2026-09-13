@@ -11,24 +11,6 @@ from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
 
-from core import (
-    ExecutionContext,
-    SkillCatalogTool,
-    SkillDiscoveryReport,
-    SkillRegistry,
-    ToolCall,
-    ToolCatalogTool,
-    ToolDiscoveryReport,
-    ToolError,
-    ToolExecutionManager,
-    ToolRegistry,
-    ToolResult,
-    ToolSpecRepository,
-    ToolLoop,
-    parse_openai_tool_calls,
-)
-from core import discover_tools as discover_tool_modules
-from core import discover_skills as discover_skill_packages
 from constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_SKILLS_ROOT,
@@ -40,17 +22,42 @@ from constants import (
     OBSERVATION_STUB_PREFIX,
     PROMPT_CACHE_KEY_VERSION,
 )
+from core import (
+    ExecutionContext,
+    SkillCatalogTool,
+    SkillDiscoveryReport,
+    SkillRegistry,
+    ToolCall,
+    ToolCatalogTool,
+    ToolDiscoveryReport,
+    ToolError,
+    ToolExecutionManager,
+    ToolLoop,
+    ToolRegistry,
+    ToolResult,
+    ToolSpecRepository,
+    parse_openai_tool_calls,
+)
+from core import discover_skills as discover_skill_packages
+from core import discover_tools as discover_tool_modules
 from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
 
-from .llm import EchoMode, LLM
+from .llm import LLM, EchoMode
 from .message_utils import (
     field as _field,
+)
+from .message_utils import (
     message_dict as _message_dict,
+)
+from .message_utils import (
     result_json as _result_json,
+)
+from .message_utils import (
     safe_tool_call_error as _safe_tool_call_error,
+)
+from .message_utils import (
     safe_tool_name as _safe_tool_name,
-    tool_call_dict as _tool_call_dict,
 )
 from .providers import ProviderProfile, ProviderRegistry
 
@@ -770,12 +777,14 @@ class Agent(ABC):
         if not snapshot:
             return None
         lines = [
-            "Available skills (read-only instruction packages; content is NOT "
-            "loaded yet). When the current task matches a skill's description "
-            "or triggers below, FIRST call system.skill_catalog with "
-            "action=view and that skill_name, then follow the returned "
-            "content. Never guess a skill's content from its description "
-            "alone:"
+            (
+                "Available skills (read-only instruction packages; content is NOT "
+                "loaded yet). When the current task matches a skill's description "
+                "or triggers below, FIRST call system.skill_catalog with "
+                "action=view and that skill_name, then follow the returned "
+                "content. Never guess a skill's content from its description "
+                "alone:"
+            )
         ]
         for name, (spec, _) in snapshot.items():
             entry = f"- {name} (v{spec.version}): {spec.description}"

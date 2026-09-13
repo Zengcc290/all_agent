@@ -23,7 +23,7 @@ import json
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,8 +31,6 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-
-from core import ExecutionContext
 
 from constants import (
     DEFAULT_DOMAIN,
@@ -50,10 +48,11 @@ from constants import (
     WEB_FACT_SUBJECT_MAX,
     WEB_GRAPH_RAG_LIMIT_MAX,
     WEB_GRAPH_RAG_QUERY_MAX,
-    WEB_INGEST_CHUNK_SIZE,
     WEB_IMPORT_ERRORS_MAX,
+    WEB_INGEST_CHUNK_SIZE,
     WEB_KNOWLEDGE_MAX_CHARS,
 )
+from core import ExecutionContext
 from memory import MemoryManager, MemoryType
 from memory.rag import RAGPipeline
 
@@ -231,7 +230,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                     tool_names=tool_names,
                     context=context,
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 任意上游失败都归一为可读的 502
             raise HTTPException(
                 status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"
             )
@@ -278,7 +277,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 chunk_size=WEB_INGEST_CHUNK_SIZE,
                 overlap=RAG_CHUNK_OVERLAP,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 解析失败归一为 422，附错误类型
             raise HTTPException(
                 status_code=422, detail=f"文档解析失败：{type(exc).__name__}: {exc}"
             )
@@ -361,7 +360,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         items = [item.to_dict() for item in manager.list(include_expired=False)]
         payload = {
             "format": "knowledge-nebula-export/v1",
-            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "exported_at": datetime.now(UTC).isoformat(),
             "counts": {
                 "total": len(items),
                 "semantic": sum(
@@ -373,7 +372,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             },
             "items": items,
         }
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # 导出文件名用本地时间戳（面向用户，非持久化时间语义）。
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
         return JSONResponse(
             payload,
             headers={
@@ -390,7 +390,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             tmp_path.unlink(missing_ok=True)
         try:
             data = json.loads(raw.decode("utf-8"))
-        except Exception as exc:
+        except (UnicodeDecodeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"不是合法的 JSON：{exc}")
         entries = data.get("items") if isinstance(data, dict) else data
         if not isinstance(entries, list):
@@ -463,7 +463,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                         importance=float(importance),
                     )
                 imported += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 单条失败只跳过该条并记录原因
                 # 历史上这里静默吞掉所有异常，用户只看到 skipped 计数却不知道
                 # 哪些条目失败、为什么失败。
                 skipped += 1
@@ -484,7 +484,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "embedding_mode": (
                 "api" if type(embedding).__name__ == "APIEmbedding" else "local-hash"
             ),
-            "embedding": getattr(embedding, "to_dict", lambda: {})(),
+            "embedding": getattr(embedding, "to_dict", dict)(),
             "search_available": search_available(),
         }
 

@@ -1,4 +1,6 @@
 """web.domain_classifier 自动领域分类单测 + 图构建集成验证。"""
+from conftest import HashEmbedding
+
 from memory import MemoryConfig, MemoryManager
 from memory.rag import Document, RAGPipeline
 from web.domain_classifier import (
@@ -9,7 +11,6 @@ from web.domain_classifier import (
     majority_domain,
 )
 from web.graph_builder import build_graph
-from conftest import HashEmbedding
 
 
 def test_known_domains_nonempty() -> None:

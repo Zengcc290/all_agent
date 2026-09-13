@@ -3,8 +3,8 @@ from .llm import LLM
 from .providers import ProviderProfile, ProviderRegistry
 from .react import (
     ReAct,
-    ReActAgent,
     React,
+    ReActAgent,
     ReactAgent,
     parse_react_response,
     react,
@@ -12,14 +12,14 @@ from .react import (
 
 __all__ = [
     "LLM",
+    "Agent",
     "ProviderProfile",
     "ProviderRegistry",
-    "Agent",
-    "agent",
-    "ReActAgent",
-    "ReactAgent",
     "ReAct",
+    "ReActAgent",
     "React",
-    "react",
+    "ReactAgent",
+    "agent",
     "parse_react_response",
+    "react",
 ]

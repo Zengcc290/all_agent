@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Mapping
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from ..base import BaseMemory, MemoryItem, MemoryType
 from ..ids import legacy_fact_id_for, relation_id_for
@@ -15,7 +16,7 @@ class SemanticMemory(BaseMemory):
     memory_type = MemoryType.SEMANTIC
 
     def __init__(
-        self, *, graph_store: "Neo4jGraphStore | None" = None, **kwargs: Any
+        self, *, graph_store: Neo4jGraphStore | None = None, **kwargs: Any
     ) -> None:
         super().__init__(memory_type=self.memory_type, **kwargs)
         if graph_store is None:

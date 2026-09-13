@@ -20,7 +20,6 @@ from memory.rag import RAGPipeline
 
 from ._memory import build_default_pipeline
 
-
 TOOL_ENABLED = True
 
 

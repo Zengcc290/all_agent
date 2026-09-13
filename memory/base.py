@@ -12,11 +12,12 @@ import base64
 import json
 import math
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from constants import (
@@ -82,7 +83,7 @@ def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def ensure_datetime(value: datetime | str | None) -> datetime | None:
@@ -91,12 +92,13 @@ def ensure_datetime(value: datetime | str | None) -> datetime | None:
     if isinstance(value, datetime):
         result = value
     elif isinstance(value, str):
-        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Python 3.11+ 的 fromisoformat 直接接受末尾的 "Z"。
+        result = datetime.fromisoformat(value)
     else:
         raise TypeError("datetime values must be datetime, ISO string, or None")
     if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
-    return result.astimezone(timezone.utc)
+        result = result.replace(tzinfo=UTC)
+    return result.astimezone(UTC)
 
 
 @dataclass
@@ -185,7 +187,7 @@ class MemoryItem:
         return result
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "MemoryItem":
+    def from_dict(cls, value: Mapping[str, Any]) -> MemoryItem:
         data = dict(value)
         data["payload"] = _json_restore(data.get("payload"))
         return cls(**data)
@@ -209,7 +211,7 @@ def _json_restore(value: Any) -> Any:
     if isinstance(value, dict) and set(value) == {"__bytes__"}:
         try:
             return base64.b64decode(value["__bytes__"])
-        except Exception:
+        except Exception:  # noqa: BLE001 - 无法解码的负载按原样返回，读取不应失败
             return value
     if isinstance(value, dict):
         return {key: _json_restore(item) for key, item in value.items()}
@@ -280,16 +282,20 @@ class MemoryConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) <= 0:
                 raise ValueError(f"{name} must be positive")
-        if self.default_ttl_seconds is not None:
-            if isinstance(self.default_ttl_seconds, bool) or not isinstance(self.default_ttl_seconds, (int, float)) or not math.isfinite(float(self.default_ttl_seconds)) or self.default_ttl_seconds <= 0:
-                raise ValueError("default_ttl_seconds must be positive or None")
+        if self.default_ttl_seconds is not None and (
+            isinstance(self.default_ttl_seconds, bool)
+            or not isinstance(self.default_ttl_seconds, (int, float))
+            or not math.isfinite(float(self.default_ttl_seconds))
+            or self.default_ttl_seconds <= 0
+        ):
+            raise ValueError("default_ttl_seconds must be positive or None")
         if not isinstance(self.qdrant_collection, str) or not self.qdrant_collection.strip():
             raise ValueError("qdrant_collection must be non-empty")
         if not isinstance(self.extra, dict):
             self.extra = dict(self.extra)
 
     @classmethod
-    def from_env(cls, prefix: str = "HELLOAGENTS_MEMORY_") -> "MemoryConfig":
+    def from_env(cls, prefix: str = "HELLOAGENTS_MEMORY_") -> MemoryConfig:
         """Build configuration from environment variables.
 
         Supported names mirror the dataclass fields, e.g.

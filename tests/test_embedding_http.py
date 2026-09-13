@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Any, ClassVar
 
 import pytest
 
@@ -21,12 +22,12 @@ from memory import APIEmbedding
 class _EmbeddingsHandler(BaseHTTPRequestHandler):
     """Minimal OpenAI-compatible /embeddings endpoint."""
 
-    requests: list[dict[str, Any]] = []
-    responder: Callable[[dict[str, Any]], tuple[int, Any]] = staticmethod(
+    requests: ClassVar[list[dict[str, Any]]] = []
+    responder: ClassVar[Callable[[dict[str, Any]], tuple[int, Any]]] = staticmethod(
         lambda body: (200, {"data": [{"index": i, "embedding": [float(i), 1.0]} for i in range(len(body["input"]))]})
     )
 
-    def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
         try:

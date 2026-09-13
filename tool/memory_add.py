@@ -27,7 +27,6 @@ from ._memory import (
     normalize_metadata_payload,
 )
 
-
 TOOL_ENABLED = True
 
 

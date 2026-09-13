@@ -26,7 +26,8 @@ import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from collections import Counter
-from typing import Any, Callable, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from constants import (
     DEFAULT_EMBEDDING_BASE_URL,
@@ -306,11 +307,11 @@ def _extract_embedding_vectors(response: Any) -> list[list[float]]:
 EmbeddingService = BaseEmbedding
 
 __all__ = [
+    "DEFAULT_EMBEDDING_BASE_URL",
+    "DEFAULT_EMBEDDING_BATCH_SIZE",
+    "DEFAULT_EMBEDDING_MODEL",
     "APIEmbedding",
     "BaseEmbedding",
-    "DEFAULT_EMBEDDING_BASE_URL",
-    "DEFAULT_EMBEDDING_MODEL",
-    "DEFAULT_EMBEDDING_BATCH_SIZE",
     "EmbeddingService",
     "load_dotenv_once",
 ]

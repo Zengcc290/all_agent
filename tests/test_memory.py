@@ -1,9 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+
+from conftest import HashEmbedding
 
 from memory import MemoryConfig, MemoryManager, MemoryType, Neo4jGraphStore
 from memory.storage import SQLiteDocumentStore
-
-from conftest import HashEmbedding
 
 
 def _manager(**config_kwargs):
@@ -31,7 +31,7 @@ def test_working_memory_ttl_and_capacity():
     assert manager.working.get_value("a") is None
     assert manager.working.get_value("c") == 3
     expired = manager.working.add("short lived", ttl_seconds=0.01)
-    expired.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    expired.expires_at = datetime.now(UTC) - timedelta(seconds=1)
     manager.document_store.upsert(expired)
     assert manager.working.get(expired.id) is None
 
@@ -108,7 +108,8 @@ def test_memory_manager_without_api_key_falls_back_to_offline_embedding(monkeypa
 def test_explicit_embedding_api_key_still_selects_api_embedding(monkeypatch):
     """降级只发生在确实没有 key 时；显式 key 仍走 APIEmbedding。"""
 
-    from memory import APIEmbedding, base as memory_base
+    from memory import APIEmbedding
+    from memory import base as memory_base
 
     monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
@@ -122,7 +123,8 @@ def test_explicit_embedding_api_key_still_selects_api_embedding(monkeypatch):
 def test_environment_api_key_still_selects_api_embedding(monkeypatch):
     """仅设置 DASHSCOPE_API_KEY 时仍自动升级到真实嵌入（既有行为保持）。"""
 
-    from memory import APIEmbedding, base as memory_base
+    from memory import APIEmbedding
+    from memory import base as memory_base
 
     monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
@@ -140,13 +142,13 @@ def test_only_in_memory_vector_store_is_rebuilt_at_startup(tmp_path):
         def __init__(self) -> None:
             self.upserts: list[str] = []
 
-        def upsert(self, item):  # noqa: ANN001 - test double
+        def upsert(self, item):
             self.upserts.append(item.id)
 
         def delete(self, item_id: str) -> bool:
             return False
 
-        def search(self, vector, **kwargs):  # noqa: ANN001, ANN003 - test double
+        def search(self, vector, **kwargs):
             return []
 
         def clear(self) -> None:

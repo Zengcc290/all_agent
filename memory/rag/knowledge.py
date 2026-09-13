@@ -260,7 +260,7 @@ class LLMKnowledgeExtractor:
                 raise ValueError("knowledge extraction response was not valid JSON")
             value = json.loads(candidate[start : end + 1])
         if not isinstance(value, dict):
-            raise ValueError("knowledge extraction response must be a JSON object")
+            raise TypeError("knowledge extraction response must be a JSON object")
         return value
 
 
