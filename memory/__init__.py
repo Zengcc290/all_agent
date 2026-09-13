@@ -30,6 +30,7 @@ from .embedding import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingService,
+    HashEmbedding,
     load_dotenv_once,
 )
 from .manager import MemoryManager
@@ -47,7 +48,7 @@ from .rag import Document, DocumentProcessor, RAGPipeline, RetrievedChunk
 
 __all__ = [
     "APIEmbedding", "BaseEmbedding", "BaseMemory", "DEFAULT_EMBEDDING_BASE_URL", "DEFAULT_EMBEDDING_MODEL",
-    "EmbeddingService", "MemoryConfig", "MemoryItem", "MemoryManager", "MemorySearchResult", "MemoryType",
+    "EmbeddingService", "HashEmbedding", "MemoryConfig", "MemoryItem", "MemoryManager", "MemorySearchResult", "MemoryType",
     "load_dotenv_once",
     "WorkingMemory", "EpisodicMemory", "SemanticMemory", "PerceptualMemory",
     "BaseDocumentStore", "BaseVectorStore", "InMemoryVectorStore", "QdrantVectorStore", "Neo4jGraphStore", "SQLiteDocumentStore", "cosine_similarity",

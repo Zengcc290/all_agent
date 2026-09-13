@@ -64,9 +64,12 @@ class MemoryManager:
             MemoryType.SEMANTIC: self.semantic,
             MemoryType.PERCEPTUAL: self.perceptual,
         }
-        # Rebuild a local index when reopening a persistent SQLite store.
-        for item in self.document_store.list():
-            self.vector_store.upsert(item)
+        # Only a local in-process index needs rebuilding from the document store
+        # on startup; a remote/durable vector store already holds the vectors,
+        # so re-upserting every item there is pure startup cost.
+        if isinstance(self.vector_store, InMemoryVectorStore):
+            for item in self.document_store.list():
+                self.vector_store.upsert(item)
 
     def for_type(self, memory_type: MemoryType | str) -> BaseMemory:
         try:

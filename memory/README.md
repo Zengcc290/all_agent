@@ -3,7 +3,12 @@
 这是一个暂时独立于现有 Agent runtime 的四层记忆系统。入口是
 `memory.MemoryManager`，默认组合 SQLite 文档存储、进程内向量索引和
 `APIEmbedding`（qwen3-embedding-0.6b，DashScope OpenAI 兼容端点），
-无需启动外部数据库服务即可使用。
+无需启动外部数据库服务即可使用。**没有配置任何 API key 时不会报错**：
+`make_default_embedding` 会自动降级为离线确定性的 `HashEmbedding`，
+本地检索仍可用（质量有限，仅适合演示/断网环境）。
+
+> 两种嵌入的向量空间不兼容：已按 `HashEmbedding` 建索引后再配置 key，
+> 需要重新写入条目才能得到可比较的向量。
 
 ## 包结构
 
@@ -11,7 +16,8 @@
 memory/
 ├── __init__.py        # 公共导出（from memory import MemoryManager, ...）
 ├── base.py            # 数据结构（MemoryItem / MemoryConfig）与 BaseMemory
-├── embedding.py       # 统一嵌入接口：BaseEmbedding + APIEmbedding（任意 OpenAI 兼容厂商）
+├── embedding.py       # 嵌入实现：BaseEmbedding + APIEmbedding + 离线 HashEmbedding
+├── ids.py             # 实体/事实的稳定 id（entity_id_for / relation_id_for）
 ├── manager.py         # 记忆管理器（统一协调调度）
 ├── types/             # 记忆类型实现
 │   ├── working.py     # 工作记忆（TTL + 容量淘汰）
@@ -30,8 +36,10 @@ memory/
 
 ## 快速开始
 
-先提供 embedding API key（默认从环境变量 `DASHSCOPE_API_KEY` 读取，
-对应 DashScope 上的 `qwen3-embedding-0.6b` 模型，1024 维）：
+可以不配 key 直接使用（自动降级为离线 `HashEmbedding`）；要获得真实语义
+检索质量，再提供 embedding API key（默认从环境变量 `DASHSCOPE_API_KEY`
+读取，也可用 `HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`，对应 DashScope 上的
+`qwen3-embedding-0.6b` 模型，1024 维）：
 
 ```bash
 # Windows PowerShell
@@ -107,7 +115,7 @@ manager = MemoryManager(MemoryConfig(sqlite_path="memory.sqlite3"), embedding=em
 * `SQLiteDocumentStore` 保存标准化 `MemoryItem`，可使用文件路径持久化。
 * `QdrantVectorStore` 接受 `url`、`api_key` 和 `collection_name`，并在首次写入时按嵌入维度创建 collection。
 * `Neo4jGraphStore` 接受 `uri`、`username`、`password`；未提供 `uri` 时使用进程内图实现，便于测试。`get_relations` 的 `relation` 与 `direction` 过滤对驱动路径同样生效。
-* `APIEmbedding` 是嵌入的唯一实现：自动分批（默认 `batch_size=10`）、按响应中的 `index`/`text_index` 还原顺序、校验维度与数值有限性，并兼容 DashScope 原生的 `output.embeddings` 响应格式。
+* `APIEmbedding` 与 `HashEmbedding` 是随包提供的两个实现。`APIEmbedding` 自动分批（默认 `batch_size=10`）、按响应中的 `index`/`text_index` 还原顺序、校验维度与数值有限性，并兼容 DashScope 原生的 `output.embeddings` 响应格式；`HashEmbedding` 是离线 bag-of-words 哈希实现，确定性、无依赖，在没有 key 时由 `make_default_embedding` 自动选用（也可显式注入以固定维度跑测试）。
 
 如果 `MemoryConfig.qdrant_url` 已配置且没有显式注入 `vector_store`，管理器会自动使用 Qdrant；否则默认使用进程内向量索引。所有向量都会校验维度和有限数值，空查询直接返回空结果。
 
@@ -127,8 +135,11 @@ Qdrant、Neo4j Python 客户端已经加入项目依赖；数据库服务本身�
 
 ## Agent 工具的默认持久化
 
-`memory.manage`（`tool/memory_tool.py`）和 `memory.rag`（`tool/rag_tool.py`）
-默认把记忆写入 `MEMORY_DB_PATH` 指向的 SQLite 文件；未设置该环境变量时默认
-是项目工作目录下的 `memory.sqlite3`。默认管理器在首次调用工具时才创建，
-导入与发现工具不会打开数据库。需要其他后端时，显式注入自定义的
-`MemoryManager` / `RAGPipeline` 即可。
+记忆工具按读/写拆分：`memory.query`（`tool/memory_query.py`，只读检索）、
+`memory.add`（`tool/memory_add.py`，增量写入）、`memory.manage`
+（`tool/memory_tool.py`，删除/清空）以及 RAG 的
+`memory.rag_search`（`tool/rag_search.py`，只读检索）与 `memory.rag`
+（`tool/rag_tool.py`，入库）。它们默认把记忆写入 `MEMORY_DB_PATH` 指向的
+SQLite 文件；未设置该环境变量时默认是项目工作目录下的 `memory.sqlite3`。
+默认管理器在首次调用工具时才创建，导入与发现工具不会打开数据库。需要其他
+后端时，显式注入自定义的 `MemoryManager` / `RAGPipeline` 即可。

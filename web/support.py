@@ -1,7 +1,7 @@
 """Web 层支撑设施：嵌入降级、共享单例与路径约定。
 
 设计要点：
-- 没有任何 API key 时整站仍可运行：``HashEmbedding`` 提供离线向量检索
+- 没有任何 API key 时整站仍可运行：``memory.HashEmbedding`` 提供离线向量检索
   （质量有限，仅演示用）；填入 ``DASHSCOPE_API_KEY`` 后自动升级到
   qwen3-embedding-0.6b。
 - ``MEMORY_DB_PATH`` 在导入时就被固定为项目根下的 ``memory.sqlite3``，
@@ -12,12 +12,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import math
 import os
-import re
-from collections import Counter
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -31,7 +27,14 @@ from constants import (
     NEBULA_EVENT_TITLE_CHARS,
     QA_EXTRACT_CHUNK_SIZE,
 )
-from memory import APIEmbedding, MemoryConfig, MemoryItem, MemoryManager, utc_now
+from memory import (
+    APIEmbedding,
+    HashEmbedding,
+    MemoryConfig,
+    MemoryItem,
+    MemoryManager,
+    utc_now,
+)
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
 LOGGER = logging.getLogger(__name__)
@@ -49,32 +52,12 @@ DB_PATH = Path(os.getenv("MEMORY_DB_PATH") or (PROJECT_ROOT / DEFAULT_MEMORY_DB_
 os.environ.setdefault("MEMORY_DB_PATH", str(DB_PATH))
 
 
-class HashEmbedding:
-    """离线确定性 embedding：未配置任何 API key 时的降级实现。
-
-    token -> blake2b 哈希桶累加，再归一化。检索质量有限，但完全本地、
-    可重复，适合课设演示与断网环境。
-    """
-
-    def __init__(self, dimension: int = 1024) -> None:
-        self.dimension = dimension
-
-    def embed(self, text: str) -> list[float]:
-        tokens = re.findall(r"\w+", (text or "").casefold(), flags=re.UNICODE)
-        vector = [0.0] * self.dimension
-        for token, count in Counter(tokens).items():
-            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-            index = int.from_bytes(digest, "big") % self.dimension
-            vector[index] += 1.0 + math.log(float(count))
-        norm = math.sqrt(sum(value * value for value in vector))
-        return [value / norm for value in vector] if norm else vector
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed(text) for text in texts]
-
-
 def build_embedding():
-    """有 DashScope key 用真实嵌入，否则降级 HashEmbedding。"""
+    """有 DashScope key 用真实嵌入，否则用 memory 包自带的离线降级实现。
+
+    ``HashEmbedding`` 现在由 ``memory.embedding`` 提供（Web、Agent 工具与直接使用
+    memory 包的调用方共用同一实现），这里保留同名导入以兼容既有引用。
+    """
     api_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip()
     if api_key:
         return APIEmbedding(
@@ -82,7 +65,7 @@ def build_embedding():
             model=DEFAULT_EMBEDDING_MODEL,
             dimension=MEMORY_EMBEDDING_DIMENSION,
         )
-    return HashEmbedding()
+    return HashEmbedding(dimension=MEMORY_EMBEDDING_DIMENSION)
 
 
 def build_knowledge_extractor():

@@ -34,7 +34,7 @@ from constants import (
     MEMORY_WORKING_CAPACITY,
 )
 
-from .embedding import APIEmbedding, BaseEmbedding, load_dotenv_once
+from .embedding import APIEmbedding, BaseEmbedding, HashEmbedding, load_dotenv_once
 
 if TYPE_CHECKING:
     from .storage import BaseDocumentStore, BaseVectorStore
@@ -62,11 +62,17 @@ def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
 
     Uses ``MemoryConfig.from_env()`` when no config is supplied, so the
     ``DASHSCOPE_API_KEY`` environment variable alone is enough to activate
-    qwen3-embedding-0.6b.
+    qwen3-embedding-0.6b. Without any key the deterministic offline
+    :class:`~memory.embedding.HashEmbedding` is used instead of raising, so the
+    memory layer, the agent tools and the web app stay usable offline.
     """
     config = config if config is not None else MemoryConfig.from_env()
+    load_dotenv_once()
+    api_key = config.embedding_api_key or os.getenv("DASHSCOPE_API_KEY")
+    if not api_key or not str(api_key).strip():
+        return HashEmbedding(dimension=config.embedding_dimension)
     return APIEmbedding(
-        api_key=config.embedding_api_key,
+        api_key=api_key,
         model=config.embedding_model,
         base_url=config.embedding_base_url,
         dimension=config.embedding_dimension,
@@ -104,7 +110,7 @@ class MemoryItem:
 
     content: str
     memory_type: MemoryType | str = MemoryType.WORKING
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: str(uuid4()))
     metadata: dict[str, Any] = field(default_factory=dict)
     importance: float = 0.5
     created_at: datetime = field(default_factory=utc_now)

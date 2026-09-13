@@ -1,31 +1,38 @@
 """Unified embedding service backed by an OpenAI-compatible HTTP API.
 
-Only one concrete implementation ships: :class:`APIEmbedding`, a vendor-neutral
-client for any provider that exposes the OpenAI ``/embeddings`` shape (DashScope
-for qwen3-embedding-0.6b, OpenAI, SiliconFlow, Zhipu, local vLLM, ...).  The
-abstract :class:`BaseEmbedding` interface stays so applications can inject
-their own model or callable without touching the rest of the system.
+Two implementations ship: :class:`APIEmbedding`, a vendor-neutral client for any
+provider that exposes the OpenAI ``/embeddings`` shape (DashScope for
+qwen3-embedding-0.6b, OpenAI, SiliconFlow, Zhipu, local vLLM, ...), and
+:class:`HashEmbedding`, the deterministic offline fallback used when no key is
+configured.  The abstract :class:`BaseEmbedding` interface stays so applications
+can inject their own model or callable without touching the rest of the system.
 
 The default model is ``qwen3-embedding-0.6b`` (1024 dimensions) served by
 DashScope's OpenAI-compatible endpoint.  The API key is read from
 ``DASHSCOPE_API_KEY`` (or ``MemoryConfig.embedding_api_key`` / the
-``HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`` environment variable).
+``HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`` environment variable).  Without a key
+the hash fallback keeps local search working offline; the two vector spaces are
+not interchangeable, so switching keys requires re-indexing stored items.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from collections import Counter
 from typing import Any, Callable, Iterable
 
 from constants import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
+    MEMORY_EMBEDDING_DIMENSION,
 )
 
 
@@ -59,6 +66,45 @@ class BaseEmbedding(ABC):
         if not all(isinstance(text, str) for text in values):
             raise TypeError("texts must contain strings")
         return [self.embed(text) for text in values]
+
+
+class HashEmbedding(BaseEmbedding):
+    """Deterministic offline embedding used when no API key is configured.
+
+    Tokens are hashed into fixed-size buckets, summed and normalized. Retrieval
+    quality is limited (it is bag-of-words, not semantic), but it is completely
+    local, reproducible and dependency-free, so the memory layer, the web app
+    and the RAG pipeline all keep working without network access. Vectors from
+    this class are NOT compatible with :class:`APIEmbedding` vectors.
+    """
+
+    def __init__(self, dimension: int = MEMORY_EMBEDDING_DIMENSION) -> None:
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+            raise ValueError("dimension must be a positive integer")
+        self.dimension = dimension
+
+    @staticmethod
+    def tokenize(text: str) -> list[str]:
+        return re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
+
+    def _index(self, token: str) -> int:
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, "big") % self.dimension
+
+    def embed(self, text: str) -> list[float]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        vector = [0.0] * self.dimension
+        for token, count in Counter(self.tokenize(text)).items():
+            vector[self._index(token)] += 1.0 + math.log(float(count))
+        norm = math.sqrt(sum(value * value for value in vector))
+        return [value / norm for value in vector] if norm else vector
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": type(self).__name__, "dimension": self.dimension}
+
+    def __repr__(self) -> str:
+        return f"HashEmbedding(dimension={self.dimension})"
 
 
 class APIEmbedding(BaseEmbedding):

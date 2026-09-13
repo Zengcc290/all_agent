@@ -441,10 +441,16 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         ready, _ = chat_ready()
+        # 报告实际生效的嵌入实现，而不是猜某个环境变量：MemoryConfig 还支持
+        # HELLOAGENTS_MEMORY_EMBEDDING_API_KEY，且调用方可注入自定义 embedding。
+        embedding = getattr(the_manager(), "embedding", None)
         return {
             "ok": True,
             "chat_ready": ready,
-            "embedding_mode": "api" if os.getenv("DASHSCOPE_API_KEY") else "local-hash",
+            "embedding_mode": (
+                "api" if type(embedding).__name__ == "APIEmbedding" else "local-hash"
+            ),
+            "embedding": getattr(embedding, "to_dict", lambda: {})(),
             "search_available": search_available(),
         }
 

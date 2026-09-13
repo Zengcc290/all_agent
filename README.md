@@ -105,9 +105,12 @@ python -m pytest -q
 The project now includes an opt-in four-layer memory package under
 [`memory/`](memory/). It provides
 `MemoryManager`, working/episodic/semantic/perceptual memories, SQLite document
-persistence, Qdrant vector search, Neo4j graph relations, and interchangeable
-DashScope/local-transformer/TF-IDF embedding services. The built-in
-`memory.manage` and `memory.rag` tools expose the same APIs to the
+persistence, Qdrant vector search, Neo4j graph relations, and two interchangeable
+embedding services: `APIEmbedding` (any OpenAI-compatible `/embeddings` endpoint,
+default qwen3-embedding-0.6b on DashScope) and the deterministic offline
+`HashEmbedding` used automatically when no API key is configured. The built-in
+memory tools (`memory.query`, `memory.add`, `memory.manage` and the RAG pair
+`memory.rag_search` / `memory.rag`) expose the same APIs to the
 current `Agent` tool runtime. See [`memory/README.md`](memory/README.md) for
 usage and backend configuration.
 

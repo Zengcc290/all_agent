@@ -395,6 +395,11 @@ def test_health(client: TestClient) -> None:
     health = client.get("/api/health").json()
     assert health["ok"] is True
     assert "chat_ready" in health and "embedding_mode" in health
+    # 回归：模式必须按实际生效的嵌入实现报告，而不是只看 DASHSCOPE_API_KEY
+    #（注入的测试 embedding 不是 APIEmbedding，因此这里必须是 local-hash）。
+    assert health["embedding_mode"] == "local-hash"
+    assert health["embedding"]["type"] == "HashEmbedding"
+    assert health["embedding"]["dimension"] == client.app.state.manager.embedding.dimension
     assert "search_available" in health
 
 
