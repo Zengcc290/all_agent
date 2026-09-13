@@ -85,26 +85,30 @@ def _get(value: Any, key: str, default: Any = None) -> Any:
 
 
 def _load_json(value: str) -> Any:
-    """Decode model-produced JSON with common wrapper-noise fallbacks."""
+    """Decode model-produced JSON with common wrapper-noise fallbacks.
+
+    ``NaN``/``Infinity`` are rejected through ``parse_constant``, which raises a
+    plain ``ValueError`` rather than ``json.JSONDecodeError``. Every attempt
+    therefore catches ``ValueError`` too and the failure is always reported as a
+    ``JSONDecodeError``, so callers only have to handle one error type.
+    """
 
     text = value.strip()
-    try:
-        return json.loads(text, parse_constant=_reject_json_constant)
-    except json.JSONDecodeError:
-        pass
-    balanced = _balanced_json_substring(text)
-    if balanced:
+    candidates = [
+        text,
+        _balanced_json_substring(text),
+        _repair_single_quoted_object(_balanced_json_substring(text) or text),
+    ]
+    reason = ""
+    for candidate in candidates:
+        if not candidate:
+            continue
         try:
-            return json.loads(balanced, parse_constant=_reject_json_constant)
-        except json.JSONDecodeError:
-            pass
-    repaired = _repair_single_quoted_object(balanced or text)
-    if repaired:
-        try:
-            return json.loads(repaired, parse_constant=_reject_json_constant)
-        except json.JSONDecodeError:
-            pass
-    raise json.JSONDecodeError("invalid JSON arguments", value, 0)
+            return json.loads(candidate, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            reason = str(exc)
+    detail = f": {reason}" if reason else ""
+    raise json.JSONDecodeError(f"invalid JSON arguments{detail}", value, 0)
 
 
 def _balanced_json_substring(text: str) -> str:

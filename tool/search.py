@@ -309,7 +309,9 @@ class SearchTool(BaseTool):
             payload = json.loads(
                 raw_body.decode("utf-8"), parse_constant=_reject_json_constant
             )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, ValueError) as exc:
+            # parse_constant 拒绝 NaN/Infinity 时抛的是裸 ValueError（不是
+            # JSONDecodeError），必须一并捕获，否则会逃逸成难以理解的内部错误。
             raise ValueError("search response was not valid UTF-8 JSON") from exc
         return _normalize_response(payload, arguments.max_results)
 
