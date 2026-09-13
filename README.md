@@ -98,12 +98,18 @@ OpenAI function definitions are generated in strict mode. Malformed, unknown, or
 
 Each profile currently uses the `openai_compatible` adapter. The `models` array is declarative, so registration does not depend on a provider exposing `/models`. `tool_mode` documents whether the endpoint supports strict native tools or should use the textual ReAct protocol. The real `provider.toml` contains plaintext keys and is intentionally excluded from Git.
 
-Install development dependencies and run tests with:
+Install development dependencies and run the quality gate with:
 
 ```bash
 python -m pip install -e '.[dev]'
-python -m pytest -q
+python scripts/check.py     # ruff + full pytest, stops at the first failure
 ```
+
+`python -m pytest -q` and `python -m ruff check .` can still be run separately.
+The same gate is wired as a local `pre-commit` hook in
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) (run `pre-commit install`
+once); it uses the hooks' own environment, so the tools must be installed
+there.
 
 ## Standalone memory system
 
