@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,13 +33,18 @@ class DocumentProcessor:
     """Parse common local formats and split text into searchable chunks."""
 
     def parse(self, source: str | Path | io.TextIOBase | bytes, *, metadata: Mapping[str, Any] | None = None) -> Document:
-        is_path = isinstance(source, Path)
-        if isinstance(source, str) and "\n" not in source:
-            try:
-                is_path = Path(source).exists()
-            except OSError:
-                is_path = False
-        if is_path:
+        """Normalize one source into a document.
+
+        ``str`` always means literal text: probing the filesystem for a
+        string-shaped path made short text that happened to match a file name
+        (and any absolute path) readable, which let a model-supplied
+        ``memory.rag`` source escape the workspace sandbox. File input is
+        explicit: pass ``Path``/``os.PathLike`` (or use
+        :meth:`RAGPipeline.ingest_source`, which converts a string path and can
+        enforce containment).
+        """
+
+        if isinstance(source, Path) or hasattr(source, "__fspath__"):
             path = Path(source)
             raw = path.read_bytes()
             base = {"source": str(path), "filename": path.name, "extension": path.suffix.lower()}
@@ -95,4 +101,29 @@ class DocumentProcessor:
         return raw.decode("utf-8", errors="replace")
 
 
-__all__ = ["Document", "DocumentProcessor"]
+def resolve_within(base_dir: str | Path, path: str | Path) -> Path:
+    """Resolve ``path`` and reject anything outside ``base_dir``.
+
+    Used by the ingest entry points that accept a caller-supplied path, so a
+    model-driven tool call cannot read arbitrary files. The comparison is done
+    on resolved paths with case normalization, mirroring the ``fs.*`` tools'
+    containment rule.
+    """
+
+    if not isinstance(base_dir, (str, Path)):
+        raise TypeError("base_dir must be a string or pathlib.Path")
+    base = Path(base_dir).expanduser().resolve()
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    resolved = candidate.resolve()
+    base_text = os.path.normcase(str(base))
+    resolved_text = os.path.normcase(str(resolved))
+    if resolved_text != base_text and not resolved_text.startswith(base_text + os.sep):
+        raise ValueError(
+            f"path '{path}' resolves outside the allowed directory '{base}'"
+        )
+    return resolved
+
+
+__all__ = ["Document", "DocumentProcessor", "resolve_within"]

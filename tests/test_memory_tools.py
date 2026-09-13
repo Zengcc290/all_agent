@@ -133,6 +133,38 @@ async def test_destructive_and_ingest_writes_need_confirmation(runtime) -> None:
         assert denied.error.code == "CONFIRMATION_REQUIRED", name
 
 
+@pytest.mark.asyncio
+async def test_rag_ingest_rejects_source_outside_workspace(
+    runtime, tmp_path, monkeypatch
+) -> None:
+    """``memory.rag`` 的 source 是模型可控输入，必须经工作区沙箱解析。"""
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    outside = tmp_path / "secret.txt"
+    outside.write_text("SECRET-OUTSIDE-WORKSPACE", encoding="utf-8")
+
+    denied = await _call(
+        runtime,
+        "memory.rag",
+        {"action": "ingest", "source": str(outside)},
+        confirm=True,
+    )
+    assert denied.ok is False
+    assert denied.error is not None
+    # 运行时按设计不把内部异常细节回传给模型，只报告执行失败。
+    assert denied.error.code == "EXECUTION_ERROR"
+    # 越界文件内容绝不能进入记忆库。
+    assert not [
+        item
+        for item in runtime[0].resolve("memory.query")[0].manager.list(
+            memory_type="semantic", include_expired=True
+        )
+        if "SECRET-OUTSIDE-WORKSPACE" in item.content
+    ]
+
+
 def test_read_and_write_tool_names_are_distinct() -> None:
     """读/写拆分后的工具名与副作用标注必须互相对应。"""
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from constants import (
@@ -16,7 +17,7 @@ from constants import (
 
 from ..base import MemoryItem, MemorySearchResult, MemoryType
 from ..manager import MemoryManager
-from .document import Document, DocumentProcessor
+from .document import Document, DocumentProcessor, resolve_within
 from .graph_rag import GraphRAGPipeline, GraphRAGResult
 from .knowledge import (
     EntityResolver,
@@ -132,8 +133,27 @@ class RAGPipeline:
         self.last_ingest_report = report
         return items
 
-    def ingest_source(self, source: Any, **kwargs: Any) -> list[MemoryItem]:
-        return self.ingest(self.processor.parse(source, metadata=kwargs.pop("metadata", None)), **kwargs)
+    def ingest_source(
+        self,
+        source: str | Path,
+        *,
+        base_dir: str | Path | None = None,
+        **kwargs: Any,
+    ) -> list[MemoryItem]:
+        """Ingest a file by path.
+
+        ``source`` is a path here (a string is converted to ``Path`` so short
+        text is never mistaken for a file name). When ``base_dir`` is given the
+        resolved path must stay inside it, which is what lets a model-driven
+        caller pass an explicit containment boundary.
+        """
+
+        path = Path(source)
+        if base_dir is not None:
+            path = resolve_within(base_dir, path)
+        return self.ingest(
+            self.processor.parse(path, metadata=kwargs.pop("metadata", None)), **kwargs
+        )
 
     def retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
         return [RetrievedChunk.from_result(result) for result in self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata)]

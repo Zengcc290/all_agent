@@ -207,6 +207,60 @@ def test_pipeline_ingest_source_and_delete_document(
     assert pipeline.retrieve("semantic facts") == []
 
 
+def test_parse_treats_strings_as_text_and_paths_as_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """回归：``parse`` 的 str 必须一律当作文本，不得探测文件系统。
+
+    历史缺陷：``parse`` 对任何不含换行的字符串做 ``Path(source).exists()``
+    探测并 ``read_bytes()``，于是（1）与现存文件同名的短文本会被当文件读取，
+    （2）模型通过 ``memory.rag`` 传来的绝对路径能读到工作区外的任意文件，
+    绕开 ``fs.*`` 工具的沙箱。
+    """
+    from memory.rag import DocumentProcessor
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET-OUTSIDE-WORKSPACE", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    processor = DocumentProcessor()
+
+    # 同名文件存在时，字符串仍然是文本。
+    assert processor.parse("secret.txt").content == "secret.txt"
+    # 绝对路径字符串同样是文本，绝不触发读取。
+    assert processor.parse(str(secret)).content == str(secret)
+    # 显式 Path 才表示文件。
+    assert processor.parse(secret).content == "SECRET-OUTSIDE-WORKSPACE"
+    # 非 str/Path/bytes/stream 仍然报类型错误。
+    with pytest.raises(TypeError):
+        processor.parse(123)  # type: ignore[arg-type]
+
+
+def test_ingest_source_enforces_base_dir_containment(
+    pipeline: RAGPipeline, tmp_path: Path
+):
+    """``ingest_source(base_dir=...)`` 必须拒绝越界路径。
+
+    这是模型驱动调用（``memory.rag`` 的 source）的兜底边界：即使调用方忘了
+    预先解析路径，越界也会在管道层被拒。
+    """
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    inside = allowed / "note.txt"
+    inside.write_text("The zebra lives in savannah.", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET-OUTSIDE-WORKSPACE", encoding="utf-8")
+
+    items = pipeline.ingest_source(inside, base_dir=allowed, chunk_size=50, overlap=10)
+    assert items
+
+    with pytest.raises(ValueError, match="outside"):
+        pipeline.ingest_source(outside, base_dir=allowed, chunk_size=50, overlap=10)
+
+    # 字符串路径依旧被接受（内部转 Path），保持既有调用方兼容。
+    assert pipeline.ingest_source(str(inside), base_dir=allowed, chunk_size=50, overlap=10)
+
+
 def test_pipeline_answer_requires_callable_generator(pipeline: RAGPipeline):
     with pytest.raises(TypeError, match="generator"):
         pipeline.answer("anything", "not-callable")  # type: ignore[arg-type]
