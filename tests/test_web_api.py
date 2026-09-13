@@ -94,6 +94,24 @@ def test_ingest_grows_nebula(client: TestClient) -> None:
 def test_ingest_rejects_empty_file(client: TestClient) -> None:
     response = client.post("/api/ingest", files=_make_ingest_payload("empty.txt", ""))
     assert response.status_code == 400
+    # 回归：错误提示必须是可读中文，不得是编码损坏的问号串
+    detail = response.json()["detail"]
+    assert "空" in detail
+    assert "?" not in detail
+
+
+def test_ingest_rejects_oversized_file(client: TestClient) -> None:
+    from constants import MAX_UPLOAD_BYTES
+
+    oversized = b"x" * (MAX_UPLOAD_BYTES + 1)
+    response = client.post(
+        "/api/ingest",
+        files={"file": ("big.txt", io.BytesIO(oversized), "text/plain")},
+    )
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert "上限" in detail
+    assert "?" not in detail
 
 
 def test_graph_rag_endpoint_returns_vector_evidence_and_paths(

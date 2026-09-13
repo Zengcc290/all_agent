@@ -208,12 +208,18 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 if total_size > MAX_UPLOAD_BYTES:
                     tmp.close()
                     os.unlink(tmp.name)
-                    raise HTTPException(status_code=413, detail="???????? 64MB")
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            "文件超过上传上限 "
+                            f"{MAX_UPLOAD_BYTES // (1024 * 1024)}MB"
+                        ),
+                    )
                 tmp.write(chunk)
             if total_size == 0:
                 tmp.close()
                 os.unlink(tmp.name)
-                raise HTTPException(status_code=400, detail="????????")
+                raise HTTPException(status_code=400, detail="上传内容为空")
             tmp_path = tmp.name
         try:
             items = app.state.pipeline.ingest_source(
