@@ -156,4 +156,17 @@ def test_write_text_is_auto_discoverable():
     record = report.for_tool("fs.write_text")
     assert record is not None
     assert record.status == "registered"
-    assert registry.is_registered("fs.write_text", version="1.0.0")
+    assert registry.is_registered("fs.write_text", version="1.1.0")
+
+
+def test_write_text_spec_serializes_concurrent_writes():
+    """同一文件的并发写会互相覆盖，因此必须标记为非并发安全。
+
+    非幂等则相反：重复写入同一内容是安全（幂等）的，超时仍可重试。
+    """
+
+    tool = WriteTextTool()
+    assert tool.spec.side_effect == "write"
+    assert tool.spec.parallel_safe is False
+    assert tool.spec.max_concurrency == 1
+    assert tool.spec.idempotent is True

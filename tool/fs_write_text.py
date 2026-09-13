@@ -94,15 +94,17 @@ class WriteTextTool(BaseTool):
             "files or to rewrite files whose content is known; use fs.edit_text "
             "for a targeted replacement inside an existing file."
         ),
-        version="1.0.0",
+        version="1.1.0",
         input_model=WriteTextInput,
         output_model=WriteTextOutput,
         side_effect="write",
         permissions=(),
         timeout_seconds=15.0,
         idempotent=True,
-        parallel_safe=True,
-        max_concurrency=4,
+        # 同一路径的两次写入是「后写覆盖先写」：并发执行会丢更新，因此运行时应
+        # 把该调用隔离到单调用层（max_concurrency 随之被压到 1）。
+        parallel_safe=False,
+        max_concurrency=1,
         tags=("fs", "file", "write", "text", "create"),
         recommended_before_tools=("fs.read_text", "fs.read_dir"),
     )

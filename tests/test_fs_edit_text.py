@@ -153,4 +153,57 @@ def test_edit_text_is_auto_discoverable():
     record = report.for_tool("fs.edit_text")
     assert record is not None
     assert record.status == "registered"
-    assert registry.is_registered("fs.edit_text", version="1.0.0")
+    assert registry.is_registered("fs.edit_text", version="1.1.0")
+
+
+def test_edit_text_spec_is_neither_idempotent_nor_parallel_safe():
+    """读-改-写不可重试也不可并发：old_string 第二次已不存在。"""
+
+    tool = EditTextTool()
+    assert tool.spec.side_effect == "write"
+    assert tool.spec.idempotent is False
+    assert tool.spec.parallel_safe is False
+    assert tool.spec.max_concurrency == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_edits_to_the_same_file_are_serialized(tmp_path):
+    """回归：两个 edit 并发读同一文件会丢更新（甚至报 old_string 找不到）。
+
+    因为 spec 标记 parallel_safe=False，运行时把每个调用隔离进单调用层，
+    第二个 edit 必然看到第一个的结果。
+    """
+
+    target = tmp_path / "batch.txt"
+    target.write_text("alpha", encoding="utf-8")
+    tool = EditTextTool(base_dir=tmp_path)
+    registry = ToolRegistry()
+    registry.register(tool)
+    _, generation = registry.resolve(tool.spec.name)
+
+    def call(call_id: str, old: str, new: str) -> ToolCall:
+        return ToolCall(
+            call_id=call_id,
+            tool_name=tool.spec.name,
+            schema_version=tool.spec.version,
+            schema_hash=tool.spec.schema_hash,
+            registry_generation=generation,
+            arguments={
+                "path": "batch.txt",
+                "old_string": old,
+                "new_string": new,
+                "replace_all": False,
+                "encoding": "utf-8",
+            },
+        )
+
+    context = ExecutionContext(
+        confirmed_side_effects=frozenset({registry.confirmation_key(tool.spec.name)})
+    )
+    result = await ToolExecutionManager(registry).execute_batch(
+        [call("edit-1", "alpha", "beta"), call("edit-2", "beta", "gamma")],
+        context,
+    )
+
+    assert [entry.ok for entry in result.results] == [True, True]
+    assert target.read_text(encoding="utf-8") == "gamma"

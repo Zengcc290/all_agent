@@ -97,15 +97,17 @@ class EditTextTool(BaseTool):
             "fs.write_text to create files or replace whole content. The old "
             "string must match exactly once unless replace_all is true."
         ),
-        version="1.0.0",
+        version="1.1.0",
         input_model=EditTextInput,
         output_model=EditTextOutput,
         side_effect="write",
         permissions=(),
         timeout_seconds=15.0,
-        idempotent=True,
-        parallel_safe=True,
-        max_concurrency=4,
+        # 读-改-写：重复执行时 old_string 已被替换，第二次必然失败，所以既不
+        # 幂等（超时重试会把失败标记为不可重试）也不可并发（会丢更新）。
+        idempotent=False,
+        parallel_safe=False,
+        max_concurrency=1,
         tags=("fs", "file", "edit", "replace", "text"),
         recommended_before_tools=("fs.read_text",),
     )
