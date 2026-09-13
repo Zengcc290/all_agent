@@ -220,6 +220,14 @@ def test_chat_records_qa_into_episodic_memory(
     assert "asked_at" in meta
     assert qa_items[0].timestamp is not None
 
+    # 端到端：模拟 agent 用 memory.manage 检索（不指定 memory_type 应能命中）
+    from tool.memory_tool import MemoryTool, MemoryToolInput
+
+    tool = MemoryTool(manager=client.app.state.manager)
+    found = tool.execute(MemoryToolInput(action="search", query="我这两天在忙什么"))
+    assert found.count >= 1
+    assert any("这是测试回答" in item["content"] for item in found.items)
+
 
 def test_chat_tool_names_follow_mode(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

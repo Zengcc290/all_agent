@@ -256,6 +256,54 @@ def test_memory_tool_persists_across_instances(
     assert any("persistent fact" in item["content"] for item in output.items)
 
 
+def test_memory_tool_search_without_type_covers_episodic(manager: MemoryManager):
+    """回归：不指定 memory_type 的 search 必须能查到 episodic 里的问答/经历。
+
+    历史缺陷：search 默认只搜 working，而问答留痕写在 episodic，导致
+    「我这两天问过什么」这类问题永远检索不到。
+    """
+    from tool.memory_tool import MemoryTool, MemoryToolInput
+
+    tool = MemoryTool(manager=manager)
+    tool.execute(
+        MemoryToolInput(
+            action="add",
+            content="问：我这两天的计划\n答：先把后端修好",
+            memory_type="episodic",
+        )
+    )
+
+    # 注意：conftest 的 HashEmbedding 按 \w+ 分词，查询需与内容存在同 token
+    # （未配置真实嵌入模型时中文语义检索能力有限，这里只验证跨层作用域）。
+    found = tool.execute(MemoryToolInput(action="search", query="我这两天的计划"))
+    assert found.count >= 1
+    assert any("先把后端修好" in item["content"] for item in found.items)
+
+    # 显式限定 working 时仍然查不到（保持分层过滤语义）
+    scoped = tool.execute(
+        MemoryToolInput(action="search", query="我这两天的计划", memory_type="working")
+    )
+    assert scoped.count == 0
+
+
+def test_memory_tool_clear_without_type_only_touches_working(
+    manager: MemoryManager,
+):
+    """安全回归：clear 省略 memory_type 时不得清空全库（仍只清 working）。"""
+    from tool.memory_tool import MemoryTool, MemoryToolInput
+
+    tool = MemoryTool(manager=manager)
+    tool.execute(
+        MemoryToolInput(action="add", content="要保留的问答", memory_type="episodic")
+    )
+    tool.execute(MemoryToolInput(action="add", content="临时工作记忆"))
+
+    tool.execute(MemoryToolInput(action="clear"))
+
+    assert len(manager.list(memory_type="episodic")) == 1
+    assert manager.list(memory_type="working") == []
+
+
 def test_rag_tool_ingest_and_retrieve_with_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

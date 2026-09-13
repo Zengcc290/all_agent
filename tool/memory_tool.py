@@ -23,7 +23,14 @@ class MemoryToolInput(BaseModel):
 
     action: Literal["add", "search", "get", "delete", "list", "clear"]
     content: str | None = Field(default=None, description="Text to store for add.")
-    memory_type: Literal["working", "episodic", "semantic", "perceptual"] = "working"
+    memory_type: Literal["working", "episodic", "semantic", "perceptual"] | None = Field(
+        default=None,
+        description=(
+            "Which memory layer to use. For 'search', leaving it null searches all "
+            "four layers (past Q&A and experiences live in 'episodic'); for the "
+            "other actions it defaults to 'working'."
+        ),
+    )
     item_id: str | None = None
     query: str | None = None
     metadata: list["MemoryMetadata"] | None = None
@@ -82,7 +89,10 @@ class MemoryTool(BaseTool):
 
     def execute(self, arguments: MemoryToolInput) -> MemoryToolOutput:
         action = arguments.action
-        memory_type = MemoryType(arguments.memory_type)
+        # ``search`` 留空表示跨四层检索（历史问答/经历存在 episodic，只搜 working
+        # 会查不到）；其余动作留空仍落到 working，避免 ``clear`` 误伤全库。
+        scope = arguments.memory_type
+        memory_type = MemoryType(scope or "working")
         items: list[dict[str, Any]] = []
         count = 0
         if action == "add":
@@ -96,7 +106,7 @@ class MemoryTool(BaseTool):
             if arguments.query is None:
                 raise ValueError("query is required for search")
             metadata = {entry.key: entry.value for entry in (arguments.metadata or [])}
-            results = self.manager.search(arguments.query, memory_type=memory_type, limit=arguments.limit, metadata=metadata)
+            results = self.manager.search(arguments.query, memory_type=scope, limit=arguments.limit, metadata=metadata)
             items = [result.to_dict() for result in results]
             count = len(items)
         elif action == "get":
