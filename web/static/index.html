@@ -1134,10 +1134,27 @@
   // 2. 渲染引擎（静态 2D：布局一次算好、视口剔除、闪烁、缩放平移）
   // =====================================================================
   const canvas = $("universe"), ctx = canvas.getContext("2d");
-  let width = (canvas.width = window.innerWidth), height = (canvas.height = window.innerHeight);
+  let width = 0, height = 0;
+
+  // 画布缓冲像素 == 画布 CSS 像素：一旦两者不等，浏览器会拉伸位图，
+  // 节点画在一处、命中检测算在另一处，误差还会乘以 zoom。
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    width = Math.max(1, Math.round(rect.width || window.innerWidth));
+    height = Math.max(1, Math.round(rect.height || window.innerHeight));
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  // 鼠标事件给的是视口坐标，画布未必从 (0,0) 开始，必须先换算到画布局部坐标。
+  function eventPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  resizeCanvas();
   window.addEventListener("resize", () => {
-    width = canvas.width = window.innerWidth;
-    height = canvas.height = window.innerHeight;
+    resizeCanvas();
     computeOverview();
   });
 
@@ -1175,7 +1192,9 @@
         e.target.closest(".controls") || e.target.closest(".tour-panel") ||
         e.target.closest(".breadcrumb-nav") || e.target.closest(".top-actions") ||
         e.target.closest("#chat-panel") || e.target.closest("#stats-bar")) return;
-    isDragging = true; lastMouseX = e.clientX; lastMouseY = e.clientY;
+    isDragging = true;
+    const start = eventPos(e);
+    lastMouseX = start.x; lastMouseY = start.y;
     // 手动拖动 = 脱离焦点锁定：否则渲染循环每帧把相机拽回焦点，拖拽无效
     if (currentFocusNode) {
       currentFocusNode = null;
@@ -1183,11 +1202,12 @@
     }
   });
   window.addEventListener("mousemove", (e) => {
-    mouseX = e.clientX; mouseY = e.clientY;
+    const p = eventPos(e);
+    mouseX = p.x; mouseY = p.y;
     if (!isDragging) return;
-    camTargetX -= (e.clientX - lastMouseX) / zoom;
-    camTargetY -= (e.clientY - lastMouseY) / zoom;
-    lastMouseX = e.clientX; lastMouseY = e.clientY;
+    camTargetX -= (p.x - lastMouseX) / zoom;
+    camTargetY -= (p.y - lastMouseY) / zoom;
+    lastMouseX = p.x; lastMouseY = p.y;
   });
   window.addEventListener("mouseup", () => { isDragging = false; });
   window.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -1197,12 +1217,13 @@
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.15 : 0.87;
     const newZoom = Math.max(0.03, Math.min(30, targetZoom * factor));
-    // 保持光标下的世界点不动
-    const wx = camX + (e.clientX - width / 2) / zoom;
-    const wy = camY + (e.clientY - height / 2) / zoom;
+    // 保持光标下的世界点不动（光标坐标同样是画布局部坐标）
+    const cursor = eventPos(e);
+    const wx = camX + (cursor.x - width / 2) / zoom;
+    const wy = camY + (cursor.y - height / 2) / zoom;
     targetZoom = newZoom;
-    camTargetX = wx - (e.clientX - width / 2) / newZoom;
-    camTargetY = wy - (e.clientY - height / 2) / newZoom;
+    camTargetX = wx - (cursor.x - width / 2) / newZoom;
+    camTargetY = wy - (cursor.y - height / 2) / newZoom;
   }, { passive: false });
 
   // --- 天体绘制：2D 光点 + 闪烁（替代原作五层光照，一节点两笔） ---
@@ -1529,13 +1550,14 @@
   // 7. 点击命中（修复原 bug：与渲染共用同一份深度排序数组）
   // =====================================================================
   let downPos = null;
-  canvas.addEventListener("mousedown", (e) => { downPos = { x: e.clientX, y: e.clientY }; });
+  canvas.addEventListener("mousedown", (e) => { downPos = eventPos(e); });
   canvas.addEventListener("click", (e) => {
-    if (downPos && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 6) return;
+    const p = eventPos(e);
+    if (downPos && Math.hypot(p.x - downPos.x, p.y - downPos.y) > 6) return;
     for (let i = sortedRenderList.length - 1; i >= 0; i--) {
       const n = sortedRenderList[i];
       if (n._px === undefined) continue;
-      if (Math.hypot(e.clientX - n._px, e.clientY - n._py) < Math.max(14, n.renderedRadius * 1.3)) {
+      if (Math.hypot(p.x - n._px, p.y - n._py) < Math.max(14, n.renderedRadius * 1.3)) {
         drillIntoNode(n);
         return;
       }
