@@ -670,6 +670,27 @@
     }
     #chat-send-btn:hover { background: rgba(56, 189, 248, 0.3); }
     #chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #chat-mode-select {
+      flex: 0 0 148px;
+      padding: 0 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      background: rgba(15, 23, 42, 0.8);
+      color: #e2e8f0;
+      font-size: 12px;
+      outline: none;
+      font-family: inherit;
+      cursor: pointer;
+      user-select: none;
+    }
+    #chat-mode-select:focus { border-color: rgba(56, 189, 248, 0.6); }
+    #chat-mode-hint {
+      padding: 0 12px 8px;
+      font-size: 11px;
+      letter-spacing: 0.3px;
+      color: rgba(251, 191, 36, 0.95);
+      text-align: right;
+    }
 
     /* toast */
     #toasts {
@@ -874,9 +895,14 @@
       <div class="bubble ai">你好，我是你的知识管家。问我任何关于你知识库的事——「我最近在学什么？」「X 和 Y 有什么关系？」</div>
     </div>
     <div class="chat-input-bar">
+      <select id="chat-mode-select" title="回答模式" aria-label="回答模式">
+        <option value="offline">🧠 非联网 · 仅记忆</option>
+        <option value="online">🌐 联网 · 记忆+搜索</option>
+      </select>
       <textarea id="chat-textarea" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）"></textarea>
       <button id="chat-send-btn" disabled>发送</button>
     </div>
+    <div id="chat-mode-hint" hidden></div>
   </div>
 
   <input id="file-input" type="file" hidden accept=".txt,.md,.html,.htm,.json,.jsonl,.csv,.pdf">
@@ -1665,6 +1691,32 @@
   const chatMsgs = $("chat-msgs");
   const chatText = $("chat-textarea");
   const chatSendBtn = $("chat-send-btn");
+  const chatModeSelect = $("chat-mode-select");
+  const chatModeHint = $("chat-mode-hint");
+
+  // 回答模式：空闲时选择立即生效；若选择时已有问答在进行，本轮结束后下一轮生效。
+  let chatMode = "offline";
+  let chatPendingMode = null;
+  let chatSending = false;
+
+  const modeLabel = (mode) => (mode === "online" ? "联网 · 记忆+搜索" : "非联网 · 仅记忆");
+
+  function applyChatMode(mode) {
+    chatMode = mode;
+    chatModeSelect.value = mode;
+  }
+
+  function onChatModeChange() {
+    if (chatSending) {
+      chatPendingMode = chatModeSelect.value;
+      chatModeHint.hidden = false;
+      chatModeHint.textContent = `已选择「${modeLabel(chatPendingMode)}」，将在本轮问答结束后生效`;
+    } else {
+      applyChatMode(chatModeSelect.value);
+      chatModeHint.hidden = true;
+    }
+  }
+  chatModeSelect.addEventListener("change", onChatModeChange);
 
   async function checkHealth() {
     try {
@@ -1675,6 +1727,10 @@
         ? "在线 · 已接入你的知识库"
         : "未配置聊天模型（provider.toml）";
       chatSendBtn.disabled = !chatReady;
+      const onlineOption = chatModeSelect.querySelector('option[value="online"]');
+      onlineOption.textContent = h.search_available
+        ? "🌐 联网 · 记忆+搜索"
+        : "🌐 联网 · 记忆+搜索（未配置搜索，将按非联网回答）";
     } catch (_) {
       chatReady = false;
       $("chat-status-text").textContent = "服务不可达";
@@ -1693,14 +1749,19 @@
 
   async function sendChat() {
     const text = chatText.value.trim();
-    if (!text || !chatReady) return;
+    if (!text || !chatReady || chatSending) return;
+    const usedMode = chatMode;   // 本轮固定用发送时刻的模式
+    chatSending = true;
     chatText.value = "";
     appendBubble(text, "me");
-    const think = appendBubble("正在检索知识库并思考…", "ai");
+    const think = appendBubble(
+      usedMode === "online" ? "正在联网检索并思考…" : "正在检索知识库并思考…",
+      "ai"
+    );
     think.classList.add("thinking");
     chatSendBtn.disabled = true;
     try {
-      const res = await apiPostJson("/api/chat", { message: text }, 180000);
+      const res = await apiPostJson("/api/chat", { message: text, mode: usedMode }, 180000);
       think.classList.remove("thinking");
       const sources = (res.sources || [])
         .filter(item => item.source)
@@ -1714,7 +1775,14 @@
       think.classList.remove("thinking");
       think.textContent = "调用失败：" + err.message;
     } finally {
-      chatSendBtn.disabled = false;
+      chatSending = false;
+      // 有等待中的模式切换：本轮已结束，下一轮生效。
+      if (chatPendingMode) {
+        applyChatMode(chatPendingMode);
+        chatPendingMode = null;
+        chatModeHint.hidden = true;
+      }
+      chatSendBtn.disabled = !chatReady;
       chatMsgs.scrollTop = chatMsgs.scrollHeight;
     }
   }

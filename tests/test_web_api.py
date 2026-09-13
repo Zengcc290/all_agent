@@ -155,6 +155,98 @@ def test_chat_disabled_without_provider(client: TestClient) -> None:
     assert "provider" in response.json()["detail"]
 
 
+def test_chat_rejects_unknown_mode(client: TestClient) -> None:
+    response = client.post("/api/chat", json={"message": "你好", "mode": "quantum"})
+    assert response.status_code == 422
+
+
+def _force_search_env(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    names = [
+        "SEARCH_BASE_URL", "ANYSEARCH_BASE_URL",
+        "SEARCH_API", "SEARCH_API_KEY", "ANYSEARCH_API_KEY",
+    ]
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    if on:
+        monkeypatch.setenv("SEARCH_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("SEARCH_API", "test-search-key")
+
+
+def _make_fake_agent():
+    class FakeTools:
+        def snapshot(self):
+            return {
+                "memory.rag": None,
+                "memory.manage": None,
+                "system.current_time": None,
+                "web.search": None,
+            }
+
+    class FakeAgent:
+        tools = FakeTools()
+
+        def __init__(self) -> None:
+            self.last_tool_names = None
+
+        def run(self, query: str, **kwargs):
+            self.last_tool_names = kwargs.get("tool_names")
+            return "这是测试回答"
+
+    return FakeAgent()
+
+
+def test_chat_records_qa_into_episodic_memory(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_search_env(monkeypatch, on=False)
+    agent = _make_fake_agent()
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: agent)
+
+    response = client.post(
+        "/api/chat", json={"message": "我这两天在忙什么", "mode": "offline"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == "这是测试回答"
+    assert payload["mode"] == "offline"
+
+    items = client.app.state.manager.list(memory_type="episodic")
+    qa_items = [item for item in items if item.metadata.get("kind") == "qa"]
+    assert len(qa_items) == 1
+    meta = qa_items[0].metadata
+    assert meta["mode"] == "offline"
+    assert meta["question"] == "我这两天在忙什么"
+    assert "asked_at" in meta
+    assert qa_items[0].timestamp is not None
+
+
+def test_chat_tool_names_follow_mode(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = _make_fake_agent()
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: agent)
+
+    # 非联网：工具清单里不得有 web.search
+    _force_search_env(monkeypatch, on=False)
+    client.post("/api/chat", json={"message": "q1", "mode": "offline"})
+    assert agent.last_tool_names is not None
+    assert "web.search" not in agent.last_tool_names
+
+    # 已配置搜索且选择联网：tool_names 为 None（全部工具，含 web.search）
+    _force_search_env(monkeypatch, on=True)
+    client.post("/api/chat", json={"message": "q2", "mode": "online"})
+    assert agent.last_tool_names is None
+
+    # 未配置搜索却选择联网：回退为非联网
+    _force_search_env(monkeypatch, on=False)
+    response = client.post("/api/chat", json={"message": "q3", "mode": "online"})
+    assert response.json()["mode"] == "offline"
+    assert agent.last_tool_names is not None
+    assert "web.search" not in agent.last_tool_names
+
+
 def test_knowledge_sentence_ingests_and_extracts(client: TestClient) -> None:
     from memory.rag import RAGPipeline
 
@@ -193,6 +285,7 @@ def test_health(client: TestClient) -> None:
     health = client.get("/api/health").json()
     assert health["ok"] is True
     assert "chat_ready" in health and "embedding_mode" in health
+    assert "search_available" in health
 
 
 def test_graph_cache_invalidates_on_writes(client: TestClient) -> None:

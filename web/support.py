@@ -25,9 +25,10 @@ from constants import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MEMORY_DB_FILENAME,
     MEMORY_EMBEDDING_DIMENSION,
+    NEBULA_EVENT_TITLE_CHARS,
 )
 
-from memory import APIEmbedding, MemoryConfig, MemoryManager
+from memory import APIEmbedding, MemoryConfig, MemoryItem, MemoryManager, utc_now
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -165,6 +166,77 @@ def get_agent():
                 )
                 _agent = agent
     return _agent
+
+
+#: 联网搜索工具的注册名；聊天「联网/非联网」开关据此决定是否可见。
+SEARCH_TOOL_NAME = "web.search"
+
+
+def search_available() -> bool:
+    """AnySearch 是否已配置（base_url 与 api_key 同时存在才视为可用）。"""
+    base_url = next(
+        (
+            value
+            for value in (
+                os.getenv("SEARCH_BASE_URL"),
+                os.getenv("ANYSEARCH_BASE_URL"),
+            )
+            if value
+        ),
+        None,
+    )
+    api_key = next(
+        (
+            value
+            for value in (
+                os.getenv("SEARCH_API"),
+                os.getenv("SEARCH_API_KEY"),
+                os.getenv("ANYSEARCH_API_KEY"),
+            )
+            if value
+        ),
+        None,
+    )
+    return bool(base_url) and bool(api_key)
+
+
+def chat_tool_names(agent, *, online: bool) -> list[str] | None:
+    """按聊天模式返回可见工具名清单（传给 ``agent.run(tool_names=...)``）。
+
+    - online 且 AnySearch 已配置：返回 ``None``（全部工具，含 web.search）。
+    - 其余情况（offline 或联网未配置）：摘除 web.search，只留本地工具。
+    """
+    if online and search_available():
+        return None
+    return [name for name in agent.tools.snapshot() if name != SEARCH_TOOL_NAME]
+
+
+def record_qa(
+    manager: MemoryManager,
+    question: str,
+    answer: str,
+    *,
+    mode: str,
+) -> MemoryItem:
+    """把一次问答写入 episodic 记忆，带时间戳、可被 memory.manage/search 检索。
+
+    写入内容以「问 / 答」为主，便于将来用「我这两天问过什么」这类问题检索；
+    metadata 保留结构化字段，星图时间线上以「问：…」事件出现。
+    """
+    now = utc_now()
+    return manager.episodic.record(
+        f"问：{question}\n答：{answer}",
+        metadata={
+            "kind": "qa",
+            "type": "qa",
+            "title": f"问：{question[:NEBULA_EVENT_TITLE_CHARS]}",
+            "question": question,
+            "answer": answer,
+            "mode": mode,
+            "asked_at": now.isoformat(),
+        },
+        timestamp=now,
+    )
 
 
 def chat_ready() -> tuple[bool, str]:

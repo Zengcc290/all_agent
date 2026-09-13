@@ -25,7 +25,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -60,15 +60,20 @@ from .seed import seed
 from .support import (
     build_knowledge_extractor,
     chat_ready,
+    chat_tool_names,
     close_manager,
     get_agent,
     get_manager,
+    record_qa,
+    search_available,
     STATIC_DIR,
 )
 
 
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=WEB_CHAT_MAX_CHARS)
+    #: 回答模式：offline 只靠本地记忆，online 额外允许联网搜索（web.search）。
+    mode: Literal["offline", "online"] = Field(default="offline")
 
 
 class FactBody(BaseModel):
@@ -150,19 +155,29 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         if not ready:
             raise HTTPException(status_code=503, detail=reason)
         agent = get_agent()
+        online = body.mode == "online"
+        # 联网模式只在 AnySearch 已配置时真正开放 web.search；否则按非联网处理。
+        tool_names = chat_tool_names(agent, online=online)
+        effective_mode = "online" if tool_names is None else "offline"
         try:
             # agent.run 是同步阻塞调用，丢进线程避免卡住事件循环。
-            answer = await asyncio.to_thread(agent.run, body.message)
+            answer = await asyncio.to_thread(
+                agent.run, body.message, tool_names=tool_names
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"
             )
-        invalid_graph()  # agent 可能写入 episodic 事件
+        # 问答留痕：每次问答都写进 episodic 记忆（带时间戳、可检索），
+        # 时间线上会新增一颗「问：…」事件星。
+        record_qa(the_manager(), body.message, answer, mode=effective_mode)
+        invalidate_graph()
         retrieval = app.state.pipeline.graph_retrieve(
             body.message, limit=RAG_RETRIEVE_LIMIT, hops=RAG_GRAPH_HOPS
         )
         return {
             "answer": answer,
+            "mode": effective_mode,
             "sources": [
                 {
                     "memory_id": result.item.id,
@@ -389,6 +404,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "ok": True,
             "chat_ready": ready,
             "embedding_mode": "api" if os.getenv("DASHSCOPE_API_KEY") else "local-hash",
+            "search_available": search_available(),
         }
 
     # ------------------------------------------------------------------
