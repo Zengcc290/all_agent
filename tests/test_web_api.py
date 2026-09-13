@@ -167,6 +167,77 @@ def test_export_import_roundtrip_idempotent(client: TestClient) -> None:
     assert stats_before["entities"] >= 3  # A、B、事件时间线
 
 
+def test_import_rejects_oversized_file(client: TestClient) -> None:
+    """回归：/api/import 曾把整个请求体读进内存且无大小限制。"""
+
+    from constants import MAX_UPLOAD_BYTES
+
+    oversized = b"x" * (MAX_UPLOAD_BYTES + 1)
+    files = {
+        "file": ("huge.json", io.BytesIO(oversized), "application/json"),
+    }
+    response = client.post("/api/import", files=files)
+    assert response.status_code == 413
+    assert "上限" in response.json()["detail"]
+
+
+def test_import_reports_why_items_were_skipped(client: TestClient) -> None:
+    """回归：导入失败曾被静默吞掉，只留下一个 skipped 计数。"""
+
+    payload = {
+        "format": "knowledge-nebula-export/v1",
+        "items": [
+            {"id": "ok-1", "content": "A 关联 B", "memory_type": "episodic"},
+            {"id": "no-content"},
+            "not-an-object",
+        ],
+    }
+    files = {
+        "file": (
+            "partial.json",
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+            "application/json",
+        )
+    }
+    result = client.post("/api/import", files=files).json()
+
+    assert result["imported"] == 1
+    assert result["skipped"] == 2
+    assert len(result["errors"]) == 2
+    assert any("no-content" in message for message in result["errors"])
+    assert any("不是 JSON 对象" in message for message in result["errors"])
+
+
+def test_import_error_list_is_bounded(client: TestClient) -> None:
+    from constants import WEB_IMPORT_ERRORS_MAX
+
+    payload = {"items": [{"id": ""} for _ in range(WEB_IMPORT_ERRORS_MAX + 5)]}
+    files = {
+        "file": (
+            "many.json",
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+            "application/json",
+        )
+    }
+    result = client.post("/api/import", files=files).json()
+
+    assert result["skipped"] == WEB_IMPORT_ERRORS_MAX + 5
+    # 明细有上限，避免超长响应；计数仍然完整。
+    assert len(result["errors"]) == WEB_IMPORT_ERRORS_MAX
+
+
+def test_ingest_still_rejects_oversized_file(client: TestClient) -> None:
+    """共享上传辅助后，/api/ingest 的行为必须保持。"""
+
+    from constants import MAX_UPLOAD_BYTES
+
+    response = client.post(
+        "/api/ingest",
+        files=_make_ingest_payload("big.txt", "x" * (MAX_UPLOAD_BYTES + 1)),
+    )
+    assert response.status_code == 413
+
+
 def test_chat_disabled_without_provider(client: TestClient) -> None:
     response = client.post("/api/chat", json={"message": "你好"})
     assert response.status_code == 503

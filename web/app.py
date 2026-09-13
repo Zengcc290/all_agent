@@ -51,6 +51,7 @@ from constants import (
     WEB_GRAPH_RAG_LIMIT_MAX,
     WEB_GRAPH_RAG_QUERY_MAX,
     WEB_INGEST_CHUNK_SIZE,
+    WEB_IMPORT_ERRORS_MAX,
     WEB_KNOWLEDGE_MAX_CHARS,
 )
 from memory import MemoryManager, MemoryType
@@ -97,6 +98,42 @@ class GraphRAGBody(BaseModel):
 
 class KnowledgeBody(BaseModel):
     text: str = Field(min_length=1, max_length=WEB_KNOWLEDGE_MAX_CHARS)
+
+
+async def _save_upload(
+    file: UploadFile, *, prefix: str, suffix: str | None = None
+) -> Path:
+    """Stream one upload to a temp file while enforcing ``MAX_UPLOAD_BYTES``.
+
+    Both upload endpoints share this: reading ``await file.read()`` into memory
+    let a single large body exhaust the process, and only ``/api/ingest`` used to
+    be bounded. Oversized input is rejected with 413 before any parsing, empty
+    input with 400; the caller unlinks the returned path.
+    """
+
+    filename = file.filename or "untitled"
+    extension = suffix if suffix is not None else (Path(filename).suffix or ".txt")
+    total_size = 0
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=extension, prefix=prefix
+    ) as tmp:
+        while chunk := await file.read(1024 * 1024):
+            total_size += len(chunk)
+            if total_size > MAX_UPLOAD_BYTES:
+                tmp.close()
+                os.unlink(tmp.name)
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"文件超过上传上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB"
+                    ),
+                )
+            tmp.write(chunk)
+        if total_size == 0:
+            tmp.close()
+            os.unlink(tmp.name)
+            raise HTTPException(status_code=400, detail="上传内容为空")
+        return Path(tmp.name)
 
 
 def create_app(manager: MemoryManager | None = None) -> FastAPI:
@@ -233,29 +270,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @app.post("/api/ingest")
     async def ingest(file: UploadFile) -> dict[str, Any]:
         filename = file.filename or "untitled"
-        suffix = Path(filename).suffix or ".txt"
-        total_size = 0
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=suffix, prefix="nebula-ingest-"
-        ) as tmp:
-            while chunk := await file.read(1024 * 1024):
-                total_size += len(chunk)
-                if total_size > MAX_UPLOAD_BYTES:
-                    tmp.close()
-                    os.unlink(tmp.name)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            "文件超过上传上限 "
-                            f"{MAX_UPLOAD_BYTES // (1024 * 1024)}MB"
-                        ),
-                    )
-                tmp.write(chunk)
-            if total_size == 0:
-                tmp.close()
-                os.unlink(tmp.name)
-                raise HTTPException(status_code=400, detail="上传内容为空")
-            tmp_path = tmp.name
+        tmp_path = await _save_upload(file, prefix="nebula-ingest-")
         try:
             items = app.state.pipeline.ingest_source(
                 tmp_path,
@@ -268,7 +283,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 status_code=422, detail=f"文档解析失败：{type(exc).__name__}: {exc}"
             )
         finally:
-            os.unlink(tmp_path)
+            tmp_path.unlink(missing_ok=True)
         the_manager().episodic.record(
             f"上传并导入了文档《{filename}》（{len(items)} 个知识块）",
             metadata={"title": "导入文档", "filename": filename},
@@ -368,7 +383,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     @app.post("/api/import")
     async def import_file(file: UploadFile) -> dict[str, Any]:
-        raw = await file.read()
+        tmp_path = await _save_upload(file, prefix="nebula-import-", suffix=".json")
+        try:
+            raw = tmp_path.read_bytes()
+        finally:
+            tmp_path.unlink(missing_ok=True)
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception as exc:
@@ -390,13 +409,25 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             and item.metadata.get("object")
         }
         imported = skipped = 0
-        for raw_item in entries:
+        errors: list[str] = []
+
+        def note_error(message: str) -> None:
+            """Keep the response bounded: first WEB_IMPORT_ERRORS_MAX reasons."""
+            if len(errors) < WEB_IMPORT_ERRORS_MAX:
+                errors.append(message)
+
+        for position, raw_item in enumerate(entries, start=1):
             if not isinstance(raw_item, dict):
+                skipped += 1
+                note_error(f"第 {position} 项：不是 JSON 对象")
                 continue
             item_id = raw_item.get("id")
             content = raw_item.get("content") or ""
             if not item_id or not content:
                 skipped += 1
+                note_error(
+                    f"第 {position} 项（id={item_id or '缺失'}）：缺少 id 或 content"
+                )
                 continue
             if manager.get(item_id) is not None:
                 skipped += 1
@@ -432,11 +463,14 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                         importance=float(importance),
                     )
                 imported += 1
-            except Exception:
+            except Exception as exc:
+                # 历史上这里静默吞掉所有异常，用户只看到 skipped 计数却不知道
+                # 哪些条目失败、为什么失败。
                 skipped += 1
+                note_error(f"{item_id}: {type(exc).__name__}: {exc}")
         if imported:
             invalidate_graph()
-        return {"imported": imported, "skipped": skipped}
+        return {"imported": imported, "skipped": skipped, "errors": errors}
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:

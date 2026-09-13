@@ -185,7 +185,7 @@ REACT_MALFORMED_ANSWER_RETRY_LIMIT = 3
 #   所在文件：web/app.py
 # ---------------------------------------------------------------------------
 
-#: /api/ingest 上传大小上限（字节，64MB）。
+#: /api/ingest 与 /api/import 上传大小上限（字节，64MB）。
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 #: /api/chat 消息长度上限。
@@ -204,6 +204,9 @@ WEB_GRAPH_RAG_LIMIT_MAX = 50
 
 #: /api/knowledge 一句话文本长度上限。
 WEB_KNOWLEDGE_MAX_CHARS = 20000
+
+#: /api/import 响应中回传的错误明细条数上限（避免超长响应）。
+WEB_IMPORT_ERRORS_MAX = 20
 
 #: /api/ingest 的 RAG 切块块长（比默认 1000 更细，用于文档）。
 WEB_INGEST_CHUNK_SIZE = 800
