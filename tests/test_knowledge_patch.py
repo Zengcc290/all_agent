@@ -371,6 +371,69 @@ def test_graph_projection_keeps_history_satellite_but_drops_stale_edge():
     assert "历史" in stale_nodes[0]["title"]
 
 
+def test_manual_and_extracted_facts_share_one_id_scheme():
+    """回归：同一个三元组经「手工/种子」与「抽取」两条路径只落一条记录。
+
+    历史缺陷：``SemanticMemory.add_fact`` 默认用可读的 ``fact:s|p|o`` 作 id，
+    而抽取链路用 ``relation_id_for`` 哈希 id，同一事实因此存成两行（图上出现
+    重复行星与重复边），``/api/import`` 还为此写了一段手工三元组去重。
+    """
+
+    from memory.ids import legacy_fact_id_for, relation_id_for
+
+    manager = _manager()
+    subject, predicate, object_ = "Alice", "余额", "1 元"
+
+    manual = manager.semantic.add_fact(subject, predicate, object_)
+    assert manual.id == relation_id_for(subject, predicate, object_)
+
+    extracted = manager.semantic.add_fact(
+        subject,
+        predicate,
+        object_,
+        metadata={"action": "assert", "active": True},
+        confidence=0.9,
+    )
+    assert extracted.id == manual.id
+    matching = [
+        item
+        for item in manager.semantic.facts()
+        if item.metadata.get("subject") == subject
+        and item.metadata.get("predicate") == predicate
+        and item.metadata.get("object") == object_
+    ]
+    assert len(matching) == 1
+    # 抽取路径的 metadata 合并进同一条记录，而不是另起一行。
+    assert matching[0].metadata.get("action") == "assert"
+
+    # 存量库兼容：旧 ``fact:s|p|o`` 行仍被就地更新，不产生第二条记录。
+    legacy_manager = _manager()
+    legacy_id = legacy_fact_id_for("Bob", "余额", "2 元")
+    legacy_manager.semantic.add(
+        "Bob 余额 2 元",
+        metadata={
+            "subject": "Bob",
+            "predicate": "余额",
+            "object": "2 元",
+            "active": True,
+        },
+        item_id=legacy_id,
+    )
+    updated = legacy_manager.semantic.add_fact(
+        "Bob", "余额", "2 元", metadata={"active": False}, confidence=0.9
+    )
+    assert updated.id == legacy_id
+    legacy_rows = [
+        item
+        for item in legacy_manager.semantic.facts()
+        if item.metadata.get("subject") == "Bob"
+        and item.metadata.get("predicate") == "余额"
+        and item.metadata.get("object") == "2 元"
+    ]
+    assert len(legacy_rows) == 1
+    assert legacy_rows[0].metadata.get("active") is False
+
+
 def test_qa_extraction_writes_into_the_injected_manager(monkeypatch):
     """后台问答抽取必须使用调用方的库，绝不能去抢全局单例。"""
 

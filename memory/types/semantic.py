@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..base import BaseMemory, MemoryItem, MemoryType
+from ..ids import legacy_fact_id_for, relation_id_for
 
 if TYPE_CHECKING:
     from ..storage import Neo4jGraphStore
@@ -44,10 +45,19 @@ class SemanticMemory(BaseMemory):
             or not 0 <= confidence <= 1
         ):
             raise ValueError("confidence must be between 0 and 1")
-        fact_id = (
-            item_id or f"fact:{subject.strip()}|{predicate.strip()}|{object.strip()}"
-        )
+        # One canonical id scheme for every writer: the extraction pipeline uses
+        # ``relation_id_for`` directly, so deriving the same id here stops the
+        # same triple from being stored twice (once as ``fact:...``, once as
+        # ``relation:...``). Rows written before the unification are still
+        # updated in place through the legacy-id fallback below.
+        fact_id = item_id or relation_id_for(subject, predicate, object)
         existing = self.document_store.get(fact_id)
+        if existing is None and item_id is None:
+            legacy_id = legacy_fact_id_for(subject, predicate, object)
+            legacy = self.document_store.get(legacy_id)
+            if legacy is not None and legacy.memory_type == self.memory_type:
+                fact_id = legacy_id
+                existing = legacy
         if existing is not None and existing.memory_type == self.memory_type:
             merged_metadata = dict(existing.metadata)
             merged_metadata.update(dict(metadata or {}))

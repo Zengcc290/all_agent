@@ -8,7 +8,6 @@ extractor when no provider is configured.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -19,7 +18,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from constants import (
     DEFAULT_DOMAIN,
-    ENTITY_CLEAN_MAX_LENGTH,
     ENTITY_DEFAULT_CONFIDENCE,
     ENTITY_DEFAULT_TYPE,
     ENTITY_NAME_MAX_LENGTH,
@@ -30,53 +28,19 @@ from constants import (
 )
 
 from ..base import MemoryItem, MemoryType, utc_now
+from ..ids import (
+    _clean_text,
+    entity_id_for,
+    normalize_entity_name,
+    predicate_key_for,
+    relation_id_for,
+)
 from ..manager import MemoryManager
 
 #: 前缀命中允许的分隔符：较短的名字必须是完整前缀，且后面紧跟这些字符之一，
 #: 或者两者完全相等。``web`` 命中 ``web 中转站``、``deepseek`` 命中
 #: ``deepseek-v4.1-flash``；而 ``web`` 不会命中 ``webfoo``，``hub`` 不会命中 ``hubby``。
 ENTITY_PREFIX_BOUNDARIES = frozenset({" ", "-", "_", ".", "/", "|", ":", "·", "（", "("})
-
-
-def _clean_text(value: Any, *, max_length: int = ENTITY_CLEAN_MAX_LENGTH) -> str:
-    if not isinstance(value, str):
-        return ""
-    return " ".join(value.split())[:max_length].strip()
-
-
-def normalize_entity_name(value: str) -> str:
-    """Return a stable comparison key while preserving the display label."""
-
-    value = _clean_text(value, max_length=ENTITY_NAME_MAX_LENGTH).casefold()
-    return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE)
-
-
-def entity_id_for(name: str) -> str:
-    key = normalize_entity_name(name)
-    if not key:
-        raise ValueError("entity name must contain at least one searchable character")
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
-    return f"entity:{digest}"
-
-
-def relation_id_for(subject: str, predicate: str, object: str) -> str:
-    key = "|".join(
-        (normalize_entity_name(subject), normalize_entity_name(predicate), normalize_entity_name(object))
-    )
-    return f"relation:{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}"
-
-
-def predicate_key_for(subject: str, predicate: str) -> str:
-    """Stable key identifying one (subject, predicate) slot.
-
-    Single-valued slots such as ``余额`` or ``当前版本`` hold one current value.
-    The key ignores the object so a newer value can retire its predecessor.
-    """
-
-    key = "|".join(
-        (normalize_entity_name(subject), normalize_entity_name(predicate))
-    )
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
 
 
 def _normalize_for_match(value: str) -> str:
