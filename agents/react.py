@@ -894,6 +894,7 @@ class ReActAgent(Agent):
                     context,
                     round_number=round_number,
                     loaded_tool_schemas=loaded_tool_schemas,
+                    requested_names=requested_names,
                 )
                 conversation.extend(observations)
                 if (defer_tool_loading or self.lazy_tools) and requested_names is None:
@@ -998,6 +999,7 @@ class ReActAgent(Agent):
                 context,
                 call_number=round_number,
                 loaded_tool_schemas=loaded_tool_schemas,
+                requested_names=requested_names,
             )
             conversation.append(
                 {
@@ -1108,6 +1110,17 @@ class ReActAgent(Agent):
         if skill_entries:
             lines.extend((*skill_entries, ""))
             lines.extend((self.SKILL_VIEW_REACT_INSTRUCTIONS, ""))
+        # 注册清单是进程级快照，可能包含本次请求不可调用的工具（非联网模式下被
+        # 白名单摘除的 web.search，或尚未加载 schema 的惰性工具），因此显式声明
+        # 当前可调用范围。
+        lines.extend(
+            (
+                "Only the tools listed under `Available tools` below are callable "
+                "right now; other registered names above are either not loaded yet "
+                "or disabled for this request.",
+                "",
+            )
+        )
         lines.append("Available tools:")
         prefix_registrations = {
             name: registration
@@ -1321,6 +1334,53 @@ class ReActAgent(Agent):
 
         return _strict_function_schema(schema)
 
+    def _unavailable_tool_error(
+        self,
+        action_name: str,
+        call_id: str,
+        *,
+        requested_names: set[str] | None = None,
+    ) -> ToolResult:
+        """Error for a registered tool that this request may not call.
+
+        A registered tool can be missing from ``registrations`` for two very
+        different reasons: the caller passed an explicit ``tool_names``
+        whitelist that excluded it (offline chat mode drops ``web.search`` this
+        way), or its schema has not been loaded yet under deferred/lazy
+        loading. Only the second case can be fixed through the catalog, so
+        telling the model to resolve a whitelisted-out tool would send it into
+        a retry loop.
+        """
+
+        safe_name = _safe_tool_name(action_name)
+        if requested_names is not None and action_name not in requested_names:
+            return ToolResult(
+                call_id=call_id,
+                tool_name=safe_name,
+                ok=False,
+                error=ToolError(
+                    code="TOOL_NOT_ENABLED",
+                    message=(
+                        f"tool '{safe_name}' is disabled for this request; do not "
+                        "retry it or resolve it through the catalog. Continue using "
+                        "only the tools listed under 'Available tools'."
+                    ),
+                ),
+            )
+        return ToolResult(
+            call_id=call_id,
+            tool_name=safe_name,
+            ok=False,
+            error=ToolError(
+                code="TOOL_SCHEMA_REQUIRED",
+                message=(
+                    f"tool '{safe_name}' is registered and usable; first call "
+                    f"{self.catalog_tool.spec.name} with action 'resolve' to load "
+                    "its Action Input schema"
+                ),
+            ),
+        )
+
     @staticmethod
     def _response_message(response: Any) -> Any:
         choices = _field(response, "choices")
@@ -1340,6 +1400,7 @@ class ReActAgent(Agent):
         *,
         call_number: int,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
+        requested_names: set[str] | None = None,
     ) -> ToolResult:
         assert parsed.action is not None
         action_name = self._canonical_action_name(parsed.action, current_snapshot)
@@ -1381,18 +1442,8 @@ class ReActAgent(Agent):
                 ),
             )
         if action_name not in registrations:
-            return ToolResult(
-                call_id=call_id,
-                tool_name=_safe_tool_name(action_name),
-                ok=False,
-                error=ToolError(
-                    code="TOOL_SCHEMA_REQUIRED",
-                    message=(
-                        f"tool '{_safe_tool_name(action_name)}' is registered and "
-                        f"usable; first call {self.catalog_tool.spec.name} with action "
-                        "'resolve' to load its Action Input schema"
-                    ),
-                ),
+            return self._unavailable_tool_error(
+                action_name, call_id, requested_names=requested_names
             )
         if parsed.error is not None:
             return ToolResult(
@@ -1434,6 +1485,7 @@ class ReActAgent(Agent):
         *,
         round_number: int,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
+        requested_names: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         # Native calls are accepted as a compatibility fallback.  They use the
         # exact parser and execution path of Agent.run_with_tools.
@@ -1486,25 +1538,23 @@ class ReActAgent(Agent):
                     [native_call], self.tools, name_map, registrations
                 )[0]
             except (TypeError, ValueError) as exc:
-                code = (
-                    "TOOL_SCHEMA_REQUIRED"
-                    if isinstance(canonical, str)
+                if (
+                    isinstance(canonical, str)
                     and canonical in current_snapshot
                     and canonical not in registrations
-                    else "INVALID_TOOL_CALL"
-                )
-                message = (
-                    f"tool '{_safe_tool_name(canonical)}' is registered and usable; "
-                    f"first call {self.catalog_tool.spec.name} with action 'resolve' to load "
-                    "its Action Input schema"
-                    if code == "TOOL_SCHEMA_REQUIRED"
-                    else _safe_tool_call_error(exc)
-                )
+                ):
+                    results[position] = self._unavailable_tool_error(
+                        canonical, call_id, requested_names=requested_names
+                    )
+                    continue
                 results[position] = ToolResult(
                     call_id=call_id,
                     tool_name=_safe_tool_name(canonical),
                     ok=False,
-                    error=ToolError(code=code, message=message),
+                    error=ToolError(
+                        code="INVALID_TOOL_CALL",
+                        message=_safe_tool_call_error(exc),
+                    ),
                 )
                 continue
             calls.append(call)

@@ -778,3 +778,150 @@ def test_react_agent_sync_run_entrypoint():
     )
     assert answer == "sync-ok"
     assert llm.calls == 1
+
+
+class ExcludedToolThenAnswerLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[list] = []
+
+    def complete(self, messages, **_options):
+        self.requests.append(list(messages))
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: search the web\n"
+                "Action: web.search\n"
+                'Action Input: {"query":"python"}'
+            )
+        return "Final Answer: 改用可用工具回答"
+
+
+class NativeExcludedToolLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[list] = []
+
+    def complete(self, messages, **_options):
+        self.requests.append(list(messages))
+        self.calls += 1
+        if self.calls == 1:
+            tool_call = SimpleNamespace(
+                id="native-search",
+                function=SimpleNamespace(
+                    name="web__search", arguments='{"query": "python"}'
+                ),
+            )
+            message = SimpleNamespace(
+                role="assistant", content=None, tool_calls=[tool_call]
+            )
+        else:
+            message = SimpleNamespace(
+                role="assistant",
+                content="Final Answer: 已改用本地知识回答",
+                tool_calls=[],
+            )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def _rendered(messages) -> str:
+    """把一轮请求里的消息渲染成纯文本，便于断言 Observation 内容。"""
+
+    parts: list[str] = []
+    for message in messages:
+        content = (
+            message.get("content", "")
+            if isinstance(message, dict)
+            else getattr(message, "content", "")
+        )
+        parts.append(str(content or ""))
+    return "\n".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_request_scoped_whitelist_reports_tool_not_enabled():
+    """离线模式（tool_names 白名单）下调用被摘除的工具必须给出准确报错。
+
+    历史缺陷：报错说「registered and usable，请先调 catalog resolve 加载
+    schema」并返回 TOOL_SCHEMA_REQUIRED，但 resolve 根本无法把被白名单排除的
+    工具重新启用，模型会据此反复重试。
+    """
+
+    llm = ExcludedToolThenAnswerLLM()
+    agent = ReActAgent(
+        "disabled-tool-text-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(EchoTool())
+    search = SearchProbeTool()
+    agent.register_tool(search)
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=4,
+        tool_names=["test.react_echo"],
+        use_history=False,
+    )
+
+    assert answer == "改用可用工具回答"
+    assert search.queries == [], "被禁用的工具绝不能被执行"
+
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert "TOOL_SCHEMA_REQUIRED" not in second_round
+
+
+@pytest.mark.asyncio
+async def test_native_path_reports_tool_not_enabled_for_excluded_tool():
+    llm = NativeExcludedToolLLM()
+    agent = ReActAgent(
+        "disabled-tool-native-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(EchoTool())
+    search = SearchProbeTool()
+    agent.register_tool(search)
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=3,
+        tool_names=["test.react_echo"],
+        defer_tool_loading=False,
+        use_history=False,
+    )
+
+    assert answer == "已改用本地知识回答"
+    assert search.queries == [], "被禁用的工具绝不能被执行"
+
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert "TOOL_SCHEMA_REQUIRED" not in second_round
+
+
+def test_unavailable_tool_error_distinguishes_whitelist_from_unloaded_schema():
+    """报错语义按原因分流：白名单摘除 → TOOL_NOT_ENABLED；schema 未加载 → 保留
+    catalog 引导。defer_tool_loading 默认开启，因此不能只用 lazy_tools 判断。"""
+
+    agent = ReActAgent("error-semantics-test", auto_discover_tools=False)
+
+    excluded = agent._unavailable_tool_error(
+        "web.search", "call-1", requested_names={"memory.rag"}
+    )
+    assert excluded.ok is False
+    assert excluded.error is not None
+    assert excluded.error.code == "TOOL_NOT_ENABLED"
+    assert "disabled" in excluded.error.message
+    assert "do not" in excluded.error.message
+
+    unloaded = agent._unavailable_tool_error("web.search", "call-2")
+    assert unloaded.error is not None
+    assert unloaded.error.code == "TOOL_SCHEMA_REQUIRED"
+    assert "resolve" in unloaded.error.message
