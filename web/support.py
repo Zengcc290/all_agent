@@ -21,6 +21,12 @@ from threading import Lock
 
 from dotenv import load_dotenv
 
+from constants import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_MEMORY_DB_FILENAME,
+    MEMORY_EMBEDDING_DIMENSION,
+)
+
 from memory import APIEmbedding, MemoryConfig, MemoryManager
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
@@ -33,7 +39,7 @@ SEED_FILE = WEB_DIR / "seed_data.json"
 load_dotenv(PROJECT_ROOT / ".env")
 
 #: 统一记忆库路径：Web API 与 Agent 工具都读它。
-DB_PATH = Path(os.getenv("MEMORY_DB_PATH") or (PROJECT_ROOT / "memory.sqlite3"))
+DB_PATH = Path(os.getenv("MEMORY_DB_PATH") or (PROJECT_ROOT / DEFAULT_MEMORY_DB_FILENAME))
 os.environ.setdefault("MEMORY_DB_PATH", str(DB_PATH))
 
 
@@ -65,7 +71,11 @@ def build_embedding():
     """有 DashScope key 用真实嵌入，否则降级 HashEmbedding。"""
     api_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip()
     if api_key:
-        return APIEmbedding(api_key=api_key, model="qwen3-embedding-0.6b", dimension=1024)
+        return APIEmbedding(
+            api_key=api_key,
+            model=DEFAULT_EMBEDDING_MODEL,
+            dimension=MEMORY_EMBEDDING_DIMENSION,
+        )
     return HashEmbedding()
 
 

@@ -22,13 +22,11 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Iterable
 
-#: Default vendor endpoint and model used when nothing else is configured.
-DEFAULT_EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
-
-#: DashScope style batch ceiling; other providers tolerate different sizes and
-#: can lower/raise ``batch_size`` at construction time.
-DEFAULT_BATCH_SIZE = 10
+from constants import (
+    DEFAULT_EMBEDDING_BASE_URL,
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_MODEL,
+)
 
 
 def load_dotenv_once() -> None:
@@ -85,7 +83,7 @@ class APIEmbedding(BaseEmbedding):
         base_url: str = DEFAULT_EMBEDDING_BASE_URL,
         dimension: int | None = None,
         timeout: float = 30.0,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
         client: Any = None,
         api_key_env: str = "DASHSCOPE_API_KEY",
     ) -> None:
@@ -266,7 +264,7 @@ __all__ = [
     "BaseEmbedding",
     "DEFAULT_EMBEDDING_BASE_URL",
     "DEFAULT_EMBEDDING_MODEL",
-    "DEFAULT_BATCH_SIZE",
+    "DEFAULT_EMBEDDING_BATCH_SIZE",
     "EmbeddingService",
     "load_dotenv_once",
 ]

@@ -17,11 +17,20 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from constants import (
+    DEFAULT_DOMAIN,
+    ENTITY_CLEAN_MAX_LENGTH,
+    ENTITY_DEFAULT_CONFIDENCE,
+    ENTITY_DEFAULT_TYPE,
+    ENTITY_NAME_MAX_LENGTH,
+    ENTITY_SIMILARITY_THRESHOLD,
+)
+
 from ..base import MemoryItem, MemoryType
 from ..manager import MemoryManager
 
 
-def _clean_text(value: Any, *, max_length: int = 500) -> str:
+def _clean_text(value: Any, *, max_length: int = ENTITY_CLEAN_MAX_LENGTH) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(value.split())[:max_length].strip()
@@ -30,7 +39,7 @@ def _clean_text(value: Any, *, max_length: int = 500) -> str:
 def normalize_entity_name(value: str) -> str:
     """Return a stable comparison key while preserving the display label."""
 
-    value = _clean_text(value, max_length=200).casefold()
+    value = _clean_text(value, max_length=ENTITY_NAME_MAX_LENGTH).casefold()
     return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE)
 
 
@@ -52,10 +61,10 @@ def relation_id_for(subject: str, predicate: str, object: str) -> str:
 class EntityCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    name: str = Field(min_length=1, max_length=200)
-    entity_type: str = Field(default="概念", max_length=80)
+    name: str = Field(min_length=1, max_length=ENTITY_NAME_MAX_LENGTH)
+    entity_type: str = Field(default=ENTITY_DEFAULT_TYPE, max_length=80)
     description: str = Field(default="", max_length=1000)
-    confidence: float = Field(default=0.8, ge=0, le=1)
+    confidence: float = Field(default=ENTITY_DEFAULT_CONFIDENCE, ge=0, le=1)
     aliases: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("name", "entity_type", "description", mode="before")
@@ -82,7 +91,7 @@ class RelationCandidate(BaseModel):
 class ExtractionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    domain: str = Field(default="未分类", min_length=1, max_length=100)
+    domain: str = Field(default=DEFAULT_DOMAIN, min_length=1, max_length=100)
     topics: list[str] = Field(default_factory=list, max_length=20)
     entities: list[EntityCandidate] = Field(default_factory=list, max_length=50)
     relations: list[RelationCandidate] = Field(default_factory=list, max_length=80)
@@ -91,7 +100,7 @@ class ExtractionResult(BaseModel):
     @field_validator("domain", mode="before")
     @classmethod
     def normalize_domain(cls, value: Any) -> str:
-        return _clean_text(value, max_length=100) or "未分类"
+        return _clean_text(value, max_length=100) or DEFAULT_DOMAIN
 
     @field_validator("topics", "keywords", mode="before")
     @classmethod
@@ -208,7 +217,7 @@ def _entity_similarity(left: str, right: str, aliases: list[str] | None = None) 
 class EntityResolver:
     """Resolve extracted names to stable semantic-memory entity records."""
 
-    def __init__(self, manager: MemoryManager, *, similarity_threshold: float = 0.88) -> None:
+    def __init__(self, manager: MemoryManager, *, similarity_threshold: float = ENTITY_SIMILARITY_THRESHOLD) -> None:
         self.manager = manager
         self.similarity_threshold = similarity_threshold
         self._entities: dict[str, MemoryItem] = {}
@@ -229,13 +238,13 @@ class EntityResolver:
         name: str,
         *,
         domain: str,
-        entity_type: str = "概念",
+        entity_type: str = ENTITY_DEFAULT_TYPE,
         description: str = "",
-        confidence: float = 0.8,
+        confidence: float = ENTITY_DEFAULT_CONFIDENCE,
         aliases: list[str] | None = None,
         source_id: str | None = None,
     ) -> str:
-        name = _clean_text(name, max_length=200)
+        name = _clean_text(name, max_length=ENTITY_NAME_MAX_LENGTH)
         key = normalize_entity_name(name)
         if not key:
             raise ValueError("entity name must not be empty")

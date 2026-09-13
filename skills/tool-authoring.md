@@ -20,7 +20,7 @@ enabled: true
 1. 用 `fs.read_text` 读 `tool/tool_template.py`（完整模板与规范）和 `tool/README.md`（协议细节）。
 2. 用 `fs.read_dir` 查看 `tool/` 现有文件，避免重名与职责重叠。
 3. 明确工具的单一职责、输入来源、稳定输出、外部依赖、是否写副作用、幂等性与并发特性。缺少会影响安全性的关键信息时先向用户确认；不得把写操作标成 read、不得虚构 API、字段或权限。
-4. 如需参考真实实现：`tool/search.py`（外部 API + 环境变量配置）、`tool/current_time.py`（无参数）、`tool/shell_run.py`（execute 副作用）、`tool/git_commit_push.py`（复杂执行链路）、`tool/_shared.py`（共享助手，非发现目标）。
+4. 如需参考真实实现：`tool/search.py`（外部 API + 环境变量配置）、`tool/current_time.py`（无参数）、`tool/fs_write_text.py`（原子写入）、`tool/fs_read_text.py`（只读）、`tool/_shared.py`（共享助手，非发现目标）。
 
 ## 二、单文件协议（硬性约束）
 
@@ -48,11 +48,11 @@ enabled: true
 | description | 面向 LLM：何时使用、完成什么、不能做什么，≤2000 字符；不放密钥/动态状态 |
 | version | ≤32 字符；Schema、约束、权限、副作用或结果语义变化时必须升级 |
 | input_model / output_model | 指向本文件定义的 Pydantic 模型类 |
-| side_effect | 精确 `"read"` 视为无写副作用；`"write"`/`"execute"`/`"external_write"` 等都会要求确认。诚实标注（如 shell.run 用 execute） |
+| side_effect | 精确 `"read"` 视为无写副作用；`"write"`/`"execute"`/`"external_write"` 等都会要求确认。诚实标注（如 fs.write_text 用 write） |
 | permissions | 公开工具通常 `()`（兼容/审计元数据，运行时不做授权过滤） |
 | timeout_seconds | 有限正数，是单次执行截止时间；网络/数据库客户端内部超时必须 ≤ 此值 |
 | idempotent | 相同参数重复执行是否安全；决定错误是否标 retryable |
-| parallel_safe | 是否可并发执行；共享可变状态、保序需求时为 False（如 update_log、shell.run） |
+| parallel_safe | 是否可并发执行；共享可变状态、保序需求时为 False（如 update_log） |
 | max_concurrency | 该工具的最大并发（None 表示用全局限制） |
 | tags | 稳定能力关键词（如 ("fs","file","read")），供目录检索 |
 | recommended_before_tools | 可选；建议的命名空间工具名，仅供模型提示，不构成运行时依赖 |
@@ -73,8 +73,8 @@ enabled: true
 1. 发现协议：`TOOL_ENABLED` 是 bool、`create_tool()` 返回实例。
 2. 合法输入 → 合法输出（断言 Output 字段）。
 3. 非法输入被拒：缺字段/错类型/多余字段 → Pydantic ValidationError（strict）。
-4. 写/执行工具在无确认时经 `ToolExecutionManager` 报 `CONFIRMATION_REQUIRED`；持有确认 key 后放行（参考 `tests/test_update_log.py`、`tests/test_git_status.py`）。
-5. 真实依赖用注入替身、临时目录、本地回环服务隔离，禁止真实网络（参考 `tests/test_search.py`、`tests/test_git_status.py`）。
+4. 写/执行工具在无确认时经 `ToolExecutionManager` 报 `CONFIRMATION_REQUIRED`；持有确认 key 后放行（参考 `tests/test_update_log.py`、`tests/test_fs_write_text.py`）。
+5. 真实依赖用注入替身、临时目录、本地回环服务隔离，禁止真实网络（参考 `tests/test_search.py`、`tests/test_fs_read_text.py`）。
 
 运行验证：
 
@@ -101,7 +101,7 @@ print(report.for_tool("<namespace>.<tool_name>").as_dict())  # status == "regist
 
 1. `system.update_log` 留痕（files 含新工具文件与测试文件，action=added）。
 2. 更新 `update_log_readme_first.md` 索引。
-3. `git.commit_push` 提交（消息 `update-log-<id>: ...`，含 `tool/<file>.py`、`tests/test_<file>.py`、`update_log.sqlite3` 与索引文件）。
+3. `git` 提交（消息 `update-log-<id>: ...`，含 `tool/<file>.py`、`tests/test_<file>.py`、`update_log.sqlite3` 与索引文件；开发代理直接执行 git 命令完成）。
 4. 推送远端。
 
 ## 验收清单

@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from constants import RAG_CHUNK_OVERLAP, RAG_CHUNK_SIZE
+
 
 @dataclass(frozen=True)
 class Document:
@@ -50,7 +52,7 @@ class DocumentProcessor:
             return Document(source, metadata=metadata or {})
         raise TypeError("source must be text, bytes, a path, or a text stream")
 
-    def chunks(self, document: Document, *, chunk_size: int = 1000, overlap: int = 100) -> list[Document]:
+    def chunks(self, document: Document, *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[Document]:
         if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
             raise ValueError("chunk_size must be a positive integer")
         if isinstance(overlap, bool) or not isinstance(overlap, int) or overlap < 0 or overlap >= chunk_size:

@@ -19,9 +19,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 from uuid import uuid4
 
-from constants import DEFAULT_MEMORY_DB_FILENAME
+from constants import (
+    DEFAULT_EMBEDDING_BASE_URL,
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_MEMORY_DB_FILENAME,
+    MEMORY_DEFAULT_TTL_SECONDS,
+    MEMORY_EMBEDDING_DIMENSION,
+    MEMORY_EMBEDDING_TIMEOUT,
+    MEMORY_QDRANT_COLLECTION,
+    MEMORY_SEARCH_LIMIT,
+    MEMORY_SIMILARITY_THRESHOLD,
+    MEMORY_SQLITE_DEFAULT,
+    MEMORY_WORKING_CAPACITY,
+)
 
-from .embedding import APIEmbedding, BaseEmbedding, DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL, load_dotenv_once
+from .embedding import APIEmbedding, BaseEmbedding, load_dotenv_once
 
 if TYPE_CHECKING:
     from .storage import BaseDocumentStore, BaseVectorStore
@@ -219,22 +232,22 @@ class MemoryConfig:
     short-lived agents.
     """
 
-    sqlite_path: str | Path = ":memory:"
-    default_ttl_seconds: float | None = 3600.0
-    working_memory_capacity: int = 100
-    search_limit: int = 10
-    similarity_threshold: float = 0.0
+    sqlite_path: str | Path = MEMORY_SQLITE_DEFAULT
+    default_ttl_seconds: float | None = MEMORY_DEFAULT_TTL_SECONDS
+    working_memory_capacity: int = MEMORY_WORKING_CAPACITY
+    search_limit: int = MEMORY_SEARCH_LIMIT
+    similarity_threshold: float = MEMORY_SIMILARITY_THRESHOLD
     # qwen3-embedding-0.6b emits 1024-dimensional vectors.
-    embedding_dimension: int = 1024
+    embedding_dimension: int = MEMORY_EMBEDDING_DIMENSION
     # Embedding provider settings; an API key may also come from the
     # ``DASHSCOPE_API_KEY`` environment variable when left unset here.
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embedding_base_url: str = DEFAULT_EMBEDDING_BASE_URL
     embedding_api_key: str | None = None
-    embedding_timeout: float = 30.0
-    embedding_batch_size: int = 10
+    embedding_timeout: float = MEMORY_EMBEDDING_TIMEOUT
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     qdrant_url: str | None = None
-    qdrant_collection: str = "helloagents_memory"
+    qdrant_collection: str = MEMORY_QDRANT_COLLECTION
     neo4j_uri: str | None = None
     neo4j_username: str | None = None
     neo4j_password: str | None = None

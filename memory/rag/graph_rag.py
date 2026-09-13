@@ -6,6 +6,14 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from constants import (
+    RAG_CONTEXT_MAX_CHARS,
+    RAG_GRAPH_HOPS,
+    RAG_GRAPH_MAX_HOPS,
+    RAG_GRAPH_PATH_LIMIT,
+    RAG_RETRIEVE_LIMIT,
+)
+
 from ..base import MemorySearchResult, MemoryType
 from ..manager import MemoryManager
 
@@ -45,7 +53,7 @@ class GraphRAGResult:
             "entities": list(self.entities),
         }
 
-    def build_context(self, *, max_chars: int = 12000) -> str:
+    def build_context(self, *, max_chars: int = RAG_CONTEXT_MAX_CHARS) -> str:
         parts: list[str] = []
         for result in self.evidence:
             item = result.item
@@ -78,17 +86,17 @@ class GraphRAGPipeline:
         self,
         query: str,
         *,
-        limit: int = 5,
-        hops: int = 1,
+        limit: int = RAG_RETRIEVE_LIMIT,
+        hops: int = RAG_GRAPH_HOPS,
         threshold: float | None = None,
-        path_limit: int = 20,
+        path_limit: int = RAG_GRAPH_PATH_LIMIT,
     ) -> GraphRAGResult:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        if isinstance(hops, bool) or not isinstance(hops, int) or not 0 <= hops <= 3:
-            raise ValueError("hops must be an integer between 0 and 3")
+        if isinstance(hops, bool) or not isinstance(hops, int) or not 0 <= hops <= RAG_GRAPH_MAX_HOPS:
+            raise ValueError(f"hops must be an integer between 0 and {RAG_GRAPH_MAX_HOPS}")
         if (
             isinstance(path_limit, bool)
             or not isinstance(path_limit, int)

@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
+from constants import (
+    RAG_CHUNK_OVERLAP,
+    RAG_CHUNK_SIZE,
+    RAG_CONTEXT_MAX_CHARS,
+    RAG_GRAPH_HOPS,
+    RAG_RETRIEVE_LIMIT,
+)
+
 from ..base import MemoryItem, MemorySearchResult, MemoryType
 from ..manager import MemoryManager
 from .document import Document, DocumentProcessor
@@ -40,7 +48,7 @@ class RAGPipeline:
         self.graph = GraphRAGPipeline(self.manager)
         self.last_ingest_report: dict[str, Any] = {}
 
-    def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = 1000, overlap: int = 100) -> list[MemoryItem]:
+    def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[MemoryItem]:
         values = [documents] if isinstance(documents, Document) else list(documents)
         items: list[MemoryItem] = []
         report = {"chunks": 0, "domains": [], "entities": 0, "relations": 0, "skipped_relations": 0, "errors": []}
@@ -74,21 +82,21 @@ class RAGPipeline:
     def ingest_source(self, source: Any, **kwargs: Any) -> list[MemoryItem]:
         return self.ingest(self.processor.parse(source, metadata=kwargs.pop("metadata", None)), **kwargs)
 
-    def retrieve(self, query: str, *, limit: int = 5, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
+    def retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
         return [RetrievedChunk.from_result(result) for result in self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata)]
 
-    def build_context(self, query: str, *, limit: int = 5, separator: str = "\n\n") -> str:
+    def build_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, separator: str = "\n\n") -> str:
         if not isinstance(separator, str):
             raise TypeError("separator must be a string")
         return separator.join(chunk.content for chunk in self.retrieve(query, limit=limit))
 
-    def graph_retrieve(self, query: str, *, limit: int = 5, hops: int = 1) -> GraphRAGResult:
+    def graph_retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS) -> GraphRAGResult:
         return self.graph.retrieve(query, limit=limit, hops=hops)
 
-    def graph_context(self, query: str, *, limit: int = 5, hops: int = 1, max_chars: int = 12000) -> str:
+    def graph_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS, max_chars: int = RAG_CONTEXT_MAX_CHARS) -> str:
         return self.graph.build_context(query, limit=limit, hops=hops, max_chars=max_chars)
 
-    def answer(self, query: str, generator: Callable[[str], str], *, limit: int = 5) -> str:
+    def answer(self, query: str, generator: Callable[[str], str], *, limit: int = RAG_RETRIEVE_LIMIT) -> str:
         if not callable(generator):
             raise TypeError("generator must be callable")
         context = self.build_context(query, limit=limit)

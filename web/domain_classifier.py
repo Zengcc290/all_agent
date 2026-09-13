@@ -15,8 +15,10 @@
 
 from __future__ import annotations
 
-#: 兜底领域：任何主题关键词都没命中时的归宿。
-DEFAULT = "未分类"
+from constants import DEFAULT_DOMAIN as DEFAULT, DOMAIN_TITLE_WEIGHT
+
+#: 兜底领域：任何主题关键词都没命中时的归宿（常量来源：constants.py）。
+#: （DEFAULT 是 DEFAULT_DOMAIN 的供应商别名，下方两处函数签名仍用 DEFAULT 以保持兼容。）
 
 #: 领域 → 命中关键词表（中英混合，按主题覆盖度维护）。
 #: 关键词按“主题区分度”人工挑选：太通用的词（如“数据”“系统”）容易串类，故不收录。
@@ -71,7 +73,7 @@ DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
 KNOWN_DOMAINS: tuple[str, ...] = tuple(DOMAIN_KEYWORDS.keys())
 
 #: 标题命中的加权系数（文件名常含主题词，如“c语言笔记.txt”）。
-_TITLE_WEIGHT = 3
+#: （常量来源：constants.py 的 DOMAIN_TITLE_WEIGHT。）
 
 
 def classify_domain(text: str, *, title: str = "", default: str = DEFAULT) -> str:
@@ -90,7 +92,7 @@ def classify_domain(text: str, *, title: str = "", default: str = DEFAULT) -> st
         for kw in keywords:
             kw_lower = kw.lower()
             if kw_lower in title_lower:
-                score += _TITLE_WEIGHT
+                score += DOMAIN_TITLE_WEIGHT
             elif kw_lower in text_lower:
                 score += 1
         if score > best_score:

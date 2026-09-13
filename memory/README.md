@@ -99,12 +99,8 @@ manager = MemoryManager(MemoryConfig(sqlite_path="memory.sqlite3"), embedding=em
 因此最简单的方式就是在 `.env` 里写 `DASHSCOPE_API_KEY=sk-...`。若既没有
 显式配置也没有 `DASHSCOPE_API_KEY`，构造管理器时会抛出清晰的错误提示。
 
-验证接入与中文检索效果：
-
-```bash
-.venv\Scripts\python.exe check_embedding.py            # 完整验证（需 key）
-.venv\Scripts\python.exe check_embedding.py --offline  # 只检查配置
-```
+验证接入与中文检索效果：运行
+`pytest tests/test_embedding_api.py tests/test_embedding_http.py`（前者需 key，后者只验配置）。
 
 ## 后端配置
 

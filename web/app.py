@@ -32,6 +32,26 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from constants import (
+    DEFAULT_DOMAIN,
+    MAX_UPLOAD_BYTES,
+    RAG_CHUNK_OVERLAP,
+    RAG_CHUNK_SIZE,
+    RAG_GRAPH_HOPS,
+    RAG_GRAPH_MAX_HOPS,
+    RAG_RETRIEVE_LIMIT,
+    WEB_CHAT_MAX_CHARS,
+    WEB_FACT_DOMAIN_MAX,
+    WEB_FACT_NOTE_MAX,
+    WEB_FACT_OBJECT_MAX,
+    WEB_FACT_PREDICATE_MAX,
+    WEB_FACT_SUBJECT_MAX,
+    WEB_GRAPH_RAG_LIMIT_MAX,
+    WEB_GRAPH_RAG_QUERY_MAX,
+    WEB_INGEST_CHUNK_SIZE,
+    WEB_KNOWLEDGE_MAX_CHARS,
+)
+
 from memory import MemoryManager, MemoryType
 from memory.rag import RAGPipeline
 
@@ -46,30 +66,28 @@ from .support import (
     STATIC_DIR,
 )
 
-MAX_UPLOAD_BYTES = 64 * 1024 * 1024
-
 
 class ChatBody(BaseModel):
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(min_length=1, max_length=WEB_CHAT_MAX_CHARS)
 
 
 class FactBody(BaseModel):
-    subject: str = Field(min_length=1, max_length=200)
-    predicate: str = Field(min_length=1, max_length=100)
-    object: str = Field(min_length=1, max_length=200)
-    domain: str | None = Field(default=None, max_length=100)
-    note: str | None = Field(default=None, max_length=4000)
+    subject: str = Field(min_length=1, max_length=WEB_FACT_SUBJECT_MAX)
+    predicate: str = Field(min_length=1, max_length=WEB_FACT_PREDICATE_MAX)
+    object: str = Field(min_length=1, max_length=WEB_FACT_OBJECT_MAX)
+    domain: str | None = Field(default=None, max_length=WEB_FACT_DOMAIN_MAX)
+    note: str | None = Field(default=None, max_length=WEB_FACT_NOTE_MAX)
     confidence: float = Field(default=1.0, ge=0, le=1)
 
 
 class GraphRAGBody(BaseModel):
-    query: str = Field(min_length=1, max_length=8000)
-    limit: int = Field(default=5, ge=1, le=50)
-    hops: int = Field(default=1, ge=0, le=3)
+    query: str = Field(min_length=1, max_length=WEB_GRAPH_RAG_QUERY_MAX)
+    limit: int = Field(default=RAG_RETRIEVE_LIMIT, ge=1, le=WEB_GRAPH_RAG_LIMIT_MAX)
+    hops: int = Field(default=RAG_GRAPH_HOPS, ge=0, le=RAG_GRAPH_MAX_HOPS)
 
 
 class KnowledgeBody(BaseModel):
-    text: str = Field(min_length=1, max_length=20000)
+    text: str = Field(min_length=1, max_length=WEB_KNOWLEDGE_MAX_CHARS)
 
 
 def create_app(manager: MemoryManager | None = None) -> FastAPI:
@@ -139,8 +157,10 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"
             )
-        invalidate_graph()  # agent 可能写入 episodic 事件
-        retrieval = app.state.pipeline.graph_retrieve(body.message, limit=5, hops=1)
+        invalid_graph()  # agent 可能写入 episodic 事件
+        retrieval = app.state.pipeline.graph_retrieve(
+            body.message, limit=RAG_RETRIEVE_LIMIT, hops=RAG_GRAPH_HOPS
+        )
         return {
             "answer": answer,
             "sources": [
@@ -184,8 +204,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             items = app.state.pipeline.ingest_source(
                 tmp_path,
                 metadata={"source": filename, "filename": filename},
-                chunk_size=800,
-                overlap=100,
+                chunk_size=WEB_INGEST_CHUNK_SIZE,
+                overlap=RAG_CHUNK_OVERLAP,
             )
         except Exception as exc:
             raise HTTPException(
@@ -213,7 +233,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             body.subject,
             body.predicate,
             body.object,
-            metadata={"domain": body.domain or "未分类", "note": body.note or ""},
+            metadata={"domain": body.domain or DEFAULT_DOMAIN, "note": body.note or ""},
             confidence=body.confidence,
         )
         invalidate_graph()
@@ -239,8 +259,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                     "note": text[:400],
                 },
             ),
-            chunk_size=1000,
-            overlap=100,
+            chunk_size=RAG_CHUNK_SIZE,
+            overlap=RAG_CHUNK_OVERLAP,
         )
         report = pipeline.last_ingest_report
         the_manager().episodic.record(

@@ -22,33 +22,25 @@ from __future__ import annotations
 import zlib
 from typing import Any
 
+from constants import (
+    DEFAULT_DOMAIN,
+    DOC_DOMAIN,
+    NEBULA_CONTENT_PREVIEW_CHARS,
+    NEBULA_DATE_CHARS,
+    NEBULA_EVENT_TITLE_CHARS,
+    NEBULA_PALETTE,
+    TIMELINE_DOMAIN,
+    TIMELINE_ENTITY,
+    TIMELINE_ID,
+)
+
 from memory import MemoryItem, MemoryManager
 from web.domain_classifier import classify_domain, majority_domain
 
-#: 领域配色板（与 Aetheria 深空青紫主题协调）。
-PALETTE = [
-    "#38bdf8",  # 青
-    "#c084fc",  # 紫
-    "#f43f5e",  # 玫红
-    "#fbbf24",  # 金
-    "#34d399",  # 绿
-    "#60a5fa",  # 蓝
-    "#f472b6",  # 粉
-    "#a3e635",  # 黄绿
-]
-
-TIMELINE_DOMAIN = "时间线"
-TIMELINE_ENTITY = "事件时间线"
-TIMELINE_ID = "ent:__timeline__"
-# 历史常量（保留以兼容旧引用）：文档知识块已改为按内容自动分类到主题恒星系，
-# 不再统一归入「文档库」。见 web/domain_classifier.py。
-DOC_DOMAIN = "文档库"
-DEFAULT_DOMAIN = "未分类"
-
-
+#: 领域 → 稳定颜色（crc32，跨进程稳定，Python 内建 hash 不稳定）。
 def domain_color(name: str) -> str:
     """领域 → 稳定颜色（crc32，跨进程稳定，Python 内建 hash 不稳定）。"""
-    return PALETTE[zlib.crc32((name or DEFAULT_DOMAIN).encode("utf-8")) % len(PALETTE)]
+    return NEBULA_PALETTE[zlib.crc32((name or DEFAULT_DOMAIN).encode("utf-8")) % len(NEBULA_PALETTE)]
 
 
 def _node(node_id: str, kind: str, title: str, *, content: str = "", domain: str = "",
@@ -190,7 +182,7 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
             docs[document_id]["domains"].append(chunk_domain)
         nodes[item.id] = _node(
             item.id, "chunk", f"{md.get('filename', '片段')} #{md.get('chunk_index')}",
-            content=item.content[:400], domain=chunk_domain, date=_date(item),
+            content=item.content[:NEBULA_CONTENT_PREVIEW_CHARS], domain=chunk_domain, date=_date(item),
             importance=item.importance, parent=docs[document_id]["node"]["id"],
             source=md.get("filename") or md.get("source"),
         )
@@ -211,7 +203,7 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
                 or (md.get("document_id") is not None and "chunk_index" in md):
             continue
         nodes[item.id] = _node(
-            item.id, "event", md.get("title") or item.content[:24], content=item.content,
+            item.id, "event", md.get("title") or item.content[:NEBULA_EVENT_TITLE_CHARS], content=item.content,
             domain=TIMELINE_DOMAIN, date=_date(item), importance=item.importance,
             parent=TIMELINE_ID,
         )
@@ -241,7 +233,7 @@ def _date(item: MemoryItem) -> str:
     try:
         return created.date().isoformat()
     except AttributeError:
-        return str(created)[:10]
+        return str(created)[:NEBULA_DATE_CHARS]
 
 
-__all__ = ["build_graph", "domain_color", "PALETTE"]
+__all__ = ["build_graph", "domain_color", "NEBULA_PALETTE"]

@@ -91,8 +91,11 @@ _EXPLICIT_FINAL_RE = re.compile(
 )
 # A provider that keeps emitting unmarked (or malformed) protocol answers even
 # after repeated corrections must not pin the loop until the round cap.
-_UNMARKED_ANSWER_RETRY_LIMIT = 3
-_MALFORMED_ANSWER_RETRY_LIMIT = 3
+# 常量来源：constants.py（agents/react.py）
+from constants import (
+    REACT_MALFORMED_ANSWER_RETRY_LIMIT,
+    REACT_UNMARKED_ANSWER_RETRY_LIMIT,
+)
 
 
 @dataclass(frozen=True)
@@ -926,7 +929,7 @@ class ReActAgent(Agent):
                     and self._should_require_tool_action(request_messages, registrations)
                 ):
                     unmarked_answer_retries += 1
-                    if unmarked_answer_retries <= _UNMARKED_ANSWER_RETRY_LIMIT:
+                    if unmarked_answer_retries <= REACT_UNMARKED_ANSWER_RETRY_LIMIT:
                         protocol_error = (
                             "You returned an unmarked answer before using the available "
                             "tools. This request requires tool evidence. Do not answer "
@@ -959,7 +962,7 @@ class ReActAgent(Agent):
 
             if parsed.error is not None and not parsed.has_action:
                 malformed_answer_retries += 1
-                if malformed_answer_retries <= _MALFORMED_ANSWER_RETRY_LIMIT:
+                if malformed_answer_retries <= REACT_MALFORMED_ANSWER_RETRY_LIMIT:
                     log_react_parse_issue(round_number, parsed.error)
                     conversation.append(
                         {
