@@ -14,6 +14,8 @@ from constants import (
     DEFAULT_TIMEOUT,
 )
 
+from .message_utils import field
+
 LOGGER = logging.getLogger(__name__)
 
 # Line-start final-answer markers shared by the ReAct text protocol. The live
@@ -447,6 +449,6 @@ class LLM:
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)
+    """Backward-compatible alias for :func:`message_utils.field`."""
+
+    return field(value, key, default)

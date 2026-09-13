@@ -44,6 +44,14 @@ from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
 
 from .llm import EchoMode, LLM
+from .message_utils import (
+    field as _field,
+    message_dict as _message_dict,
+    result_json as _result_json,
+    safe_tool_call_error as _safe_tool_call_error,
+    safe_tool_name as _safe_tool_name,
+    tool_call_dict as _tool_call_dict,
+)
 from .providers import ProviderProfile, ProviderRegistry
 
 
@@ -1076,56 +1084,6 @@ def _strict_function_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _safe_tool_name(value: Any) -> str:
-    name = value.strip() if isinstance(value, str) else "unknown.tool"
-    return (name or "unknown.tool")[:200]
-
-
-def _safe_tool_call_error(error: Exception) -> str:
-    message = str(error) or type(error).__name__
-    return message[:1000]
-
-
-def _message_dict(message: Any) -> dict[str, Any]:
-    if hasattr(message, "model_dump"):
-        data = message.model_dump(exclude_none=True)
-    elif isinstance(message, dict):
-        data = dict(message)
-    else:
-        data = {
-            key: value
-            for key in ("role", "content", "tool_calls")
-            if (value := getattr(message, key, None)) is not None
-        }
-    data.setdefault("role", "assistant")
-    if "tool_calls" in data and data["tool_calls"] is not None:
-        data["tool_calls"] = [_tool_call_dict(item) for item in data["tool_calls"]]
-    return data
-
-
-def _tool_call_dict(item: Any) -> dict[str, Any]:
-    """Convert SDK tool-call objects to JSON-compatible assistant messages."""
-    function = _field(item, "function")
-    result: dict[str, Any] = {
-        "id": _field(item, "id"),
-        "type": _field(item, "type", "function"),
-        "function": {
-            "name": _field(function, "name"),
-            "arguments": _field(function, "arguments", "{}"),
-        },
-    }
-    return {key: value for key, value in result.items() if value is not None}
-
-
-def _result_json(result: Any) -> str:
-    """Serialize tool results for providers, including permissive Any fields."""
-    try:
-        payload = result.model_dump(mode="json")
-    except Exception:  # noqa: BLE001
-        payload = result.model_dump()
-    return json.dumps(payload, ensure_ascii=False, default=str)
-
-
 def compress_saved_history(
     conversation: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1198,9 +1156,3 @@ def _observation_stub(payload: str) -> str:
         f"{OBSERVATION_STUB_PREFIX} | 原始大小: {len(payload):,} 字符 | "
         f"预览: {preview}... | 如需完整数据请让 AI 重新调用同一工具查询。]"
     )
-
-
-def _field(value: Any, key: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)
