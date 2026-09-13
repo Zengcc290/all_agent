@@ -529,32 +529,50 @@ def materialize_extraction(
         canonical_by_key[_normalize_for_match(candidate.name)] = canonical
         entities += 1
 
-    # One index refresh covers every patch in this chunk; the resolver mirror
-    # stays valid because every fact write below goes through add_fact only.
-    known_items: dict[str, MemoryItem] = {}
-    for item in manager.semantic.facts():
+    # One index covers every patch in this chunk; the resolver mirror stays valid
+    # because every fact write below goes through add_fact only. The index maps a
+    # slot to *all* its facts: a single-valued slot can legitimately hold several
+    # active rows (历史数据、并发抽取), and supersede must retire every one of
+    # them rather than whichever row happened to be cached first.
+    known_items: dict[str, list[MemoryItem]] = {}
+    facts_indexed = False
+
+    def slot_key(subject: str, predicate: str) -> str:
+        return f"{normalize_entity_name(subject)}|{normalize_entity_name(predicate)}"
+
+    def index_all_facts() -> None:
+        nonlocal facts_indexed
+        if facts_indexed:
+            return
+        facts_indexed = True
+        for item in manager.semantic.facts():
+            subject = str(item.metadata.get("subject") or "")
+            predicate = str(item.metadata.get("predicate") or "")
+            if subject and predicate:
+                known_items.setdefault(slot_key(subject, predicate), []).append(item)
+
+    def remember(item: MemoryItem) -> None:
+        """Refresh the cached copies after one fact write in this chunk."""
         subject = str(item.metadata.get("subject") or "")
         predicate = str(item.metadata.get("predicate") or "")
-        if subject and predicate:
-            known_items.setdefault(
-                f"{normalize_entity_name(subject)}|{normalize_entity_name(predicate)}",
-                item,
-            )
+        if not subject or not predicate:
+            return
+        index_all_facts()
+        slot = known_items.setdefault(slot_key(subject, predicate), [])
+        for position, cached in enumerate(slot):
+            if cached.id == item.id:
+                slot[position] = item
+                return
+        slot.append(item)
 
     def facts_for(subject: str, predicate: str) -> list[MemoryItem]:
-        key = f"{normalize_entity_name(subject)}|{normalize_entity_name(predicate)}"
-        cached = known_items.get(key)
-        if cached is not None and cached.metadata.get("active", True) is not False:
-            return [cached]
-        values = [
+        """Return every active fact sharing one (subject, predicate) slot."""
+        index_all_facts()
+        return [
             item
-            for item in manager.semantic.facts()
-            if item.metadata.get("subject") == subject
-            and item.metadata.get("predicate") == predicate
+            for item in known_items.get(slot_key(subject, predicate), [])
+            if item.metadata.get("active", True) is not False
         ]
-        for item in values:
-            known_items[key] = item
-        return values
 
     def resolve_endpoint(name: str) -> str:
         cached = canonical_by_key.get(_normalize_for_match(name))
@@ -618,6 +636,7 @@ def materialize_extraction(
                     item_id=relation_id,
                 )
             )
+            remember(relation_items[-1])
             retracted += 1
             continue
 
@@ -637,13 +656,15 @@ def materialize_extraction(
                         "superseded_by": relation_id,
                     }
                 )
-                manager.semantic.add_fact(
-                    subject,
-                    candidate.predicate,
-                    str(stale.metadata.get("object") or ""),
-                    metadata=stale_metadata,
-                    confidence=float(stale.importance),
-                    item_id=stale.id,
+                remember(
+                    manager.semantic.add_fact(
+                        subject,
+                        candidate.predicate,
+                        str(stale.metadata.get("object") or ""),
+                        metadata=stale_metadata,
+                        confidence=float(stale.importance),
+                        item_id=stale.id,
+                    )
                 )
                 superseded_by.append(stale.id)
                 superseded += 1
@@ -667,16 +688,16 @@ def materialize_extraction(
             "superseded_at": "",
             "supersedes": superseded_by,
         }
-        relation_items.append(
-            manager.semantic.add_fact(
-                subject,
-                candidate.predicate,
-                object_name,
-                metadata=fact_metadata,
-                confidence=candidate.confidence,
-                item_id=relation_id,
-            )
+        written = manager.semantic.add_fact(
+            subject,
+            candidate.predicate,
+            object_name,
+            metadata=fact_metadata,
+            confidence=candidate.confidence,
+            item_id=relation_id,
         )
+        remember(written)
+        relation_items.append(written)
         relations += 1
 
     return {

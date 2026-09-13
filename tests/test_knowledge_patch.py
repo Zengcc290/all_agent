@@ -428,3 +428,67 @@ def test_graph_context_feeds_known_entities_and_trims_whole_lines():
         line.endswith("：") or line.startswith("- ") or "--" in line
         for line in squeezed.splitlines()
     )
+
+
+def test_supersede_retires_every_active_value_in_the_slot():
+    """回归：单值槽内有多个 active 旧值时，supersede 必须全部退役。
+
+    历史缺陷：``materialize_extraction`` 的 ``known_items`` 用 ``setdefault``
+    让每个 (subject, predicate) 槽只缓存一条，``facts_for`` 命中即返回该条，
+    槽内其余 active 旧值永远不会进入退役循环，图里因此同时存在多个「当前值」。
+    """
+
+    manager = _manager()
+    pipeline = RAGPipeline(manager)
+
+    # 直接构造历史脏数据：同一单值槽两个 active 值。
+    manager.semantic.add_fact(
+        "web 中转站", "余额", "1 元", metadata={"active": True}, confidence=0.9
+    )
+    manager.semantic.add_fact(
+        "web 中转站", "余额", "2 元", metadata={"active": True}, confidence=0.9
+    )
+
+    class Extractor:
+        def extract(self, text, *, metadata=None, graph_context=""):
+            return ExtractionResult(
+                domain="中转站",
+                entities=[
+                    EntityCandidate(name="web 中转站", entity_type="中转站"),
+                    EntityCandidate(name="0 元", entity_type="状态"),
+                ],
+                relations=[
+                    RelationCandidate(
+                        subject="web 中转站",
+                        predicate="余额",
+                        object="0 元",
+                        action="supersede",
+                        cardinality="single",
+                        confidence=0.95,
+                        evidence="当前 web 没有余额了",
+                    )
+                ],
+            )
+
+    pipeline.extractor = Extractor()
+    pipeline.ingest(
+        Document("当前 web 没有余额了。", metadata={"filename": "multi-active.txt"})
+    )
+
+    active = sorted(
+        str(item.metadata.get("object"))
+        for item in manager.semantic.facts()
+        if item.metadata.get("subject") == "web 中转站"
+        and item.metadata.get("predicate") == "余额"
+        and item.metadata.get("active", True) is not False
+    )
+    assert active == ["0 元"]
+    # 历史仍然可审计：被退役的旧值保留在库里。
+    retired = sorted(
+        str(item.metadata.get("object"))
+        for item in manager.semantic.facts()
+        if item.metadata.get("subject") == "web 中转站"
+        and item.metadata.get("predicate") == "余额"
+        and item.metadata.get("active") is False
+    )
+    assert retired == ["1 元", "2 元"]
