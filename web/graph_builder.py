@@ -23,6 +23,7 @@ import zlib
 from typing import Any
 
 from memory import MemoryItem, MemoryManager
+from web.domain_classifier import classify_domain, majority_domain
 
 #: 领域配色板（与 Aetheria 深空青紫主题协调）。
 PALETTE = [
@@ -39,6 +40,8 @@ PALETTE = [
 TIMELINE_DOMAIN = "时间线"
 TIMELINE_ENTITY = "事件时间线"
 TIMELINE_ID = "ent:__timeline__"
+# 历史常量（保留以兼容旧引用）：文档知识块已改为按内容自动分类到主题恒星系，
+# 不再统一归入「文档库」。见 web/domain_classifier.py。
 DOC_DOMAIN = "文档库"
 DEFAULT_DOMAIN = "未分类"
 
@@ -162,29 +165,43 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
             parent=parent, source=md.get("filename") or md.get("source"),
         )
 
-    # --- RAG 知识块：按 document_id 聚成「文档实体」的卫星 ---
+    # --- RAG 知识块：按 document_id 聚成「文档实体」的卫星，并按内容自动分类 ---
     docs: dict[str, dict[str, Any]] = {}
     for item in items:
         md = item.metadata
         if md.get("document_id") is None or "chunk_index" not in md:
             continue
         document_id = str(md["document_id"])
+        # 自动领域分类：每块按正文内容归到对应恒星系，不再统一堆进「文档库」
+        chunk_domain = classify_domain(
+            item.content, title=md.get("filename") or md.get("source") or ""
+        )
         if document_id not in docs:
             filename = md.get("filename") or md.get("source") or document_id
             doc_id = f"doc:{document_id}"
             nodes[doc_id] = _node(
                 doc_id, "entity", f"文档：{filename}", content=str(md.get("source") or ""),
-                domain=DOC_DOMAIN, date=_date(item), importance=0.5,
-                parent=domain_node(DOC_DOMAIN), source=filename,
+                domain=chunk_domain, date=_date(item), importance=0.5,
+                parent=domain_node(chunk_domain), source=filename,
             )
-            docs[document_id] = nodes[doc_id]
+            # 文档实体最终挂到本文档多数知识块的主题恒星系下（而非固定「文档库」）
+            docs[document_id] = {"node": nodes[doc_id], "domains": [chunk_domain]}
+        else:
+            docs[document_id]["domains"].append(chunk_domain)
         nodes[item.id] = _node(
             item.id, "chunk", f"{md.get('filename', '片段')} #{md.get('chunk_index')}",
-            content=item.content[:400], domain=DOC_DOMAIN, date=_date(item),
-            importance=item.importance, parent=docs[document_id]["id"],
+            content=item.content[:400], domain=chunk_domain, date=_date(item),
+            importance=item.importance, parent=docs[document_id]["node"]["id"],
             source=md.get("filename") or md.get("source"),
         )
         nodes[item.id]["meta"]["document_id"] = document_id
+
+    # 文档实体按众数领域重挂恒星系（众数才决定位置；单个块跨类不受影响）
+    for doc in docs.values():
+        node = doc["node"]
+        node["domain"] = majority_domain(doc["domains"])
+        node["parent"] = domain_node(node["domain"])
+        node["color"] = domain_color(node["domain"])
 
     # --- 其余：事件卫星（episodic/working/perceptual 等） ---
     for item in items:

@@ -14,8 +14,9 @@ SimKGC 数据格式（https://github.com/intfloat/SimKGC，WN18RR / FB15k237 / w
   python scripts/import_simkgc.py --dir data/FB15k237 --limit 500
   python scripts/import_simkgc.py --dir data/WN18RR --limit 100 --definitions wordnet-mlj12-definitions.txt
 
-⚠️ 规模红线：前端 Canvas2D 渲染上限约 500 节点。WN18RR train 有 4 万余三元组，
-FB15k237 有 27 万+；全量导入必然卡死前端。请务必用 --limit 限量导入（建议 200~500 条）。
+⚠️ 容量说明：2D 星空改版（update-log-64）后前端支持 5000+ 节点流畅、上限约 5 万。
+WN18RR train 有 4 万余三元组、FB15k237 有 27 万+；全量导入会显著拖慢入库耗时与首屏。
+建议分批导入（--limit 2000~3000 起步，--offset 递增），或按实体数规划总量。
 """
 from __future__ import annotations
 
