@@ -27,6 +27,7 @@ from memory.rag import (
     RAGPipeline,
     RelationCandidate,
 )
+from memory.rag.knowledge import build_graph_context
 
 
 def _manager() -> MemoryManager:
@@ -555,3 +556,68 @@ def test_supersede_retires_every_active_value_in_the_slot():
         and item.metadata.get("active") is False
     )
     assert retired == ["1 元", "2 元"]
+
+
+def test_build_graph_context_reuses_the_supplied_resolver():
+    """回归：build_graph_context 过去每次都自建 EntityResolver，等于每个 chunk
+    全量重载一次实体；接入 ingest 级 resolver 后必须复用同一份索引。"""
+
+    manager = _manager()
+    resolver = EntityResolver(manager)
+    resolver.resolve("web 中转站", domain="中转站", aliases=["web"])
+    manager.semantic.add_fact("web 中转站", "余额", "1 元")
+
+    # 注入的 resolver 生效：不传则内部自建。
+    injected = build_graph_context(
+        manager, "web 中转站的余额是多少", resolver=resolver
+    )
+    assert "web 中转站" in injected
+
+    original_init = EntityResolver.__init__
+    calls: list[int] = []
+
+    def counting_init(self, *args, **kwargs):  # noqa: ANN001 - test double
+        calls.append(1)
+        return original_init(self, *args, **kwargs)
+
+    EntityResolver.__init__ = counting_init  # type: ignore[method-assign]
+    try:
+        build_graph_context(manager, "web 中转站的余额是多少", resolver=resolver)
+        assert calls == [], "注入 resolver 时不得再次全量加载实体"
+        build_graph_context(manager, "web 中转站的余额是多少")
+        assert len(calls) == 1, "未注入时仍应自建 resolver，保持独立可用"
+    finally:
+        EntityResolver.__init__ = original_init  # type: ignore[method-assign]
+
+
+def test_ingest_builds_one_resolver_per_call(monkeypatch):
+    """整次 ingest 只构造一个 EntityResolver（不再每个 chunk 重载实体）。"""
+
+    class Extractor:
+        def extract(self, text, *, metadata=None, graph_context=""):
+            return ExtractionResult(
+                domain="中转站",
+                entities=[EntityCandidate(name="web 中转站")],
+                relations=[],
+            )
+
+    manager = _manager()
+    pipeline = RAGPipeline(manager, extractor=Extractor())
+
+    created: list[int] = []
+    original_init = EntityResolver.__init__
+
+    def counting_init(self, *args, **kwargs):  # noqa: ANN001 - test double
+        created.append(1)
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(EntityResolver, "__init__", counting_init)
+    items = pipeline.ingest(
+        Document("x" * 2000, metadata={"filename": "many-chunks.txt"}),
+        chunk_size=200,
+        overlap=0,
+    )
+
+    assert len(items) > 1, "用例需要多 chunk 才有意义"
+    # 修复前：每个 chunk 在 build_graph_context 里各建一个 resolver。
+    assert len(created) == 1

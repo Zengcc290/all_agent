@@ -103,7 +103,9 @@ class RAGPipeline:
                     # Feed the relevant subgraph to the extractor first, so the
                     # model reuses canonical entity names and retire the right
                     # old value instead of inventing a second entity.
-                    graph_context = build_graph_context(self.manager, chunk.content)
+                    graph_context = build_graph_context(
+                        self.manager, chunk.content, resolver=resolver
+                    )
                     if accepts_context:
                         extraction = self.extractor.extract(
                             chunk.content,

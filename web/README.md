@@ -47,15 +47,16 @@
 LLM 抽取 domain/entity/relation ────────────────┘
         │                                            │
         ▼                                            ▼
-Agent 工具 memory.manage / memory.rag          星云图 nodes+edges
-（同一份记忆 = 记忆共享）                    （恒星=领域 行星=实体 卫星=事实/知识块）
+Agent 工具 memory.query / memory.add /          星云图 nodes+edges
+memory.rag_search / memory.rag                  （恒星=领域 行星=实体 卫星=事实/知识块）
+（同一份记忆 = 记忆共享）
 ```
 
 ## 结构
 
 - `app.py` —— FastAPI 路由与应用工厂（`create_app(manager=None)` 可注入测试内存库）
 - `graph_builder.py` —— 记忆项 → 星云 nodes/edges 的映射规则
-- `support.py` —— HashEmbedding 离线降级、单例、聊天可用性检测
+- `support.py` —— 单例、聊天可用性与嵌入装配（离线降级实现由 `memory.embedding.HashEmbedding` 提供）
 - `seed.py` —— Aetheria 种子数据播种（幂等，可用 `WEB_AUTOSEED=0` 关闭自动播种）
 - `static/index.html` —— 星云图前端（改造自 Aetheria 单文件 HTML）
 - `seed_data.json` —— 种子数据（从原 HTML 的 celestialTree 提取）

@@ -13,22 +13,27 @@ function-level LLM/tool call chain.
 
 ## On-demand skills
 
-`Agent` also scans the `skills` directory (one subdirectory per skill, each
-containing a `SKILL.md`) and registers a `system.skill_catalog` tool. Only
+`Agent` also scans the flat `skills` directory (one Markdown file per skill,
+`skills/<name>.md`) and registers a `system.skill_catalog` tool. Only
 skill names, descriptions, versions, and triggers stay in the persistent
 system message; the model loads the full instruction content on demand with
 `system.skill_catalog` (`action: view`), so skill bodies never fragment the
 prompt prefix cache. Adding, removing, or editing a skill changes the prompt
-cache key, starting a new cache namespace. Skill directories never execute
+cache key, starting a new cache namespace. Markdown skill files never execute
 code. See [skills/README.md](skills/README.md) for the Chinese authoring guide.
 
 ## Runtime logs
 
-The runtime prints timestamped activity logs to the console. Each successful
-tool registration includes the tool name and the complete current registry;
-each ReAct round prints its number, model and tool durations, parsed Thought,
-tool names being called, and the final answer. Raw tool arguments and return
-values are omitted to keep the output readable.
+Console output is deliberately narrow (`core/activity_log.py`). The activity
+stream shows the parsed `Thought` of each ReAct round, the names of the tools
+about to be called, the model round latency, and the tool-call latency; tool
+arguments and return values are never printed, so a large tool result cannot
+flood the terminal. Protocol problems are surfaced as warnings
+(`工具调用格式问题`). Tool registration, discovery summaries, round starts and
+final answers are intentionally silent, so a normal run prints only the round
+lines above. The logger is `all_agent.activity` and prints through `print`
+(one `[HH:MM:SS]` prefixed line per event); attach your own handler or set the
+level if you need the rest.
 
 Every model request also includes a system message listing all registered tool
 names. In the explicit lazy-loading mode this can include repository-only tools
@@ -115,3 +120,28 @@ current `Agent` tool runtime. See [`memory/README.md`](memory/README.md) for
 usage and backend configuration.
 
 Copy `.env.example` to `.env` and provide credentials locally. Never commit `.env`.
+
+## 知识星云 Web application
+
+The repository also ships an optional FastAPI application that exposes the
+memory system as an HTTP API and serves a Canvas 2D knowledge-graph front end
+("知识星云"): chat with the knowledge agent, upload documents for RAG chunking
+plus LLM entity/relation extraction, add facts or single sentences, inspect the
+graph, run hybrid graph+vector retrieval, and export/import the whole memory
+store as JSON.
+
+```powershell
+# run from the project root
+.venv\Scripts\python.exe -m web.app
+# open http://127.0.0.1:8765
+```
+
+It starts without any API key: retrieval falls back to the offline
+`HashEmbedding`, and `/api/chat` returns 503 with a configuration hint until a
+chat provider is configured. Set `NEBULA_PORT` to use another port. See
+[`web/README.md`](web/README.md) for the endpoint table, the data flow and the
+static front end layout.
+
+The `skills/` and `config/` directories are resolved relative to the project
+root and are therefore meant to run from a checkout (`python -m web.app`); they
+are not embedded in the built wheel.

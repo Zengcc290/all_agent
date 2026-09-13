@@ -316,7 +316,7 @@ def test_chat_records_qa_into_episodic_memory(
     assert "asked_at" in meta
     assert qa_items[0].timestamp is not None
 
-    # 端到端：模拟 agent 用 memory.manage 检索（不指定 memory_type 应能命中）
+    # 端到端：模拟 agent 用 memory.query 检索（不指定 memory_type 应能命中）
     from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
     tool = MemoryQueryTool(manager=client.app.state.manager)

@@ -1,12 +1,15 @@
 """HelloAgents four-layer memory system.
 
 Applications opt in with ``from memory import MemoryManager``; the built-in
-``memory.manage`` and ``memory.rag`` agent tools reuse the same package.
+agent tools (``memory.query``/``memory.add``/``memory.manage`` and
+``memory.rag_search``/``memory.rag``) reuse the same package.
 
 Package layout:
 
 - ``base``      data structures (``MemoryItem``, ``MemoryConfig``) and ``BaseMemory``
-- ``embedding`` vendor-neutral API embedding (qwen3-embedding-0.6b via OpenAI-compatible endpoint)
+- ``embedding`` API embedding (qwen3-embedding-0.6b via an OpenAI-compatible
+                endpoint) plus the deterministic offline ``HashEmbedding``
+- ``ids``       stable entity/fact id derivation shared by the RAG writers
 - ``types``     working, episodic, semantic and perceptual memories
 - ``storage``   SQLite documents, local/Qdrant vector indexes, Neo4j graph
 - ``rag``       document parsing, chunking and the RAG pipeline

@@ -680,6 +680,7 @@ def build_graph_context(
     manager: MemoryManager,
     text: str,
     *,
+    resolver: EntityResolver | None = None,
     max_relations: int = GRAPH_CONTEXT_MAX_RELATIONS,
     max_chars: int = RAG_CONTEXT_MAX_CHARS,
 ) -> str:
@@ -689,6 +690,11 @@ def build_graph_context(
     name or a known alias appears in the text, or when a distinctive prefix is
     shared. Retrieved entities expand one hop, so the model can reuse canonical
     names and retire the right old value instead of inventing a second planet.
+
+    ``resolver`` is injectable so one ingest call can pass its chunk-shared
+    :class:`EntityResolver`: building one here would re-scan every stored entity
+    once per chunk. A fresh resolver is created when the caller has none, which
+    keeps the standalone helper usable.
     """
 
     if (
@@ -700,7 +706,7 @@ def build_graph_context(
         or max_chars < 1
     ):
         raise ValueError("max_relations and max_chars must be positive integers")
-    resolver = EntityResolver(manager)
+    resolver = resolver if resolver is not None else EntityResolver(manager)
     seeds: dict[str, MemoryItem] = {}
     folded = (text or "").casefold()
     if not folded.strip():
