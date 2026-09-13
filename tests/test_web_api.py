@@ -273,6 +273,62 @@ def test_chat_tool_names_follow_mode(
     assert "web.search" not in agent.last_tool_names
 
 
+def test_chat_serializes_concurrent_requests(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发问答必须排队：agent 是共享单例，其对话历史无内部锁。
+
+    未串行化时第二个请求会在第一个尚未结束时进入 agent.run，两者读写同一份
+    历史并互相污染。
+    """
+    import threading
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    entered_order: list[str] = []
+    order_lock = threading.Lock()
+
+    class BlockingAgent:
+        class _Tools:
+            def snapshot(self):
+                return {"memory.rag": None, "memory.manage": None}
+
+        tools = _Tools()
+
+        def run(self, query: str, **kwargs):
+            with order_lock:
+                entered_order.append(query)
+            entered.set()
+            release.wait(timeout=10)
+            return f"answer:{query}"
+
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: BlockingAgent())
+
+    results: list[int] = []
+
+    def call(message: str) -> None:
+        results.append(client.post("/api/chat", json={"message": message}).status_code)
+
+    first = threading.Thread(target=call, args=("q1",))
+    first.start()
+    assert entered.wait(timeout=10), "第一个请求未进入 agent.run"
+
+    second = threading.Thread(target=call, args=("q2",))
+    second.start()
+    time.sleep(0.3)  # 给第二个请求足够机会进入（若未串行化则会进入）
+
+    assert entered_order == ["q1"], "第二个请求与第一个并发进入了 agent.run"
+
+    release.set()
+    first.join(timeout=15)
+    second.join(timeout=15)
+
+    assert sorted(results) == [200, 200]
+    assert entered_order == ["q1", "q2"]
+
+
 def test_knowledge_sentence_ingests_and_extracts(client: TestClient) -> None:
     from memory.rag import RAGPipeline
 

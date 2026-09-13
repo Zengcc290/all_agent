@@ -567,3 +567,57 @@ async def test_run_auto_rejects_profiles_with_tool_mode_none(tmp_path):
 
     with pytest.raises(ValueError, match="tool_mode = 'none'"):
         await agent.run_auto("echo 7")
+
+
+def test_trim_saved_history_bounds_growth_and_keeps_system_prefix():
+    from agents.agent import trim_saved_history
+    from constants import HISTORY_MAX_MESSAGES
+
+    conversation = [{"role": "system", "content": "PROMPT"}]
+    for index in range(HISTORY_MAX_MESSAGES * 2):
+        conversation.append({"role": "user", "content": f"q{index}"})
+        conversation.append({"role": "assistant", "content": f"a{index}"})
+
+    trimmed = trim_saved_history(conversation)
+
+    assert len(trimmed) <= HISTORY_MAX_MESSAGES + 1
+    assert trimmed[0] == {"role": "system", "content": "PROMPT"}
+    # 保留的是最近的轮次
+    assert trimmed[-1]["content"] == f"a{HISTORY_MAX_MESSAGES * 2 - 1}"
+
+
+def test_trim_saved_history_drops_orphaned_observation():
+    from agents.agent import trim_saved_history
+
+    conversation = [
+        {"role": "system", "content": "PROMPT"},
+        {"role": "assistant", "content": "Action: demo.echo"},
+        {"role": "user", "content": "Observation: 旧工具结果"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a"},
+    ]
+
+    trimmed = trim_saved_history(conversation, max_messages=2)
+
+    assert trimmed[0] == {"role": "system", "content": "PROMPT"}
+    assert all(
+        not str(message.get("content", "")).startswith("Observation: ")
+        for message in trimmed
+    )
+
+
+def test_save_history_applies_message_cap():
+    from constants import HISTORY_MAX_MESSAGES
+
+    agent = DemoAgent("history-cap-test", llm=None, auto_discover_tools=False)
+    conversation = [{"role": "system", "content": "PROMPT"}]
+    conversation.extend(
+        {"role": "user", "content": f"m{index}"}
+        for index in range(HISTORY_MAX_MESSAGES * 3)
+    )
+
+    agent._save_history("bucket", conversation)
+
+    stored = agent._profile_histories["bucket"]
+    assert len(stored) <= HISTORY_MAX_MESSAGES + 1
+    assert stored[0]["content"] == "PROMPT"

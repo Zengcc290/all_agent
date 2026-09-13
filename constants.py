@@ -49,6 +49,10 @@ OBSERVATION_COMPRESS_THRESHOLD = 12_000
 OBSERVATION_STUB_PREFIX = "[已压缩的历史工具结果"
 OBSERVATION_PREVIEW_CHARS = 400
 
+#: 单条会话历史保留的最大消息数（保留开头的 system 前缀，只裁剪旧对话轮）。
+#: 不设上限时历史会无限增长：每轮都把全部历史重发给模型，token 成本线性上升。
+HISTORY_MAX_MESSAGES = 60
+
 # ---------------------------------------------------------------------------
 # 技能包（skills/<name>.md）校验与发现
 #   所在文件：core/skill_models.py、core/skill_discovery.py、core/skill_registry.py

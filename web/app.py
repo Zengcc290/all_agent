@@ -106,6 +106,10 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             app.state.manager,
             extractor=build_knowledge_extractor(),
         )
+        # 知识管家是进程级单例，且其对话历史是一份共享的可变状态：并发问答会
+        # 互相覆盖历史。这里串行化聊天请求（单人本地应用，排队是可接受的代价）。
+        # 在 lifespan 内创建以保证锁绑定到当前事件循环。
+        app.state.chat_lock = asyncio.Lock()
         if os.getenv("WEB_AUTOSEED", "1") != "0":
             # 首次启动自动播种，让星云图一打开就有内容。
             seed(app.state.manager)
@@ -161,9 +165,12 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         effective_mode = "online" if tool_names is None else "offline"
         try:
             # agent.run 是同步阻塞调用，丢进线程避免卡住事件循环。
-            answer = await asyncio.to_thread(
-                agent.run, body.message, tool_names=tool_names
-            )
+            # chat_lock：agent 是共享单例且内部历史无锁，串行化避免并发问答
+            # 互相污染上下文（后发请求排队，而不是并发改写同一份历史）。
+            async with app.state.chat_lock:
+                answer = await asyncio.to_thread(
+                    agent.run, body.message, tool_names=tool_names
+                )
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"

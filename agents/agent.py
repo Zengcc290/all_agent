@@ -34,6 +34,7 @@ from constants import (
     DEFAULT_SKILLS_ROOT,
     DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT,
+    HISTORY_MAX_MESSAGES,
     OBSERVATION_COMPRESS_THRESHOLD,
     OBSERVATION_PREVIEW_CHARS,
     OBSERVATION_STUB_PREFIX,
@@ -77,9 +78,15 @@ class Agent(ABC):
         return protocol
 
     def _save_history(self, history_key: str, conversation: list[dict[str, Any]]) -> None:
-        """Persist the conversation with oversized tool payloads compressed."""
+        """Persist the conversation with oversized tool payloads compressed.
+
+        The stored history replaces the configured prompt on the next turn, so
+        the leading ``system`` block must survive trimming; only old turns are
+        dropped once the message count exceeds ``HISTORY_MAX_MESSAGES``.
+        """
 
         compressed = compress_saved_history(conversation)
+        compressed = trim_saved_history(compressed)
         self._profile_histories[history_key] = compressed
         self.history = [dict(item) for item in compressed]
 
@@ -1151,6 +1158,38 @@ def compress_saved_history(
         else:
             compressed.append(dict(message))
     return compressed
+
+
+def trim_saved_history(
+    conversation: list[dict[str, Any]],
+    *,
+    max_messages: int = HISTORY_MAX_MESSAGES,
+) -> list[dict[str, Any]]:
+    """Bound the persisted history while keeping the leading ``system`` block.
+
+    Without this cap every turn resends the entire conversation, so token cost
+    grows without limit for a long-lived agent. Older turns are dropped from the
+    front; an ``Observation`` orphaned by the cut is dropped too, because it
+    would otherwise appear without the action that produced it.
+    """
+
+    if max_messages < 1 or len(conversation) <= max_messages:
+        return conversation
+
+    leading: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for message in conversation:
+        if not rest and message.get("role") == "system":
+            leading.append(dict(message))
+            continue
+        rest.append(dict(message))
+    if len(rest) <= max_messages:
+        return conversation
+
+    kept = rest[-max_messages:]
+    while kept and str(kept[0].get("content", "")).startswith("Observation: "):
+        kept = kept[1:]
+    return leading + kept
 
 
 def _observation_stub(payload: str) -> str:
