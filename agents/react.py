@@ -14,7 +14,6 @@ metadata and are not used as an authorization gate.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import importlib
 import inspect
@@ -48,7 +47,7 @@ from core.activity_log import (
 )
 from constants import DEFAULT_TEMPERATURE, DEFAULT_TIMEOUT
 from core.registry import BaseTool
-from core.parser import parse_openai_tool_calls
+from core.parser import loads_model_json, parse_openai_tool_calls
 
 from .agent import (
     Agent,
@@ -249,82 +248,24 @@ def _extract_thought(text: str) -> str | None:
 def _decode_action_input(payload: str) -> tuple[dict[str, Any] | None, str | None]:
     """Decode one Action Input payload, tolerating common wrapper noise.
 
-    Decoding tries, in order: the payload as-is, the first balanced ``{...}``
-    block (for models that add prose or preambles around the object), and a
-    Python-style single-quoted literal repair.  Only JSON objects are
-    accepted; anything else returns an actionable correction message.
+    Delegates the actual decoding to :func:`core.loads_model_json` (shared with
+    the tool-call parsers) with ``object_only=True``: the payload as-is, the
+    first balanced ``{...}`` block and a single-quoted literal repair are tried
+    in that order. Only JSON objects are accepted; anything else returns an
+    actionable correction message.
     """
 
-    candidates = [payload]
-    stripped = payload.strip()
-    balanced = _balanced_json_substring(stripped)
-    if balanced and balanced != stripped:
-        candidates.append(balanced)
-    repaired = _repair_single_quoted_object(stripped)
-    if repaired:
-        candidates.append(repaired)
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            arguments = json.loads(candidate, parse_constant=_reject_json_constant)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(arguments, dict):
-            return arguments, None
+    try:
+        arguments = loads_model_json(payload, object_only=True)
+    except (TypeError, ValueError):
+        arguments = None
+    if isinstance(arguments, dict):
+        return arguments, None
     return None, (
         "Action Input is not valid JSON. Provide exactly one JSON object with "
         'double-quoted keys, for example: {"query": "text"}. '
         "Do not append prose after the object."
     )
-
-
-def _balanced_json_substring(text: str) -> str:
-    """Return the first balanced ``{...}`` block, or an empty string."""
-
-    start = text.find("{")
-    if start == -1:
-        return ""
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
-    return ""
-
-
-def _repair_single_quoted_object(payload: str) -> str:
-    """Convert a Python-style ``{'key': 1}`` literal into JSON text."""
-
-    candidate = _balanced_json_substring(payload)
-    if not candidate or "'" not in candidate:
-        return ""
-    try:
-        value = ast.literal_eval(candidate)
-    except (ValueError, SyntaxError, MemoryError, RecursionError):
-        return ""
-    if isinstance(value, dict):
-        try:
-            return json.dumps(value, ensure_ascii=False)
-        except (TypeError, ValueError):
-            return ""
-    return ""
 
 
 def _strip_code_fence(value: str) -> str:
@@ -334,10 +275,6 @@ def _strip_code_fence(value: str) -> str:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
     return "\n".join(lines).strip()
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _coerce_string_scalars(

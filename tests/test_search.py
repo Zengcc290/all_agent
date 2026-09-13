@@ -126,6 +126,11 @@ def test_search_reports_non_finite_json_as_invalid_response():
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
+            # 必须先读完请求体再响应：否则服务器在客户端仍发送时就关闭连接，
+            # Windows 上会偶发 ConnectionAbortedError。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
             body = b'{"results": [{"title": "x", "score": NaN}]}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

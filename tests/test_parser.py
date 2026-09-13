@@ -112,15 +112,15 @@ def test_openai_parser_repairs_single_quoted_arguments():
     assert calls[0].arguments == {"query": "python"}
 
 
-def test_load_json_rejects_non_finite_constants_as_json_errors():
+def test_loads_model_json_rejects_non_finite_constants_as_json_errors():
     """回归：`parse_constant` 拒绝 NaN/Infinity 时抛裸 ValueError，会绕过
     调用方的 JSONDecodeError 处理，最终变成难以理解的内部异常。"""
 
-    from core.parser import _load_json
+    from core.parser import loads_model_json
 
     for payload in ('{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}'):
         with pytest.raises(json.JSONDecodeError) as excinfo:
-            _load_json(payload)
+            loads_model_json(payload)
         # 原始原因仍保留在消息里，便于排查。
         assert "invalid JSON constant" in str(excinfo.value)
 
@@ -152,12 +152,25 @@ def test_openai_parser_reports_non_finite_arguments_as_invalid_json():
         )
 
 
-def test_load_json_still_repairs_wrapped_and_single_quoted_payloads():
+def test_loads_model_json_still_repairs_wrapped_and_single_quoted_payloads():
     """B5 的重构不得破坏原有的三段容错顺序。"""
 
-    from core.parser import _load_json
+    from core.parser import loads_model_json
 
-    assert _load_json('  {"query": "python"}  ') == {"query": "python"}
-    assert _load_json('preamble {"query": "python"} trailing') == {"query": "python"}
-    assert _load_json("{'query': 'python'}") == {"query": "python"}
-    assert _load_json("[1, 2]") == [1, 2]
+    assert loads_model_json('  {"query": "python"}  ') == {"query": "python"}
+    assert loads_model_json('preamble {"query": "python"} trailing') == {
+        "query": "python"
+    }
+    assert loads_model_json("{'query': 'python'}") == {"query": "python"}
+    assert loads_model_json("[1, 2]") == [1, 2]
+
+
+def test_loads_model_json_object_only_skips_earlier_arrays():
+    """C1：ReAct 的 Action Input 必须是对象，object_only=True 时前面的 [...] 
+    块不得遮住后面的 {...} 对象。"""
+
+    from core.parser import loads_model_json
+
+    payload = 'results [1, 2] then {"query": "python"}'
+    assert loads_model_json(payload) == [1, 2]
+    assert loads_model_json(payload, object_only=True) == {"query": "python"}

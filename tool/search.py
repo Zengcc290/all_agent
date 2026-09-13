@@ -27,6 +27,7 @@ from pydantic import (
 )
 
 from core import BaseTool, ToolSpec
+from core.parser import reject_json_constant
 
 # Discovery uses this literal switch before constructing the tool.
 TOOL_ENABLED = True
@@ -307,7 +308,7 @@ class SearchTool(BaseTool):
                 raw_body = _read_response_body(response)
         try:
             payload = json.loads(
-                raw_body.decode("utf-8"), parse_constant=_reject_json_constant
+                raw_body.decode("utf-8"), parse_constant=reject_json_constant
             )
         except (UnicodeDecodeError, ValueError) as exc:
             # parse_constant 拒绝 NaN/Infinity 时抛的是裸 ValueError（不是
@@ -432,10 +433,6 @@ def _normalize_response(payload: Any, max_results: int) -> SearchOutput:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def create_tool() -> BaseTool:

@@ -14,7 +14,7 @@ def parse_tool_calls(
 ) -> list[ToolCall]:
     """Parse native or fallback JSON calls without executing anything."""
     if isinstance(payload, str):
-        payload = _load_json(payload)
+        payload = loads_model_json(payload)
     if isinstance(payload, dict):
         payload = payload.get("tool_calls", payload)
     if isinstance(payload, dict):
@@ -58,7 +58,7 @@ def parse_openai_tool_calls(
             raise ValueError(f"unknown tool '{name}'") from exc
         if isinstance(raw_arguments, str):
             try:
-                arguments = _load_json(raw_arguments or "{}")
+                arguments = loads_model_json(raw_arguments or "{}")
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid JSON arguments for tool '{name}'") from exc
         else:
@@ -84,40 +84,41 @@ def _get(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
-def _load_json(value: str) -> Any:
-    """Decode model-produced JSON with common wrapper-noise fallbacks.
+def loads_model_json(value: str, *, object_only: bool = False) -> Any:
+    """Decode model-produced JSON with the shared wrapper-noise fallbacks.
 
-    ``NaN``/``Infinity`` are rejected through ``parse_constant``, which raises a
-    plain ``ValueError`` rather than ``json.JSONDecodeError``. Every attempt
-    therefore catches ``ValueError`` too and the failure is always reported as a
-    ``JSONDecodeError``, so callers only have to handle one error type.
+    Tries the payload as-is, the first balanced JSON block (for models that add
+    prose around the object) and finally a Python-style single-quoted literal
+    repair. ``NaN``/``Infinity`` are rejected through ``parse_constant``, which
+    raises a plain ``ValueError``; every attempt catches that too, so failures
+    always surface as :class:`json.JSONDecodeError` and callers only handle one
+    error type.
+
+    ``object_only`` restricts the balanced scan to ``{...}`` blocks. The ReAct
+    action parser uses it because an ``Action Input`` must be a JSON object: an
+    earlier ``[...]`` block in surrounding prose must not shadow a later object.
     """
 
     text = value.strip()
-    candidates = [
-        text,
-        _balanced_json_substring(text),
-        _repair_single_quoted_object(_balanced_json_substring(text) or text),
-    ]
+    balanced = _balanced_json_substring(text, object_only=object_only)
+    candidates = [text, balanced, _repair_single_quoted_object(balanced or text)]
     reason = ""
     for candidate in candidates:
         if not candidate:
             continue
         try:
-            return json.loads(candidate, parse_constant=_reject_json_constant)
+            return json.loads(candidate, parse_constant=reject_json_constant)
         except (json.JSONDecodeError, ValueError) as exc:
             reason = str(exc)
     detail = f": {reason}" if reason else ""
     raise json.JSONDecodeError(f"invalid JSON arguments{detail}", value, 0)
 
 
-def _balanced_json_substring(text: str) -> str:
-    """Return the first balanced ``{...}`` or ``[...]`` block, or empty string."""
+def _balanced_json_substring(text: str, *, object_only: bool = False) -> str:
+    """Return the first balanced ``{...}``/``[...]`` block, or empty string."""
 
-    start = min(
-        (index for index in (text.find("{"), text.find("[")) if index != -1),
-        default=-1,
-    )
+    starts = (text.find("{"),) if object_only else (text.find("{"), text.find("["))
+    start = min((index for index in starts if index != -1), default=-1)
     if start == -1:
         return ""
     depth = 0
@@ -161,5 +162,7 @@ def _repair_single_quoted_object(candidate: str) -> str:
     return ""
 
 
-def _reject_json_constant(value: str) -> None:
+def reject_json_constant(value: str) -> None:
+    """Reject ``NaN``/``Infinity`` so model JSON stays strictly finite."""
+
     raise ValueError(f"invalid JSON constant: {value}")
