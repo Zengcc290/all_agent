@@ -33,6 +33,7 @@ from .embedding import (
     APIEmbedding,
     BaseEmbedding,
     EmbeddingService,
+    EmbedServerEmbedding,
     HashEmbedding,
     load_dotenv_once,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "BaseVectorStore",
     "Document",
     "DocumentProcessor",
+    "EmbedServerEmbedding",
     "EmbeddingService",
     "EpisodicMemory",
     "HashEmbedding",

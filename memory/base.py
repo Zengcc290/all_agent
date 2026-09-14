@@ -35,7 +35,7 @@ from constants import (
     MEMORY_WORKING_CAPACITY,
 )
 
-from .embedding import APIEmbedding, BaseEmbedding, HashEmbedding, load_dotenv_once
+from .embedding import APIEmbedding, BaseEmbedding, EmbedServerEmbedding, HashEmbedding, load_dotenv_once
 
 if TYPE_CHECKING:
     from .storage import BaseDocumentStore, BaseVectorStore
@@ -61,14 +61,25 @@ def default_sqlite_path() -> str:
 def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
     """Build the default embedding service from a (possibly implicit) config.
 
-    Uses ``MemoryConfig.from_env()`` when no config is supplied, so the
-    ``DASHSCOPE_API_KEY`` environment variable alone is enough to activate
-    qwen3-embedding-0.6b. Without any key the deterministic offline
-    :class:`~memory.embedding.HashEmbedding` is used instead of raising, so the
-    memory layer, the agent tools and the web app stay usable offline.
+    Uses ``MemoryConfig.from_env()`` when no config is supplied.  A local embed
+    gateway configured via ``EMBEDDING_BASE_URL`` (a forwarded-port service
+    speaking the custom ``/embed`` protocol) takes precedence, then
+    ``DASHSCOPE_API_KEY`` activates qwen3-embedding-0.6b, and without either
+    the deterministic offline :class:`~memory.embedding.HashEmbedding` is used
+    instead of raising, so the memory layer, the agent tools and the web app
+    stay usable offline.  These vector spaces are not interchangeable; changing
+    the provider requires re-indexing stored items.
     """
     config = config if config is not None else MemoryConfig.from_env()
     load_dotenv_once()
+    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
+    if server_url:
+        return EmbedServerEmbedding(
+            base_url=server_url,
+            dimension=config.embedding_dimension,
+            timeout=config.embedding_timeout,
+            batch_size=config.embedding_batch_size,
+        )
     api_key = config.embedding_api_key or os.getenv("DASHSCOPE_API_KEY")
     if not api_key or not str(api_key).strip():
         return HashEmbedding(dimension=config.embedding_dimension)

@@ -478,12 +478,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         # 报告实际生效的嵌入实现，而不是猜某个环境变量：MemoryConfig 还支持
         # HELLOAGENTS_MEMORY_EMBEDDING_API_KEY，且调用方可注入自定义 embedding。
         embedding = getattr(the_manager(), "embedding", None)
+        # APIEmbedding 与 EmbedServerEmbedding 都带 base_url，都是远端向量实现；
+        # HashEmbedding 离线兜底没有 base_url。用属性而非类名判断，避免重复导入。
+        embedding_mode = "api" if getattr(embedding, "base_url", None) else "local-hash"
         return {
             "ok": True,
             "chat_ready": ready,
-            "embedding_mode": (
-                "api" if type(embedding).__name__ == "APIEmbedding" else "local-hash"
-            ),
+            "embedding_mode": embedding_mode,
             "embedding": getattr(embedding, "to_dict", dict)(),
             "search_available": search_available(),
         }

@@ -198,6 +198,149 @@ class APIEmbedding(BaseEmbedding):
         return f"APIEmbedding(model={self.model!r}, dimension={self.dimension}, base_url={self.base_url!r})"
 
 
+class EmbedServerEmbedding(BaseEmbedding):
+    """Client for a custom embed gateway exposed at ``POST {base_url}/embed``.
+
+    This is the client for the local ``qwen-embed`` service reachable through
+    a forwarded port (e.g. ``ssh -L10800:127.0.0.1:18000 ...``).  The request
+    is ``{"texts": [...]}`` and the response is ``{"embeddings": [[...], ...]}``
+    plus an optional ``dim`` field; the vector count, dimension and finiteness
+    are validated exactly like :class:`APIEmbedding`.  No API key is required
+    by the bundled gateway, but an optional ``Authorization: Bearer`` header is
+    sent when one is supplied.  Use :class:`APIEmbedding` instead when the
+    gateway speaks the standard OpenAI ``/embeddings`` shape.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str = "http://127.0.0.1:10800",
+        dimension: int | None = None,
+        timeout: float = 60.0,
+        batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+        client: Any = None,
+    ) -> None:
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("base_url must be a non-empty string")
+        if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
+            raise ValueError("dimension must be a positive integer")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        self.api_key = str(api_key).strip() if api_key is not None else ""
+        self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
+        self.batch_size = batch_size
+        self.client = client
+        self.dimension = dimension or 0
+
+    def embed(self, text: str) -> list[float]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
+        values = list(texts)
+        if not all(isinstance(text, str) for text in values):
+            raise TypeError("texts must contain strings")
+        if not values:
+            return []
+        result: list[list[float]] = []
+        for start in range(0, len(values), self.batch_size):
+            result.extend(_embed_server_batch_once(self, values[start : start + self.batch_size]))
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": type(self).__name__,
+            "base_url": self.base_url,
+            "dimension": self.dimension,
+            "batch_size": self.batch_size,
+        }
+
+    def __repr__(self) -> str:
+        return f"EmbedServerEmbedding(dimension={self.dimension}, base_url={self.base_url!r})"
+
+
+def _embed_server_batch_once(embedding: EmbedServerEmbedding, values: list[str]) -> list[list[float]]:
+    """Send one batch through the custom ``/embed`` gateway and validate it."""
+    response = _embed_server_request(embedding, values)
+    vectors = _extract_embed_server_vectors(response)
+    if len(vectors) != len(values):
+        raise RuntimeError(
+            f"embedding response count {len(vectors)} did not match input count {len(values)}"
+        )
+    dimension = len(vectors[0]) if vectors else 0
+    if dimension == 0:
+        raise RuntimeError("embedding response contained empty vectors")
+    if any(len(vector) != dimension for vector in vectors):
+        raise RuntimeError("embedding response contained inconsistent dimensions")
+    if any(not math.isfinite(value) for vector in vectors for value in vector):
+        raise RuntimeError("embedding response contained non-finite values")
+    if embedding.dimension and embedding.dimension != dimension:
+        raise RuntimeError(
+            f"embedding dimension {dimension} does not match expected dimension {embedding.dimension}"
+        )
+    embedding.dimension = dimension
+    return vectors
+
+
+def _embed_server_request(embedding: EmbedServerEmbedding, values: list[str]) -> Any:
+    """POST ``{"texts": [...]}`` to ``{base_url}/embed`` and parse the JSON."""
+    payload = {"texts": values}
+    client = embedding.client
+    if client is not None:
+        if callable(client):
+            return client(payload)
+        if callable(getattr(client, "embed", None)):
+            return client.embed(values)
+        if callable(getattr(getattr(client, "embeddings", None), "create", None)):
+            return client.embeddings.create(input=values)
+        raise TypeError("client must be callable or expose embed()/embeddings.create()")
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if embedding.api_key:
+        headers["Authorization"] = f"Bearer {embedding.api_key}"
+    request = urllib.request.Request(
+        f"{embedding.base_url}/embed",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=embedding.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"embedding API HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"embedding API request failed: {exc.reason}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"embedding API returned invalid JSON: {exc}") from exc
+
+
+def _extract_embed_server_vectors(response: Any) -> list[list[float]]:
+    """Extract and reorder the bare ``embeddings`` list from the gateway."""
+    if isinstance(response, dict):
+        data = response.get("embeddings")
+    else:
+        data = getattr(response, "embeddings", None)
+    if data is None:
+        raise RuntimeError("embedding response contained no embeddings list")
+    vectors: list[list[float]] = []
+    for item in data:
+        try:
+            vector = [float(value) for value in item]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("embedding response item contained an invalid vector") from exc
+        if not vector:
+            raise RuntimeError("embedding response item contained an empty vector")
+        vectors.append(vector)
+    return vectors
+
+
 def _embed_batch_once(embedding: APIEmbedding, values: list[str]) -> list[list[float]]:
     """Send one batch and normalize the response into a list of vectors."""
     response = _request(embedding, values)
@@ -312,6 +455,7 @@ __all__ = [
     "DEFAULT_EMBEDDING_MODEL",
     "APIEmbedding",
     "BaseEmbedding",
+    "EmbedServerEmbedding",
     "EmbeddingService",
     "load_dotenv_once",
 ]

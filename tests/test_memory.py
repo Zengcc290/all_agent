@@ -91,7 +91,7 @@ def test_memory_manager_without_api_key_falls_back_to_offline_embedding(monkeypa
     from memory import HashEmbedding as LibraryHashEmbedding
     from memory import base as memory_base
 
-    for name in ("DASHSCOPE_API_KEY", "HELLOAGENTS_MEMORY_EMBEDDING_API_KEY"):
+    for name in ("DASHSCOPE_API_KEY", "HELLOAGENTS_MEMORY_EMBEDDING_API_KEY", "EMBEDDING_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     # .env 里可能存有真实 key，测试必须隔离它才能确定性验证降级路径。
     monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
@@ -112,7 +112,8 @@ def test_explicit_embedding_api_key_still_selects_api_embedding(monkeypatch):
     from memory import base as memory_base
 
     monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
-    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    for name in ("DASHSCOPE_API_KEY", "EMBEDDING_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
 
     embedding = memory_base.make_default_embedding(
         MemoryConfig(sqlite_path=":memory:", embedding_api_key="explicit-key")
@@ -128,9 +129,29 @@ def test_environment_api_key_still_selects_api_embedding(monkeypatch):
 
     monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
+    monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
 
     embedding = memory_base.make_default_embedding(MemoryConfig(sqlite_path=":memory:"))
     assert isinstance(embedding, APIEmbedding)
+
+
+def test_embedding_base_url_overrides_dashscope_key(monkeypatch):
+    """端口转发网关（EMBEDDING_BASE_URL）优先级最高，即使也给了 DashScope key。
+
+    Web 与 Agent 工具路径共用同一个 ``make_default_embedding``，保证两边嵌入一致。
+    """
+
+    from memory import EmbedServerEmbedding
+    from memory import base as memory_base
+
+    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://127.0.0.1:10800")
+
+    embedding = memory_base.make_default_embedding(MemoryConfig(sqlite_path=":memory:"))
+    assert isinstance(embedding, EmbedServerEmbedding)
+    assert embedding.base_url == "http://127.0.0.1:10800"
+    assert embedding.dimension == 1024
 
 
 def test_only_in_memory_vector_store_is_rebuilt_at_startup(tmp_path):

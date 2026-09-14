@@ -1,9 +1,9 @@
 """Web 层支撑设施：嵌入降级、共享单例与路径约定。
 
 设计要点：
-- 没有任何 API key 时整站仍可运行：``memory.HashEmbedding`` 提供离线向量检索
-  （质量有限，仅演示用）；填入 ``DASHSCOPE_API_KEY`` 后自动升级到
-  qwen3-embedding-0.6b。
+- 嵌入实现按优先级：``EMBEDDING_BASE_URL`` 指向的本地转发网关（自定义
+  ``/embed`` 协议）→ ``DASHSCOPE_API_KEY`` 公网 qwen3-embedding-0.6b →
+  ``memory.HashEmbedding`` 离线兜底。没有任何 key 时整站仍可运行。
 - ``MEMORY_DB_PATH`` 在导入时就被固定为项目根下的 ``memory.sqlite3``，
   保证 Agent 工具（memory.query / memory.add / memory.rag）与 Web API 共享
   同一个记忆库——「记忆共享」的数据面。
@@ -29,6 +29,7 @@ from constants import (
 )
 from memory import (
     APIEmbedding,
+    EmbedServerEmbedding,
     HashEmbedding,
     MemoryConfig,
     MemoryItem,
@@ -53,11 +54,20 @@ os.environ.setdefault("MEMORY_DB_PATH", str(DB_PATH))
 
 
 def build_embedding():
-    """有 DashScope key 用真实嵌入，否则用 memory 包自带的离线降级实现。
+    """按优先级选择嵌入实现：本地转发网关 → DashScope key → 离线降级。
 
-    ``HashEmbedding`` 现在由 ``memory.embedding`` 提供（Web、Agent 工具与直接使用
-    memory 包的调用方共用同一实现），这里保留同名导入以兼容既有引用。
+    优先级最高的 ``EMBEDDING_BASE_URL`` 指向一个经端口转发暴露的
+    ``qwen-embed`` 网关（自定义 ``/embed`` 协议，见
+    ``memory.EmbedServerEmbedding``）；其次 ``DASHSCOPE_API_KEY`` 启用公网
+    qwen3-embedding-0.6b；都没有时退回 ``HashEmbedding`` 离线实现，保证整站
+    无网络也可运行。三个向量空间互不兼容，切换后需要重索引已有条目。
     """
+    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
+    if server_url:
+        return EmbedServerEmbedding(
+            base_url=server_url,
+            dimension=MEMORY_EMBEDDING_DIMENSION,
+        )
     api_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip()
     if api_key:
         return APIEmbedding(
