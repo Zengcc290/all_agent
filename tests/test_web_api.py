@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from memory import InMemoryVectorStore, MemoryConfig, MemoryManager  # noqa: E402
 from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 from memory.storage import ChunkRecord, DocumentRecord, DocumentRepository  # noqa: E402
-from web import create_app  # noqa: E402
+from web import create_app, support  # noqa: E402
 from web.support import HashEmbedding  # noqa: E402
 
 
@@ -709,6 +709,74 @@ def test_revectorize_rebuilds_every_chunk(file_client) -> None:
     assert {chunk["vector_status"] for chunk in detail["chunks"]} == {"indexed"}
     assert all(chunk["chunk_id"] in store.ids for chunk in detail["chunks"])
     assert client.post("/api/documents/不存在/revectorize").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 U6: 增量图 ?since=<revision>
+# ---------------------------------------------------------------------------
+
+
+def test_graph_since_returns_only_revision_when_nothing_changed(file_client) -> None:
+    client, _ = file_client
+    _ingest_documents(client, ["增量文档"])
+
+    full = client.get("/api/graph").json()
+    assert full["unchanged"] is False
+    assert full["revision"] > 0 and full["nodes"]
+
+    delta = client.get("/api/graph", params={"since": full["revision"]}).json()
+
+    # 无写入：不回传节点/边，但 revision 与计数保持一致，前端沿用本地图即可
+    assert delta["unchanged"] is True
+    assert delta["nodes"] == [] and delta["edges"] == []
+    assert delta["revision"] == full["revision"]
+    assert delta["stats"] == full["stats"]
+
+
+def test_graph_since_is_stale_after_a_write(file_client) -> None:
+    """写入后必须重新变成全量，否则前端会永远停在旧图上。"""
+
+    client, _ = file_client
+    _ingest_documents(client, ["第一版"])
+    first = client.get("/api/graph").json()
+
+    _ingest_documents(client, ["第二版"])
+    after_write = client.get("/api/graph", params={"since": first["revision"]}).json()
+
+    assert after_write["unchanged"] is False
+    assert after_write["revision"] > first["revision"]
+    # 「差量合并后节点总数与全量一致」：客户端用 delta.revision 再问一次即得到全量
+    refetched = client.get("/api/graph", params={"since": after_write["revision"]}).json()
+    assert refetched["unchanged"] is True
+    full = client.get("/api/graph").json()
+    assert len(full["nodes"]) == len(after_write["nodes"]) == full["stats"]["total"]
+
+
+def test_graph_without_since_stays_backward_compatible(client: TestClient) -> None:
+    payload = client.get("/api/graph").json()
+
+    assert payload["unchanged"] is False
+    assert "nodes" in payload and "edges" in payload
+
+
+def test_graph_since_zero_is_a_valid_cursor_not_a_missing_parameter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """进程刚启动时 revision 就是 0：客户端带 0 来问必须走增量，而不是被判成没带参数。
+
+    revision 是进程级共享计数（同一进程里别的用例已经把它推高），所以这里显式压回 0
+    来复现「刚启动」这一档。
+    """
+
+    monkeypatch.setattr(support, "GRAPH_REVISION", 0)
+    full = client.get("/api/graph").json()
+    assert full["revision"] == 0 and full["unchanged"] is False
+
+    delta = client.get("/api/graph", params={"since": 0}).json()
+
+    assert delta["unchanged"] is True
+    assert delta["nodes"] == []
+    assert delta["stats"] == full["stats"]
 
 
 class DeadGatewayEmbedding(HashEmbedding):

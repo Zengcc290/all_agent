@@ -63,6 +63,7 @@ from .seed import seed
 from .support import (
     STATIC_DIR,
     build_knowledge_extractor,
+    bump_graph_revision,
     chat_confirmed_side_effects,
     chat_ready,
     chat_tool_names,
@@ -203,28 +204,43 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # 比对两个 revision，落后才重建。
     # ------------------------------------------------------------------
     graph_cache: dict[str, Any] = {
-        "revision": 0,
         "external": graph_revision(),
         "payload": None,
     }
 
     def invalidate_graph() -> None:
-        graph_cache["revision"] += 1
+        # 本地写入与后台抽取共用同一个进程级计数：/api/graph?since= 只有一个真相来源，
+        # 否则刚通过 API 写完就会被 since 判成「无变化」。
+        bump_graph_revision()
         graph_cache["payload"] = None
 
     # ------------------------------------------------------------------
     # 星云图数据
     # ------------------------------------------------------------------
     @app.get("/api/graph")
-    def graph() -> dict[str, Any]:
-        current_external = graph_revision()
-        if (
-            graph_cache["payload"] is None
-            or graph_cache["external"] != current_external
-        ):
+    def graph(since: int = -1) -> dict[str, Any]:
+        """全图；``?since=<revision>`` 时若期间无写入则只回 revision（U6 增量刷新）。
+
+        ``since`` 默认 -1 表示「不带增量语义」——不能用 0 当哨兵，因为进程刚启动时
+        revision 就是 0，客户端带着 0 来问会被误判成「没带参数」而永远拿全量。
+        """
+
+        revision = graph_revision()
+        if graph_cache["payload"] is None or graph_cache["external"] != revision:
             graph_cache["payload"] = build_graph(the_manager())
-            graph_cache["external"] = current_external
-        return graph_cache["payload"]
+            graph_cache["external"] = revision
+        payload = graph_cache["payload"]
+        if since >= 0 and since == revision:
+            # 自 since 起没有任何图可见的写入：不回传节点/边，前端沿用本地图，
+            # 省掉一次全量 build_graph 与整棵星系树的重排布局。
+            return {
+                "revision": revision,
+                "unchanged": True,
+                "nodes": [],
+                "edges": [],
+                "stats": payload.get("stats", {}),
+            }
+        return {**payload, "revision": revision, "unchanged": False}
 
     @app.post("/api/graph-rag")
     def graph_rag(body: GraphRAGBody) -> dict[str, Any]:

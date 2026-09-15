@@ -110,3 +110,16 @@ def test_u2_chunk_highlight_is_driven_by_truth_source_offsets() -> None:
     # 状态机进度与失败原因都要能看见（U2/U5）
     assert "docBadge(item.status)" in html or "docBadge(doc.status)" in html
     assert "doc.error" in html
+
+
+def test_u6_delta_refresh_and_lod_are_wired() -> None:
+    """U6：带 revision 轮询、无变化不重排；LOD 分档集中在一处。"""
+
+    html = INDEX.read_text(encoding="utf-8")
+
+    assert "/api/graph?since=${since}" in html
+    assert "data.unchanged" in html
+    assert "GRAPH_POLL_MS" in html and "loadGraph({ since: true })" in html
+    assert "function lodLevel()" in html
+    assert "lod < 1 && n.level === 3" in html
+    assert "lod >= 2" in html

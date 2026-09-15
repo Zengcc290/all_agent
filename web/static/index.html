@@ -1187,8 +1187,9 @@
   // =====================================================================
   // 1. 数据层：/api/graph → 星系树（恒星=领域 行星=实体 卫星=事实/知识块）
   // =====================================================================
-  const graph = { nodes: [], edges: [], byId: new Map(), stars: [] };
+  const graph = { nodes: [], edges: [], byId: new Map(), stars: [], revision: 0 };
   const UNCLASSIFIED = "未分类";
+  const GRAPH_POLL_MS = 20000;   // U6：轻量轮询；无变化时后端只回 revision
 
   // U1 图谱推理高亮态：实体名集合 + 无向边键集合，drawEdges/render 消费。
   const highlight = { entities: new Set(), edges: new Set() };
@@ -1224,8 +1225,15 @@
     highlight.edges.clear();
   }
 
-  async function loadGraph() {
-    const data = await apiGet("/api/graph", 30000);
+  async function loadGraph(options) {
+    // U6 增量刷新：带上本地 revision，后端无变化时只回 revision，这里直接沿用现有
+    // 节点与布局（省掉全量重建 + buildStarSystem 重排）。revision=0 也是有效值，
+    // 所以用 track 标志而不是「since 非 0」来判断是否走增量。
+    const track = !!(options && options.since);
+    const since = graph.revision || 0;
+    const data = await apiGet(track ? `/api/graph?since=${since}` : "/api/graph", 30000);
+    graph.revision = data.revision || 0;
+    if (data.unchanged) return false;
     const focusId = currentFocusNode ? currentFocusNode.id : null;   // 数据刷新后旧引用会失去物理更新
     graph.nodes = data.nodes || [];
     graph.edges = data.edges || [];
@@ -1598,7 +1606,7 @@
     const pad = 40 / zoom;
     const viewL = camX - width / 2 / zoom - pad, viewR = camX + width / 2 / zoom + pad;
     const viewT = camY - height / 2 / zoom - pad, viewB = camY + height / 2 / zoom + pad;
-    const showSatellites = zoom > 0.35;   // LOD：缩小时只画恒星/行星
+    const lod = lodLevel();   // U6 LOD：低档不画卫星，最低档连标签也省
 
     // (4) 引力桥（画在星点之下）
     drawEdges();
@@ -1607,7 +1615,7 @@
     const visible = [];
     for (const n of graph._flat) {
       if (n.wx < viewL || n.wx > viewR || n.wy < viewT || n.wy > viewB) continue;
-      if (!showSatellites && n.level === 3) continue;
+      if (lod < 1 && n.level === 3) continue;
       visible.push(n);
     }
     sortedRenderList = visible;
@@ -1627,8 +1635,8 @@
     hoverNodeRef = hoveredNode;
     canvas.style.cursor = hoveredNode ? "pointer" : (isDragging ? "grabbing" : "grab");
 
-    // (6) 标签分级：放大到一定程度才画，且只画重要节点（避免 fillText 卡顿）
-    if (zoom > 0.8) {
+    // (6) 标签分级：LOD 最高档才画，且只画重要节点（避免 fillText 卡顿）
+    if (lod >= 2) {
       let labels = 0;
       for (const n of visible) {
         if (labels >= 60) break;
@@ -1641,6 +1649,14 @@
         labels++;
       }
     }
+  }
+
+  // U6 LOD 分档：0 只画恒星/行星锚点，1 加卫星（事实/知识块），2 再加文字标签。
+  // 阈值集中在这里，渲染循环只问档位，不再散落魔法数。
+  function lodLevel() {
+    if (zoom < 0.35) return 0;
+    if (zoom < 0.8) return 1;
+    return 2;
   }
 
   // =====================================================================
@@ -2447,6 +2463,9 @@
     }
   }
   boot();
+  // U6：轻量轮询。无写入时后端只回 revision，前端不做任何重排；有写入才整图刷新。
+  // 首次 boot 失败时 revision 仍为 0，轮询会退化成全量拉取，等于自带重连。
+  setInterval(() => { loadGraph({ since: true }).catch(() => {}); }, GRAPH_POLL_MS);
   render();
 })();
 </script>
