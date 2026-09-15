@@ -215,3 +215,47 @@ def test_from_env_treats_blank_values_as_unset(monkeypatch):
     assert config.embedding_api_key is None
     assert config.embedding_model  # 回落到类默认值，而不是空串
     assert config.qdrant_url in (None, "")  # 空 URL 表示「不启用 Qdrant」
+
+
+# ---------------------------------------------------------------------------
+# 方案 §P0 验收（F3 激活路径）：开关环境变量一旦设置，MemoryManager 必须真的
+# 换用对应存储，而不是继续用内存回退。两条用例只做构造期断言：
+# QdrantClient/neo4j.Driver 的构造都是懒连接，不会触网；SQLite 路径钉到 tmp。
+# ---------------------------------------------------------------------------
+
+
+def test_manager_from_env_selects_qdrant_when_url_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_QDRANT_URL", "http://127.0.0.1:6333")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "")   # 空即未配置（P0 约定），嵌入回落 Hash
+
+    manager = MemoryManager(MemoryConfig.from_env())
+
+    try:
+        from memory.storage.qdrant import QdrantVectorStore
+
+        assert type(manager.vector_store) is QdrantVectorStore
+        assert manager.vector_store.collection_name == "helloagents_memory"
+        assert manager.vector_store.dimension == manager.config.embedding_dimension
+    finally:
+        manager.close()
+
+
+def test_manager_from_env_selects_neo4j_when_uri_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_NEO4J_URI", "bolt://127.0.0.1:7687")
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_NEO4J_USERNAME", "neo4j")
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_NEO4J_PASSWORD", "pw")
+
+    manager = MemoryManager(MemoryConfig.from_env())
+
+    try:
+        assert manager.graph_store.driver is not None   # 不再是内存回退（driver 为 None）
+        # 未配置 URI 的对照组：内存回退，driver 必须是 None
+        fallback = MemoryManager(MemoryConfig(sqlite_path=":memory:"), embedding=HashEmbedding())
+        try:
+            assert fallback.graph_store.driver is None
+        finally:
+            fallback.close()
+    finally:
+        manager.close()
