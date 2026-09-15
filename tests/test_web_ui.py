@@ -123,3 +123,17 @@ def test_u6_delta_refresh_and_lod_are_wired() -> None:
     assert "function lodLevel()" in html
     assert "lod < 1 && n.level === 3" in html
     assert "lod >= 2" in html
+
+
+def test_u7_domain_filter_and_alias_sidebar_are_wired() -> None:
+    """U7：领域筛选（纯前端）+ 实体侧栏展示图库别名。"""
+
+    html = INDEX.read_text(encoding="utf-8")
+
+    assert 'id="filter-domain"' in html
+    assert "function applyDomainFilter(value)" in html
+    assert "visibleNodes()" in html
+    # 筛选后不画通向视野外的边，否则会连线到上一次布局的坐标
+    assert "graph.visible.has(s.id)" in html
+    # 别名只读展示自图库（P4 已写入实体属性），来源与重要度沿用节点字段
+    assert "node.meta.aliases" in html

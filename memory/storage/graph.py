@@ -120,9 +120,46 @@ class Neo4jGraphStore:
             entity["aliases"] = known
 
     def entity(self, name: str) -> dict[str, Any]:
-        """Entity attributes as recorded by the in-memory projection (empty if unseen)."""
+        """Entity attributes: 别名 / 领域 / 重要度。
 
-        return dict(self._entities.get(name, {}))
+        启用 Neo4j 时以它为准——``_entities`` 只是本进程写入过的内存镜像，
+        新进程里它是空的，直接读它会静默返回「没有别名」。
+        """
+
+        if self.driver is None:
+            return dict(self._entities.get(name, {}))
+        query = (
+            "MATCH (e:MemoryEntity {name: $name}) "
+            "RETURN e.domain AS domain, e.aliases AS aliases, e.importance AS importance"
+        )
+        with self.driver.session(database=self.database) as session:
+            record = session.run(query, name=name).single()
+        if record is None:
+            return {}
+        importance = record["importance"]
+        return {
+            "domain": record["domain"] or "",
+            "aliases": list(record["aliases"] or []),
+            "importance": float(importance) if importance is not None else 0.5,
+        }
+
+    def entity_aliases(self) -> dict[str, list[str]]:
+        """``{实体名: 别名}`` 一次取回；星云图要给每个实体节点带别名，不能逐个查。
+
+        无 driver 时读内存镜像；有 driver 时一条 Cypher 查完全部实体（避免 N+1）。
+        """
+
+        if self.driver is None:
+            return {
+                name: list(attributes.get("aliases") or [])
+                for name, attributes in self._entities.items()
+            }
+        query = "MATCH (e:MemoryEntity) RETURN e.name AS name, e.aliases AS aliases"
+        with self.driver.session(database=self.database) as session:
+            return {
+                str(record["name"]): [str(alias) for alias in (record["aliases"] or [])]
+                for record in session.run(query)
+            }
 
     def relation_memory_ids(self) -> list[str]:
         """``memory_id`` of every edge (reconcile compares this against facts)."""

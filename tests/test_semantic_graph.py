@@ -13,6 +13,7 @@ from conftest import HashEmbedding
 from memory import MemoryConfig, MemoryManager, Neo4jGraphStore
 from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityCandidate, ExtractionResult, RelationCandidate
+from web.graph_builder import build_graph
 
 
 @pytest.fixture()
@@ -152,3 +153,84 @@ def test_add_relation_entity_clauses_on_create_vs_match(graph: Neo4jGraphStore):
     assert graph.entity("A")["aliases"] == ["a2"]
     assert graph.entity("C") == {"domain": "", "aliases": [], "importance": 0.5}
     assert graph.entity("未见过的实体") == {}
+
+
+class FakeSession:
+    """只实现 Neo4jGraphStore 用到的那点接口：run(...).single() / 迭代。"""
+
+    def __init__(self, rows: dict[str, dict]) -> None:
+        self.rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def run(self, query: str, **params: object):
+        rows = self.rows
+        if "e:MemoryEntity {name:" in query:
+            row = rows.get(str(params.get("name")))
+            return _FakeResult([row] if row else [])
+        return _FakeResult(
+            [{"name": name, "aliases": row["aliases"]} for name, row in rows.items()]
+        )
+
+
+class _FakeResult:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def single(self):
+        return self.rows[0] if self.rows else None
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+class FakeDriver:
+    def __init__(self, rows: dict[str, dict]) -> None:
+        self.rows = rows
+
+    def session(self, database: str | None = None) -> FakeSession:
+        return FakeSession(self.rows)
+
+
+def test_entity_attributes_are_read_from_neo4j_when_it_is_the_backend():
+    """新进程里 _entities 是空的：实体属性必须回 Neo4j 查，否则侧栏永远显示「无别名」。"""
+
+    rows = {
+        "Qdrant": {"domain": "人工智能", "aliases": ["向量库", "向量数据库"], "importance": 0.95},
+        "Neo4j": {"domain": "存储", "aliases": [], "importance": 0.0},
+    }
+    graph = Neo4jGraphStore()
+    graph.driver = FakeDriver(rows)   # 模拟「已有数据的 Neo4j，但本进程没写过任何东西」
+
+    assert graph.entity("Qdrant") == {
+        "domain": "人工智能",
+        "aliases": ["向量库", "向量数据库"],
+        "importance": 0.95,
+    }
+    # importance=0.0 不能被当成「没值」而被 0.5 顶替
+    assert graph.entity("Neo4j")["importance"] == 0.0
+    assert graph.entity("没见过") == {}
+    assert graph.entity_aliases() == {"Qdrant": ["向量库", "向量数据库"], "Neo4j": []}
+
+
+def test_graph_payload_carries_entity_aliases(manager: MemoryManager):
+    """U7 侧栏数据源：/api/graph 的实体节点要带上别名。"""
+
+    pipeline = RAGPipeline(manager, extractor=GraphExtractor())
+    pipeline.ingest(Document("Qdrant用于语义检索。", id="doc-alias"))
+
+    payload = build_graph(manager)
+    aliased = [
+        node for node in payload["nodes"]
+        if node["kind"] == "entity" and node["meta"].get("aliases")
+    ]
+
+    assert len(aliased) == 1
+    assert aliased[0]["meta"]["aliases"] == ["向量库"]
+    assert aliased[0]["domain"] == "人工智能"
+    # 没有别名的实体不该被塞一个空 meta 键
+    assert all("aliases" not in node["meta"] for node in payload["nodes"] if node not in aliased)

@@ -60,12 +60,28 @@ def _node(node_id: str, kind: str, title: str, *, content: str = "", domain: str
     }
 
 
+def _entity_aliases(manager: MemoryManager) -> dict[str, list[str]]:
+    """实体名 → 别名（一次取回）。图库读不到就退回空表，不能因此整图失败。"""
+
+    getter = getattr(getattr(manager, "graph_store", None), "entity_aliases", None)
+    if not callable(getter):
+        return {}
+    try:
+        return {
+            str(name): [str(alias) for alias in (aliases or [])]
+            for name, aliases in getter().items()
+        }
+    except Exception:  # noqa: BLE001 - 图库抖动时退化为「无别名」
+        return {}
+
+
 def build_graph(manager: MemoryManager) -> dict[str, Any]:
     items: list[MemoryItem] = manager.list()
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     domains: dict[str, str] = {}
     entity_ids: dict[str, str] = {}
+    aliases_by_entity = _entity_aliases(manager)
 
     def domain_node(name: str) -> str:
         name = (name or DEFAULT_DOMAIN).strip() or DEFAULT_DOMAIN
@@ -90,11 +106,16 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
         else:
             node_id = f"ent:{key}"
             node_title, content, date, importance, source = key, "", "", 0.6, None
-        nodes[node_id] = _node(
+        node = _node(
             node_id, "entity", node_title, content=content, domain=domain or DEFAULT_DOMAIN,
             date=date, importance=importance, parent=domain_node(domain or DEFAULT_DOMAIN),
             source=source,
         )
+        # U7 实体侧栏：别名来自图库（P4 已把别名写进实体属性，这里只读不写）。
+        aliases = aliases_by_entity.get(key) or aliases_by_entity.get(node_title) or []
+        if aliases:
+            node["meta"]["aliases"] = aliases
+        nodes[node_id] = node
         entity_ids[key] = node_id
         return node_id
 

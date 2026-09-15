@@ -924,6 +924,16 @@
     #evidence-list .evidence-meta { color: #475569; font-size: 10px; }
 
     #edge-toggle-btn.active { color: #34d399; box-shadow: 0 0 12px rgba(52, 211, 153, 0.4); }
+
+    /* U7 领域筛选：外观沿用 .btn，去掉原生 select 的默认样式 */
+    #filter-domain {
+      appearance: none;
+      max-width: 190px;
+      font: inherit;
+      cursor: pointer;
+      background: rgba(15, 23, 42, 0.9);
+    }
+    #filter-domain option { background: #0b1120; color: #cbd5e1; }
   </style>
 </head>
 <body>
@@ -967,6 +977,9 @@
   <div class="controls hud">
     <button class="btn active" id="btn-reset">回到全景宏观视野</button>
     <button class="btn active" id="edge-toggle-btn">引力桥 ON</button>
+    <select class="btn" id="filter-domain" aria-label="按领域筛选" title="只看某个领域">
+      <option value="">全部领域</option>
+    </select>
   </div>
 
   <div id="stats-bar">
@@ -1187,9 +1200,17 @@
   // =====================================================================
   // 1. 数据层：/api/graph → 星系树（恒星=领域 行星=实体 卫星=事实/知识块）
   // =====================================================================
-  const graph = { nodes: [], edges: [], byId: new Map(), stars: [], revision: 0 };
+  const graph = { nodes: [], edges: [], byId: new Map(), stars: [], revision: 0, visible: new Set() };
   const UNCLASSIFIED = "未分类";
   const GRAPH_POLL_MS = 20000;   // U6：轻量轮询；无变化时后端只回 revision
+
+  // U7：领域筛选（纯前端，不改后端）。graph.nodes/edges 始终是后端原文，
+  // 筛选只影响「进树」的节点集合，图/抽屉据此跳过被隐藏的一端。
+  let domainFilter = "";
+  const visibleNodes = () => (
+    domainFilter ? graph.nodes.filter(n => (n.domain || UNCLASSIFIED) === domainFilter) : graph.nodes
+  );
+  const edgeVisible = (edge, a, b) => graph.visible.has(a.id) && graph.visible.has(b.id);
 
   // U1 图谱推理高亮态：实体名集合 + 无向边键集合，drawEdges/render 消费。
   const highlight = { entities: new Set(), edges: new Set() };
@@ -1237,11 +1258,13 @@
     const focusId = currentFocusNode ? currentFocusNode.id : null;   // 数据刷新后旧引用会失去物理更新
     graph.nodes = data.nodes || [];
     graph.edges = data.edges || [];
+    graph.stats = data.stats || {};
     graph.byId = new Map(graph.nodes.map(n => [n.id, n]));
     graph._adjacency = null;   // 邻接缓存随数据刷新失效
     buildStarSystem();
+    renderDomainOptions();     // U7：领域列表随数据刷新，失效的筛选自动清除
     renderTourPanel();
-    updateStats(data.stats || {});
+    updateStats(domainFilter ? filteredStats() : (data.stats || {}));
     // 首次加载或数据刷新后无焦点：相机对准全景 fit
     if (!currentFocusNode) {
       camTargetX = overviewX; camTargetY = overviewY;
@@ -1259,8 +1282,10 @@
   // 扁平 nodes/edges → 嵌套星系树 + 静态 2D 布局
   // 布局只算一次（wx/wy 固定），渲染零物理开销——这是支撑万级节点的根基。
   function buildStarSystem() {
+    const source = visibleNodes();
+    graph.visible = new Set(source.map(n => n.id));
     // 1) 恒星 = kind=domain，沿环带分布
-    graph.stars = graph.nodes.filter(n => n.kind === "domain");
+    graph.stars = source.filter(n => n.kind === "domain");
     const RING = 900;
     graph.stars.forEach((star, i) => {
       const a = (i / Math.max(1, graph.stars.length)) * Math.PI * 2 - Math.PI / 2;
@@ -1284,7 +1309,7 @@
       return null;
     };
     // 3) 实体=行星；fact/chunk/note/event=卫星；树深度任意
-    for (const n of graph.nodes) {
+    for (const n of source) {
       if (n.kind === "domain") continue;
       n.children = [];
       const star = findStar(n);
@@ -1375,7 +1400,7 @@
   function renderTourPanel() {
     const list = $("tour-list");
     list.innerHTML = "";
-    const candidates = graph.nodes
+    const candidates = visibleNodes()
       .filter(n => n.kind === "domain" || (n.kind === "entity" && (n.importance || 0) >= 0.8))
       .sort((a, b) => (b.importance || 0) - (a.importance || 0))
       .slice(0, 5);
@@ -1534,6 +1559,7 @@
     for (const edge of graph.edges) {
       const s = graph.byId.get(edge.source), t = graph.byId.get(edge.target);
       if (!s || !t || s.wx == null || t.wx == null) continue;
+      if (graph.visible.size && !edgeVisible(edge, s, t)) continue;   // U7：筛选后不画跨出视野的边
       if (s.wx < viewL || s.wx > viewR || s.wy < viewT || s.wy > viewB ||
           t.wx < viewL || t.wx > viewR || t.wy < viewT || t.wy > viewB) continue;
       const ps = project2D(s.wx, s.wy), pt = project2D(t.wx, t.wy);
@@ -1751,15 +1777,22 @@
 
     title.textContent = node.title || "(未命名)";
     date.textContent = node.date || "—";
-    depth.textContent = `领域: ${node.domain || UNCLASSIFIED} · 重要度 ${(node.importance ?? 0.5).toFixed(2)}`;
+    const aliases = (node.meta && node.meta.aliases) || [];
+    // U7 实体档案：别名来自图库的实体属性（Neo4j / 内存镜像）
+    depth.textContent = `领域: ${node.domain || UNCLASSIFIED} · 重要度 ${(node.importance ?? 0.5).toFixed(2)}`
+      + (aliases.length ? ` · 别名: ${aliases.join(" / ")}` : "");
     content.textContent = node.content || "（暂无正文）";
     agent.textContent = node.source
       ? `来源：${node.source}。${node.meta && node.meta.predicate ? `关系：${node.meta.subject} —${node.meta.predicate}→ ${node.meta.object}` : ""}`
       : "此天体的语义注记将随知识库积累而生长。";
 
-    // 因果引力关联
+    // 因果引力关联（筛选后隐藏通向视野外天体的边，避免点了跳不到）
     relList.innerHTML = "";
-    const relEdges = graph.edges.filter(e => e.source === node.id || e.target === node.id);
+    const relEdges = graph.edges.filter(e => {
+      if (e.source !== node.id && e.target !== node.id) return false;
+      const other = graph.byId.get(e.source === node.id ? e.target : e.source);
+      return !!other && (!graph.visible.size || graph.visible.has(other.id));
+    });
     if (relEdges.length) {
       relSection.style.display = "block";
       relCount.textContent = `${relEdges.length} 条关联`;
@@ -1854,6 +1887,42 @@
     e.currentTarget.classList.toggle("active", edgesVisible);
     e.currentTarget.textContent = `引力桥 ${edgesVisible ? "ON" : "OFF"}`;
   });
+
+  // U7 领域筛选：纯前端过滤，图与抽屉自动跳过被隐藏的一端。
+  const filterSelect = $("filter-domain");
+
+  function renderDomainOptions() {
+    const names = graph.nodes.filter(n => n.kind === "domain").map(n => n.domain || UNCLASSIFIED);
+    filterSelect.innerHTML = '<option value="">全部领域</option>'
+      + names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+    if (!names.includes(domainFilter)) domainFilter = "";
+    filterSelect.value = domainFilter;
+  }
+
+  function filteredStats() {
+    const counts = { domains: 0, total: 0, chunks: 0, edges: 0 };
+    for (const node of visibleNodes()) {
+      counts.total += 1;
+      if (node.kind === "domain") counts.domains += 1;
+      if (node.kind === "chunk") counts.chunks += 1;
+    }
+    counts.edges = graph.edges.filter(edge => {
+      const s = graph.byId.get(edge.source), t = graph.byId.get(edge.target);
+      return s && t && graph.visible.has(s.id) && graph.visible.has(t.id);
+    }).length;
+    return counts;
+  }
+
+  function applyDomainFilter(value) {
+    domainFilter = value || "";
+    buildStarSystem();
+    renderTourPanel();
+    computeOverview();
+    zoomToLevel(-1);   // 筛选后旧焦点多半已不在树里，直接回全景
+    updateStats(domainFilter ? filteredStats() : (graph.stats || {}));
+    toast(domainFilter ? `只看领域「${domainFilter}」` : "已显示全部领域");
+  }
+  filterSelect.addEventListener("change", () => applyDomainFilter(filterSelect.value));
 
   // =====================================================================
   // 8. 搜索
