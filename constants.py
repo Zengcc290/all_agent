@@ -6,6 +6,22 @@
 集中后所有工具会共享同一个开关，破坏协议设计。
 
 每个常量都以注释标注它"所在/来自"的源文件，便于溯源。
+
+下文「连接与端点」一节是**「服务连哪里」的唯一事实来源**（本机回环端口、
+Qdrant/Neo4j 端点、嵌入网关与隧道端口）；部署机密的覆盖入口是 ``.env``
+（不入库）。
+
+刻意**不**收进来的（各有归属，集中反而割裂，列出出处便于查找）：
+  - ``tool/*.py`` 的 ``TOOL_ENABLED``：工具发现协议要求的每模块开关（见上）。
+  - ``memory/storage/document_repo.py`` 的状态枚举（``DOCUMENT_STATUSES`` /
+    ``CHUNK_VECTOR_STATUSES`` / ``PERMISSIONS`` / ``FTS_TOKENIZERS``）：与同文件
+    的 DDL 同源，改表结构就得改它，分开会漂移。
+  - 各工具自己的协议上限（``tool/fs_*.py``、``tool/_shared.py`` 的 ``MAX_*`` /
+    ``*_ENV``）：只被该工具读取，属工具契约的一部分。
+  - ``web/domain_classifier.py`` 的 ``DOMAIN_KEYWORDS`` 词表、
+    ``web/seed.py`` 的 ``SEED_MARK``、``agents/message_utils.py`` 的
+    ``DEFAULT_TOOL_NAME`` / ``MAX_TOOL_*``、``scripts/*.py`` 的 ``ROOT``：
+    分别是词表数据、种子标记、消息清洗上限与脚本自身锚点。
 """
 
 from __future__ import annotations
@@ -83,16 +99,63 @@ DEFAULT_UPDATE_LOG_FILENAME = "update_log.sqlite3"
 DEFAULT_MEMORY_DB_FILENAME = "memory.sqlite3"
 
 # ---------------------------------------------------------------------------
+# 连接与端点（本机回环 / SSH 隧道）——「服务连哪里」的唯一事实来源
+#   所在文件：constants.py（本段定义）→ 直接 import 方：
+#     memory/base.py（MemoryConfig 连接字段的默认值与说明）、
+#     memory/embedding.py（EmbedServerEmbedding 默认 base_url、gateway_reachable）、
+#     memory/storage/qdrant.py（默认 collection）、web/app.py（服务监听 host/port）
+#   间接消费方（不 import，由 MemoryConfig 传值决定选型）：
+#     memory/manager.py（qdrant_url/neo4j_uri 非空才建真存储，否则内存回退）、
+#     memory/storage/graph.py（URI 由 MemoryConfig 传参）
+#   部署覆盖入口：.env（不入库；模板见仓库外，键名见下方各常量注释）
+#   重要：下面的 QDRANT / NEO4J 端点是「本机文档化默认值」，**不是默认启用**。
+#   MemoryConfig.qdrant_url / neo4j_uri 出厂仍为 None（= 不连接、走内存回退），
+#   只有显式配置（.env 或构造参数）才连真服务；理由见方案 §12 与 F3。
+# ---------------------------------------------------------------------------
+
+#: 本机服务统一绑定的回环地址。用字面 IP 而不是 "localhost"：后者在
+#: 部分 Windows 环境解析到 ::1，而服务只监听 IPv4，表现为"连不上"。
+LOCALHOST = "127.0.0.1"
+
+#: 本机回环端口分配表（改端口只改这里）：
+#:   10800 = SSH 隧道入口，即 EMBEDDING_BASE_URL 的端口；
+#:    6333 = 本地 Qdrant HTTP；
+#:    7687 = 本地 Neo4j bolt；
+#:    8765 = 本地 Web 服务（环境变量 NEBULA_PORT 可覆盖）。
+DEFAULT_EMBEDDING_GATEWAY_PORT = 10800
+DEFAULT_QDRANT_PORT = 6333
+DEFAULT_NEO4J_BOLT_PORT = 7687
+DEFAULT_WEB_PORT = 8765
+
+#: 隧道另一端的 qwen-embed 网关端口。主机名与 SSH 端口属部署信息，**不写进
+#: 仓库**：由 .env 的 EMBEDDING_TUNNEL_HINT 或部署文档提供（见 .env 注释）。
+DEFAULT_EMBEDDING_TUNNEL_REMOTE_PORT = 18000
+
+#: 本地 Qdrant 端点。启用方式（.env，不入库）：
+#:   HELLOAGENTS_MEMORY_QDRANT_URL=http://127.0.0.1:6333
+DEFAULT_QDRANT_URL = f"http://{LOCALHOST}:{DEFAULT_QDRANT_PORT}"
+
+#: 本地 Neo4j 端点与账号。启用方式（.env，不入库）：
+#:   HELLOAGENTS_MEMORY_NEO4J_URI=bolt://127.0.0.1:7687
+#:   HELLOAGENTS_MEMORY_NEO4J_USERNAME=neo4j
+#:   HELLOAGENTS_MEMORY_NEO4J_PASSWORD=<你的密码>
+#: 密码这里只是 Neo4j 首次安装的出厂占位，真实密码只放 .env。
+DEFAULT_NEO4J_URI = f"bolt://{LOCALHOST}:{DEFAULT_NEO4J_BOLT_PORT}"
+DEFAULT_NEO4J_USERNAME = "neo4j"
+DEFAULT_NEO4J_PASSWORD = "neo4j"
+
+# ---------------------------------------------------------------------------
 # 嵌入服务（memory/embedding.py）
 #   所在文件：memory/embedding.py（APIEmbedding 默认参数）、memory/base.py（MemoryConfig）
 # ---------------------------------------------------------------------------
 
 #: 默认端点与模型（qwen3-embedding-0.6b，1024 维）。
-#: 端点默认指向**本机隧道**（方案 §0.1/D8：网关是唯一嵌入来源；.env 里的
-#: EMBEDDING_TUNNEL_HINT 给出建隧道的命令）。不要改回公网厂商端点：
+#: 端点默认指向**本机隧道**（方案 §0.1/D8：网关是唯一嵌入来源；端口取自
+#: 上面的 DEFAULT_EMBEDDING_GATEWAY_PORT，.env 里的 EMBEDDING_TUNNEL_HINT
+#: 给出建隧道的命令）。不要改回公网厂商端点：
 #: 那样在缺 .env 时会静默改用另一套向量空间（§12「向量空间不可互换」），
 #: 而指向本机隧道时隧道不通会明确降级为关键词检索并提示隧道命令。
-DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:10800"
+DEFAULT_EMBEDDING_BASE_URL = f"http://{LOCALHOST}:{DEFAULT_EMBEDDING_GATEWAY_PORT}"
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
 
 #: DashScope 风格批处理上限；其他厂商可在构造时降低/提高 batch_size。

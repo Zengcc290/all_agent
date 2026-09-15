@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 
 from constants import (
     DEFAULT_DOMAIN,
+    DEFAULT_WEB_PORT,
+    LOCALHOST,
     MAX_UPLOAD_BYTES,
     RAG_CHUNK_OVERLAP,
     RAG_CHUNK_SIZE,
@@ -846,4 +848,4 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("NEBULA_PORT", "8765")))
+    uvicorn.run(app, host=LOCALHOST, port=int(os.getenv("NEBULA_PORT", str(DEFAULT_WEB_PORT))))

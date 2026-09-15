@@ -35,6 +35,7 @@ from constants import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
+    LOCALHOST,
     MEMORY_EMBEDDING_DIMENSION,
 )
 
@@ -221,7 +222,7 @@ def gateway_reachable(base_url: str, *, timeout: float = 1.0) -> bool:
     if not isinstance(base_url, str) or not base_url.strip():
         return False
     parsed = urllib.parse.urlsplit(base_url if "//" in base_url else f"//{base_url}")
-    host = parsed.hostname or "127.0.0.1"
+    host = parsed.hostname or LOCALHOST
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -247,7 +248,7 @@ class EmbedServerEmbedding(BaseEmbedding):
         self,
         api_key: str | None = None,
         *,
-        base_url: str = "http://127.0.0.1:10800",
+        base_url: str = DEFAULT_EMBEDDING_BASE_URL,
         dimension: int | None = None,
         timeout: float = 60.0,
         batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,

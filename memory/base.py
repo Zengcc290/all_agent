@@ -265,6 +265,13 @@ class MemoryConfig:
     embedding_api_key: str | None = None
     embedding_timeout: float = MEMORY_EMBEDDING_TIMEOUT
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
+    # ---- 连接开关：出厂 None = **不连接**，走内存回退（Qdrant/Neo4j 都不起也能跑）----
+    # 端点/端口的单一事实来源是 constants.py 的「连接与端点」小节
+    # （DEFAULT_QDRANT_URL / DEFAULT_NEO4J_URI / DEFAULT_*_PORT）。
+    # 要连真服务就在 .env 里设（前缀由 from_env 的 prefix 决定）：
+    #   HELLOAGENTS_MEMORY_QDRANT_URL=http://127.0.0.1:6333
+    #   HELLOAGENTS_MEMORY_NEO4J_URI=bolt://127.0.0.1:7687  （+_USERNAME/_PASSWORD）
+    # 选型发生在 memory/manager.py：qdrant_url 非空才建 QdrantVectorStore。
     qdrant_url: str | None = None
     qdrant_collection: str = MEMORY_QDRANT_COLLECTION
     neo4j_uri: str | None = None

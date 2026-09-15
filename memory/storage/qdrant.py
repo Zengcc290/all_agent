@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from constants import MEMORY_QDRANT_COLLECTION
+
 from ..base import MemoryItem, MemoryType
 from .vector import BaseVectorStore
 
@@ -17,7 +19,7 @@ class QdrantVectorStore(BaseVectorStore):
     allowing the embedding dimension to be discovered from the item.
     """
 
-    def __init__(self, url: str | None = None, collection_name: str = "helloagents_memory", *, api_key: str | None = None, client: Any = None, dimension: int | None = None, namespace: str = "memory") -> None:
+    def __init__(self, url: str | None = None, collection_name: str = MEMORY_QDRANT_COLLECTION, *, api_key: str | None = None, client: Any = None, dimension: int | None = None, namespace: str = "memory") -> None:
         if not isinstance(namespace, str) or not namespace.strip():
             raise ValueError("namespace must be a non-empty string")
         if client is None:
