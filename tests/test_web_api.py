@@ -809,6 +809,62 @@ def test_graph_since_zero_is_a_valid_cursor_not_a_missing_parameter(
     assert delta["stats"] == full["stats"]
 
 
+def test_gateway_down_keeps_read_paths_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """方案 §11.6：隧道断开时 /api/graph、/api/documents、FTS5 关键词检索仍然正常。"""
+
+    app, manager = _dead_gateway_client(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        # 直接写真值源（不经嵌入网关），模拟「隧道断之前入库、断之后仍要能读」。
+        repository = app.state.pipeline.document_repo()
+        assert repository is not None
+        repository.upsert_document(
+            DocumentRecord(document_id="doc-down-1", source="降级.txt", raw_text="设备编号 abc-123 的降级检索。" * 4)
+        )
+        repository.upsert_chunk(
+            ChunkRecord(
+                chunk_id="doc-down-1:0",
+                document_id="doc-down-1",
+                chunk_index=0,
+                text="设备编号 abc-123 的降级检索。" * 4,
+                char_start=0,
+                char_end=len("设备编号 abc-123 的降级检索。") * 4,
+            )
+        )
+
+        assert client.get("/api/graph").status_code == 200
+        listing = client.get("/api/documents").json()
+        assert listing["total"] == 1
+        assert client.get("/api/stats").status_code == 200
+
+        # 关键词路仍然召回，且检索管道明确记录降级原因（不返回空、不伪造相似度）
+        hits = app.state.pipeline.hybrid_retrieve("abc-123", limit=3)
+        assert hits and "abc-123" in hits[0].content
+        assert hits[0].detail["vector_score"] is None       # 没有假装有向量分
+        assert hits[0].detail["keyword_score"] is not None
+        assert "降级" in app.state.pipeline.last_retrieval_note
+    manager.close()
+
+
+def test_static_smoke_home_page_and_renderable_graph(file_client) -> None:
+    """方案 §10.5 静态冒烟：GET / 200 且含 #universe；/api/graph 返回可渲染的 nodes/edges。"""
+
+    client, _ = file_client
+
+    home = client.get("/")
+    assert home.status_code == 200
+    # 方案写的是「含 #universe」= 含该元素；画布样式走元素选择器 canvas{}，没有 #universe 规则
+    assert 'id="universe"' in home.text
+    assert "canvas {" in home.text
+
+    payload = client.get("/api/graph").json()
+    assert isinstance(payload["nodes"], list) and isinstance(payload["edges"], list)
+    assert payload["nodes"], "内置时间线实体至少应有一个节点，否则前端无图可渲染"
+    for node in payload["nodes"]:
+        assert {"id", "kind", "title", "domain", "importance"} <= set(node)
+    for edge in payload["edges"]:
+        assert {"source", "target", "relation"} <= set(edge)
+
+
 class DeadGatewayEmbedding(HashEmbedding):
     """已配置网关但连不上：用真实会被拒连的端口，逼出降级分支。"""
 

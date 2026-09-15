@@ -87,8 +87,12 @@ DEFAULT_MEMORY_DB_FILENAME = "memory.sqlite3"
 #   所在文件：memory/embedding.py（APIEmbedding 默认参数）、memory/base.py（MemoryConfig）
 # ---------------------------------------------------------------------------
 
-#: 默认厂商端点与模型（qwen3-embedding-0.6b，1024 维，DashScope 兼容端点）。
-DEFAULT_EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+#: 默认端点与模型（qwen3-embedding-0.6b，1024 维）。
+#: 端点默认指向**本机隧道**（方案 §0.1/D8：网关是唯一嵌入来源；.env 里的
+#: EMBEDDING_TUNNEL_HINT 给出建隧道的命令）。不要改回公网厂商端点：
+#: 那样在缺 .env 时会静默改用另一套向量空间（§12「向量空间不可互换」），
+#: 而指向本机隧道时隧道不通会明确降级为关键词检索并提示隧道命令。
+DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:10800"
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
 
 #: DashScope 风格批处理上限；其他厂商可在构造时降低/提高 batch_size。

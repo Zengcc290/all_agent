@@ -48,6 +48,21 @@ def test_defaults_point_at_qwen3_embedding():
     assert instance.dimension == 0  # learned from the first response
 
 
+def test_default_endpoint_is_the_local_gateway_not_a_public_cloud():
+    """方案 §0.1/§11.7：默认出网点是本机隧道网关。
+
+    缺 .env 时若默认指向公网厂商，会静默换成另一套向量空间（§12 明列的风险），
+    而指向本机隧道时隧道不通只会明确降级为关键词检索并提示隧道命令。
+    """
+
+    from memory import MemoryConfig
+
+    assert DEFAULT_EMBEDDING_BASE_URL.startswith("http://127.0.0.1:")
+    assert "dashscope" not in DEFAULT_EMBEDDING_BASE_URL
+    # MemoryConfig 的默认值也必须是同一个本机端点（两者不一致会导致换端点换空间）
+    assert MemoryConfig().embedding_base_url == DEFAULT_EMBEDDING_BASE_URL
+
+
 def test_embed_batch_uses_openai_shape_and_learns_dimension():
     calls: list[dict] = []
 
