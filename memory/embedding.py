@@ -446,9 +446,6 @@ def _extract_embedding_vectors(response: Any) -> list[list[float]]:
     return [vector for _, vector in indexed]
 
 
-# A friendly alias used by integrations that treat this layer as a service.
-EmbeddingService = BaseEmbedding
-
 __all__ = [
     "DEFAULT_EMBEDDING_BASE_URL",
     "DEFAULT_EMBEDDING_BATCH_SIZE",
@@ -456,6 +453,5 @@ __all__ = [
     "APIEmbedding",
     "BaseEmbedding",
     "EmbedServerEmbedding",
-    "EmbeddingService",
     "load_dotenv_once",
 ]

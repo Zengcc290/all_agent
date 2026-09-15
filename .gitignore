@@ -26,3 +26,6 @@ Thumbs.db
 config/provider.toml
 config/providers.toml
 !config/provider.example.toml
+
+# Editor metadata / attachments
+.opensquilla/
