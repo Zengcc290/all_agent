@@ -152,3 +152,39 @@ def test_u4_retrieval_breakdown_panel_is_wired() -> None:
     for label in ("向量 ", "关键词 ", "RRF "):
         assert label in html
     assert "fmtScore" in html
+
+
+def test_u8_keyboard_reachability_and_small_screen_layout() -> None:
+    """U8：交互行用原生 button、ESC 逐层关闭、抽屉手势、小屏布局。"""
+
+    html = INDEX.read_text(encoding="utf-8")
+
+    # 1) 可点击的行改成原生 button（Tab/Enter/空格由浏览器负责）
+    assert 'card.className = "subnode-card"' in html
+    for cls in ("subnode-card", "search-hit", "evidence-item", "parent-uplink-btn"):
+        assert f'{cls}"' in html
+    assert html.count('createElement("button")') >= 4
+    # 曾经的 div 写法不该再出现在这几处
+    assert 'const card = document.createElement("div");\n        card.className = "subnode-card";' not in html
+    assert 'const row = document.createElement("div");\n        row.className = "search-hit";' not in html
+
+    # 2) 焦点可见 + 关闭按钮有可读名称
+    assert ":focus-visible { outline:" in html
+    assert 'aria-label="关闭详情抽屉"' in html and 'aria-label="关闭对话面板"' in html
+    assert 'aria-label="搜索知识星云"' in html and 'aria-label="向知识管家提问"' in html
+    # 画布对读屏有说明；动态区域会播报
+    assert 'aria-label="知识星云图' in html
+    assert 'id="chat-msgs" aria-live="polite"' in html
+    assert 'id="toasts" aria-live="polite"' in html
+
+    # 3) ESC 逐层关闭 + 抽屉手势
+    assert 'event.key !== "Escape"' in html
+    assert "function endDrawerSwipe" in html or "const endDrawerSwipe" in html
+    assert "pointerdown" in html and "pointermove" in html and "pointerup" in html
+    # 手势不与内容滚动打架：竖直方向只在滚动到顶时才跟随
+    assert "drawerScroll.scrollTop <= 0" in html
+
+    # 4) 小屏布局
+    assert "@media (max-width: 720px)" in html
+    assert "#detail-drawer.visible { transform: translateY(0); }" in html
+    assert "min-height: 44px" in html

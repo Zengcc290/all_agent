@@ -947,6 +947,62 @@
 
     #edge-toggle-btn.active { color: #34d399; box-shadow: 0 0 12px rgba(52, 211, 153, 0.4); }
 
+    /* =================================================================
+       U8 可访问性与小屏
+       ================================================================= */
+    /* 键盘焦点必须看得见（鼠标点击不画环，避免视觉噪音） */
+    :focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+
+    /* 这些行原本是可点击的 div，改成原生 button 以取得 Tab/Enter/空格支持；
+       只补浏览器默认样式里影响观感的部分，其余仍由各自的类规则决定
+       （:where 零特异性，所以 .subnode-card 自己的背景等照常生效）。 */
+    :where(button.subnode-card, button.search-hit, button.evidence-item, button.parent-uplink-btn) {
+      display: block;
+      width: 100%;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      background: transparent;
+      border: 0;
+    }
+
+    /* 小屏：HUD 换行铺满、抽屉改为底部整屏上滑（配合手势）、导览面板让位给星图 */
+    @media (max-width: 720px) {
+      .controls.hud {
+        left: 8px;
+        right: 8px;
+        bottom: 10px;
+        transform: none;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px;
+        padding: 8px 10px;
+        border-radius: 16px;
+      }
+      .controls.hud .btn { min-height: 44px; flex: 1 1 45%; }
+      #filter-domain { max-width: none; flex: 1 1 100%; min-height: 44px; }
+      .tour-panel { display: none; }
+      #detail-drawer {
+        top: auto;
+        bottom: 0;
+        right: 0;
+        left: 0;
+        width: auto;
+        max-height: 88vh;
+        border-radius: 18px 18px 0 0;
+        padding: 16px;
+        transform: translateY(110%);
+      }
+      #detail-drawer.visible { transform: translateY(0); }
+      #chat-panel, #documents-panel, #storage-panel {
+        left: 8px;
+        right: 8px;
+        width: auto;
+        max-width: none;
+      }
+      .searchwrap { width: min(320px, 60vw); }
+    }
+
     /* U7 领域筛选：外观沿用 .btn，去掉原生 select 的默认样式 */
     #filter-domain {
       appearance: none;
@@ -967,12 +1023,12 @@
 
   <div class="top-actions">
     <div class="searchwrap">
-      <input id="search-input" type="text" placeholder="搜索星图：标题 / 内容 / 领域…" autocomplete="off">
+      <input id="search-input" type="text" placeholder="搜索星图：标题 / 内容 / 领域…" autocomplete="off" aria-label="搜索知识星云">
       <div id="search-results"></div>
     </div>
     <button id="btn-add-knowledge" class="action-btn primary">＋ 添加知识</button>
     <button id="btn-ingest" class="action-btn">⤒ 导入文档</button>
-    <button id="btn-documents" class="action-btn">▤ 文档中心</button>
+    <button id="btn-documents" class="action-btn" aria-expanded="false" aria-controls="documents-panel">▤ 文档中心</button>
     <button id="btn-export" class="action-btn">⤓ 导出星图</button>
     <button id="btn-chat" class="action-btn">✦ 知识管家</button>
   </div>
@@ -994,7 +1050,7 @@
     <span style="color: #64748b; font-size: 10px;">➔</span>
   </button>
 
-  <canvas id="universe"></canvas>
+  <canvas id="universe" role="img" aria-label="知识星云图：恒星是领域、行星是实体、卫星是事实与知识块。键盘用户可用左上角快捷导览按钮或搜索框定位天体。"></canvas>
 
   <div class="controls hud">
     <button class="btn active" id="btn-reset">回到全景宏观视野</button>
@@ -1068,7 +1124,7 @@
   </div>
 
   <div id="detail-drawer">
-    <button class="close-btn" id="drawer-close">✕</button>
+    <button class="close-btn" id="drawer-close" aria-label="关闭详情抽屉">✕</button>
     <div id="parent-uplink-container"></div>
 
     <div class="drawer-scroll-container">
@@ -1145,9 +1201,9 @@
         <div class="title">知识管家</div>
         <div class="sub" id="chat-status-text">检测服务状态中…</div>
       </div>
-      <button class="close-chat" id="chat-close">✕</button>
+      <button class="close-chat" id="chat-close" aria-label="关闭对话面板">✕</button>
     </div>
-    <div class="chat-msgs" id="chat-msgs">
+    <div class="chat-msgs" id="chat-msgs" aria-live="polite">
       <div class="bubble ai">你好，我是你的知识管家。问我任何关于你知识库的事——「我最近在学什么？」「X 和 Y 有什么关系？」</div>
     </div>
     <div class="chat-input-bar">
@@ -1156,14 +1212,14 @@
         <option value="online">🌐 联网 · 记忆+搜索</option>
         <option value="graphrag">🕸 图谱推理 · 多跳（本地，不需要聊天模型）</option>
       </select>
-      <textarea id="chat-textarea" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <textarea id="chat-textarea" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）" aria-label="向知识管家提问"></textarea>
       <button id="chat-send-btn" disabled>发送</button>
     </div>
     <div id="chat-mode-hint" hidden></div>
   </div>
 
   <input id="file-input" type="file" hidden accept=".txt,.md,.html,.htm,.json,.jsonl,.csv,.pdf">
-  <div id="toasts"></div>
+  <div id="toasts" aria-live="polite"></div>
 
   <div id="boot-overlay">
     <div class="boot-orb"></div>
@@ -1785,7 +1841,8 @@
 
     parentContainer.innerHTML = "";
     if (node.treeParent) {
-      const upBtn = document.createElement("div");
+      // U8：原生 button 才能被 Tab 聚焦、Enter/空格触发，不再自造键盘处理。
+      const upBtn = document.createElement("button");
       upBtn.className = "parent-uplink-btn";
       upBtn.innerHTML = `<span>← 飞向母星:</span> <b>${escapeHtml(shortTitle(node.treeParent.title))}</b>`;
       upBtn.addEventListener("click", () => drillIntoNode(node.treeParent));
@@ -1820,7 +1877,7 @@
       relCount.textContent = `${relEdges.length} 条关联`;
       for (const e of relEdges) {
         const other = e.source === node.id ? graph.byId.get(e.target) : graph.byId.get(e.source);
-        const card = document.createElement("div");
+        const card = document.createElement("button");
         card.className = "subnode-card";
         const dir = e.source === node.id ? "→" : "←";
         card.innerHTML = `
@@ -1842,7 +1899,7 @@
       subSection.style.display = "block";
       subCount.textContent = `${kids.length} 个天体`;
       for (const child of kids) {
-        const card = document.createElement("div");
+        const card = document.createElement("button");
         card.className = "subnode-card";
         card.innerHTML = `
           <div class="subnode-card-top">
@@ -1883,6 +1940,57 @@
   $("drawer-close").addEventListener("click", closeDrawer);
   reopenTrigger.addEventListener("click", () => {
     if (currentFocusNode) renderDrawer(currentFocusNode);
+  });
+
+  // U8 抽屉手势：小屏上抽屉从底部升起，横向滑走、或内容已滚到顶时向下滑，都能收起。
+  // 竖直方向只有在滚动条已在顶部时才跟随手指，否则会和内容滚动打架（鼠标不参与，
+  // 免得和画布拖拽抢事件）。
+  let drawerSwipe = null;
+  const drawerScroll = drawer.querySelector(".drawer-scroll-container");
+  const swipeDelta = (event, start) => ({
+    dx: event.clientX - start.x,
+    dy: event.clientY - start.y,
+  });
+  drawer.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse") return;
+    drawerSwipe = { x: event.clientX, y: event.clientY };
+    drawer.style.transition = "none";   // 拖动期间跟手，松手再交还 CSS 过渡
+  });
+  drawer.addEventListener("pointermove", (event) => {
+    if (!drawerSwipe) return;
+    const { dx, dy } = swipeDelta(event, drawerSwipe);
+    if (Math.abs(dx) > Math.abs(dy)) drawer.style.transform = `translate(${Math.max(0, dx)}px, 0)`;
+    else if (dy > 0 && (!drawerScroll || drawerScroll.scrollTop <= 0)) {
+      drawer.style.transform = `translate(0, ${dy}px)`;
+    }
+  });
+  const endDrawerSwipe = (event) => {
+    if (!drawerSwipe) return;
+    const start = drawerSwipe;
+    drawerSwipe = null;
+    drawer.style.transition = "";
+    drawer.style.transform = "";
+    if (!event) return;
+    const { dx, dy } = swipeDelta(event, start);
+    const atTop = !drawerScroll || drawerScroll.scrollTop <= 0;
+    if ((dx > 60 && Math.abs(dy) < 40) || (atTop && dy > 80 && Math.abs(dx) < 60)) closeDrawer();
+  };
+  drawer.addEventListener("pointerup", endDrawerSwipe);
+  drawer.addEventListener("pointercancel", () => endDrawerSwipe(null));
+
+  // U8 键盘可达：ESC 逐层关闭，顺序与视觉层级一致（抽屉 → 文档 → 存储 → 对话 → 搜索建议）
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (drawer.classList.contains("visible")) { closeDrawer(); return; }
+    if (!$("documents-panel").hidden) { openDocumentsPanel(false); $("btn-documents").focus(); return; }
+    if (!$("storage-panel").hidden) {
+      $("storage-panel").hidden = true;
+      $("btn-storage").setAttribute("aria-expanded", "false");
+      $("btn-storage").focus();
+      return;
+    }
+    if ($("chat-panel").classList.contains("open")) { $("chat-panel").classList.remove("open"); $("btn-chat").focus(); return; }
+    if ($("search-results").style.display !== "none") { $("search-results").style.display = "none"; }
   });
 
   // =====================================================================
@@ -1970,7 +2078,7 @@
       searchResults.innerHTML = `<div class="search-empty">没有找到与「${escapeHtml(searchInput.value.trim())}」相关的天体</div>`;
     } else {
       for (const hit of hits) {
-        const row = document.createElement("div");
+        const row = document.createElement("button");
         row.className = "search-hit";
         row.innerHTML = `<span class="k">${escapeHtml(hit.kind)}</span><span class="t">${escapeHtml(shortTitle(hit.title))}</span>`;
         row.addEventListener("click", () => {
@@ -2137,7 +2245,7 @@
     for (const item of evidence) {
       const meta = item.metadata || {};
       const label = meta.title || meta.source || item.content || item.id;
-      const row = document.createElement("div");
+      const row = document.createElement("button");
       row.className = "evidence-item";
       const chunkIndex = meta.chunk_index;
       row.innerHTML = `
@@ -2317,6 +2425,7 @@
   function openDocumentsPanel(open) {
     const panel = $("documents-panel");
     panel.hidden = !open;
+    $("btn-documents").setAttribute("aria-expanded", String(open));   // U8：开关状态对读屏可见
     if (!open) return;
     $("storage-panel").hidden = true;   // 两个左侧面板互斥，避免叠在一起
     if (!docState.total) loadDocuments(1);
