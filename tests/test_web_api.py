@@ -376,6 +376,36 @@ def test_chat_records_qa_into_episodic_memory(
     assert any("这是测试回答" in item["content"] for item in found.items)
 
 
+def test_chat_returns_retrieval_breakdown_for_the_provenance_panel(
+    file_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U4：回答要带每条命中的向量分/关键词分/RRF 分，气泡下的「依据」才有东西可展开。"""
+
+    client, _ = file_client
+    _force_search_env(monkeypatch, on=False)
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: _make_fake_agent())
+    _ingest_documents(client, ["设备编号 abc-123 的溯源面板文档，讲的是混合检索。" * 4])
+
+    payload = client.post("/api/chat", json={"message": "abc-123"}).json()
+
+    report = payload["retrieval"]
+    assert set(report) == {"note", "hits"}
+    assert report["note"] == ""          # HashEmbedding 下两路都通，没有降级
+    assert report["hits"], "刚导入的分块必须被检索到"
+    hit = report["hits"][0]
+    assert set(hit) == {
+        "chunk_id", "document_id", "chunk_index", "snippet", "score",
+        "rrf_score", "vector_score", "keyword_score",
+    }
+    assert hit["document_id"] and hit["snippet"]
+    assert hit["rrf_score"] == pytest.approx(hit["score"])
+    assert hit["vector_score"] is not None and hit["keyword_score"] is not None
+
+    # 同时保留原有的图证据契约（U1 的抽屉依赖它）
+    assert "sources" in payload and "paths" in payload
+
+
 def test_chat_tool_names_follow_mode(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

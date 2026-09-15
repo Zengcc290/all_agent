@@ -892,6 +892,28 @@
     .doc-badge.dim { color: #64748b; }
     .doc-pager { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
     .doc-pager .btn { flex: 0 0 auto; }
+
+    /* U4 检索溯源：回答气泡里的「依据」明细 */
+    .retrieval {
+      margin-top: 8px;
+      border-top: 1px dashed rgba(148, 163, 184, 0.28);
+      padding-top: 6px;
+      font-size: 11px;
+    }
+    .retrieval > summary {
+      cursor: pointer;
+      color: #7dd3fc;
+      outline-offset: 2px;
+    }
+    .retrieval-note { margin: 6px 0 2px; color: #fbbf24; }
+    .retrieval-item {
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.7);
+    }
+    .retrieval-snippet { color: #cbd5e1; word-break: break-word; }
+    .retrieval-meta { margin-top: 3px; color: #64748b; font-variant-numeric: tabular-nums; }
     #doc-detail .doc-text {
       max-height: 40vh;
       overflow-y: auto;
@@ -2133,6 +2155,41 @@
     return evidence.length;
   }
 
+  // U4 检索溯源：回答气泡下方的「依据」面板。用原生 <details> 取得键盘可达与
+  // 展开状态（U8 同样受益），不再自绘一个开关按钮。
+  const fmtScore = (value) => (value == null ? "—" : Number(value).toFixed(3));
+
+  function appendRetrieval(bubble, report) {
+    const hits = (report && report.hits) || [];
+    const note = (report && report.note) || "";
+    if (!hits.length && !note) return 0;
+    const details = document.createElement("details");
+    details.className = "retrieval";
+    const summary = document.createElement("summary");
+    summary.textContent = `依据 ${hits.length} 条 · 向量/关键词/RRF 分数${note ? "（已降级）" : ""}`;
+    details.appendChild(summary);
+    if (note) {
+      const warn = document.createElement("div");
+      warn.className = "retrieval-note";
+      warn.textContent = note;
+      details.appendChild(warn);
+    }
+    for (const hit of hits) {
+      const row = document.createElement("div");
+      row.className = "retrieval-item";
+      const label = hit.document_id
+        ? `${hit.document_id}${hit.chunk_index == null ? "" : ` · 第 ${Number(hit.chunk_index) + 1} 块`}`
+        : "本机记忆";
+      row.innerHTML = `
+        <div class="retrieval-snippet">${escapeHtml((hit.snippet || "").slice(0, 120))}</div>
+        <div class="retrieval-meta">${escapeHtml(label)} · 向量 ${fmtScore(hit.vector_score)} · 关键词 ${
+          fmtScore(hit.keyword_score)} · RRF ${fmtScore(hit.rrf_score)}</div>`;
+      details.appendChild(row);
+    }
+    bubble.appendChild(details);
+    return hits.length;
+  }
+
   // =====================================================================
   // 10.3 U2 文档中心（/api/documents：真值源列表 / 详情 / 重索引）
   // =====================================================================
@@ -2481,6 +2538,7 @@
       );
       const suffix = [...sources.map(value => `来源：${value}`), ...paths].join("\n");
       think.textContent = [res.answer || "(空回复)", suffix].filter(Boolean).join("\n\n");
+      appendRetrieval(think, res.retrieval);   // U4：可展开的分数明细
     } catch (err) {
       think.classList.remove("thinking");
       think.textContent = "调用失败：" + err.message;

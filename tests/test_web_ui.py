@@ -137,3 +137,18 @@ def test_u7_domain_filter_and_alias_sidebar_are_wired() -> None:
     assert "graph.visible.has(s.id)" in html
     # 别名只读展示自图库（P4 已写入实体属性），来源与重要度沿用节点字段
     assert "node.meta.aliases" in html
+
+
+def test_u4_retrieval_breakdown_panel_is_wired() -> None:
+    """U4：回答气泡下方可展开「依据」，逐条给出向量分/关键词分/融合分。"""
+
+    html = INDEX.read_text(encoding="utf-8")
+
+    assert "appendRetrieval(think, res.retrieval)" in html
+    assert "function appendRetrieval(bubble, report)" in html
+    # 原生 <details> 而非自绘开关：键盘可达（U8 也受益）
+    assert 'document.createElement("details")' in html
+    assert "retrieval.snippet" in html or "retrieval-snippet" in html
+    for label in ("向量 ", "关键词 ", "RRF "):
+        assert label in html
+    assert "fmtScore" in html

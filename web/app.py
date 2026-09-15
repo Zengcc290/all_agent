@@ -296,6 +296,26 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         retrieval = app.state.pipeline.graph_retrieve(
             body.message, limit=RAG_RETRIEVE_LIMIT, hops=RAG_GRAPH_HOPS
         )
+        # U4 溯源：同一句问话再走一遍混合检索（向量 × FTS5 RRF），把每条的
+        # 向量分/关键词分/融合分交给前端做「依据」面板；网关不可用时这里退化为
+        # 纯关键词，正好让降级原因对用户可见，而不是只显示一个空来源列表。
+        hybrid = app.state.pipeline.hybrid_retrieve(body.message, limit=RAG_RETRIEVE_LIMIT)
+        retrieval_report = {
+            "note": app.state.pipeline.last_retrieval_note,
+            "hits": [
+                {
+                    "chunk_id": hit.memory_id,
+                    "document_id": hit.metadata.get("document_id"),
+                    "chunk_index": hit.metadata.get("chunk_index"),
+                    "snippet": (hit.content or "")[:200],
+                    "score": hit.score,
+                    "rrf_score": hit.detail.get("rrf_score"),
+                    "vector_score": hit.detail.get("vector_score"),
+                    "keyword_score": hit.detail.get("keyword_score"),
+                }
+                for hit in hybrid
+            ],
+        }
         return {
             "answer": answer,
             "mode": effective_mode,
@@ -311,6 +331,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 for result in retrieval.evidence
             ],
             "paths": [path.to_dict() for path in retrieval.paths],
+            "retrieval": retrieval_report,
         }
 
     # ------------------------------------------------------------------

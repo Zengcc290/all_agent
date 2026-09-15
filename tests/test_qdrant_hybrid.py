@@ -254,3 +254,51 @@ def test_hybrid_degrades_to_keyword_when_embedding_down(tmp_path):
         assert "不可达" in pipeline.last_retrieval_note
     finally:
         pipeline.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 U4: 溯源分数明细
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_retrieve_exposes_per_path_scores(tmp_path):
+    """U4：融合前要留住两路原始分，否则面板只剩一个 RRF 分数、贡献不可见。"""
+
+    pipeline = build_pipeline(tmp_path, HashEmbedding())
+    try:
+        pipeline.ingest(
+            Document("设备编号 abc-123 的混合检索配置。" * 8, id="doc-score"),
+            chunk_size=120,
+            overlap=20,
+        )
+
+        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+
+        assert results
+        top = results[0]
+        assert set(top.detail) == {"rrf_score", "vector_score", "keyword_score"}
+        # 两路都命中：三个分数都在，且 RRF 分数与对外 score 一致
+        assert top.detail["vector_score"] is not None
+        assert top.detail["keyword_score"] is not None
+        assert top.detail["rrf_score"] == pytest.approx(top.score)
+        # RRF 是名次分：两位有效数字内必然小于 2/(k+1)，用它区分「真分数」实现
+        assert 0 < top.detail["rrf_score"] < 0.033
+        assert all(result.detail["rrf_score"] is not None for result in results)
+    finally:
+        pipeline.close()
+
+
+def test_hybrid_detail_marks_the_missing_path_when_degraded(tmp_path):
+    """降级时向量分为 None（面板显示「—」），关键词分仍在——降级原因因此在界面上可见。"""
+
+    pipeline = build_pipeline(tmp_path, DeadGatewayEmbedding(f"http://127.0.0.1:{closed_port()}"))
+    try:
+        pipeline.ingest(Document("设备编号 abc-123 的降级检索。" * 8, id="doc-score-down"), chunk_size=120, overlap=20)
+
+        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+
+        assert results
+        assert results[0].detail["vector_score"] is None
+        assert results[0].detail["keyword_score"] is not None
+    finally:
+        pipeline.close()

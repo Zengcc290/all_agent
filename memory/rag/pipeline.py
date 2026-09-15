@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,8 @@ class RetrievedChunk:
     score: float
     memory_id: str
     metadata: Mapping[str, Any]
+    #: 混合检索的分数明细（U4 溯源面板）：rrf_score / vector_score / keyword_score。
+    detail: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_result(cls, result: MemorySearchResult) -> RetrievedChunk:
@@ -278,8 +280,8 @@ class RAGPipeline:
                 )
         return results
 
-    def _vector_hits(self, query: str, *, limit: int, threshold: float | None, metadata: Mapping[str, Any] | None) -> list[str]:
-        """Vector-path ids; empty (and noted) when the embedding path is unusable."""
+    def _vector_hits(self, query: str, *, limit: int, threshold: float | None, metadata: Mapping[str, Any] | None) -> list[tuple[str, float]]:
+        """向量路 ``(chunk_id, 相似度)``；不可用时返回空表（并写下降级原因）。"""
 
         base_url = getattr(self.manager.embedding, "base_url", None)
         if base_url and not gateway_reachable(base_url):
@@ -290,7 +292,7 @@ class RAGPipeline:
         except (ConnectionError, OSError, RuntimeError) as exc:
             self.last_retrieval_note = f"向量检索失败，本次检索降级为纯关键词（FTS5）：{type(exc).__name__}: {exc}"
             return []
-        return [result.item.id for result in results]
+        return [(result.item.id, float(result.score)) for result in results]
 
     def hybrid_retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
         """向量路 × FTS5 关键词路，RRF 融合；向量不可用时退化为纯关键词（D8）。
@@ -304,12 +306,30 @@ class RAGPipeline:
             return self.retrieve(query, limit=limit, threshold=threshold, metadata=metadata)
         self.last_retrieval_note = ""
         vector_hits = self._vector_hits(query, limit=limit * 2, threshold=threshold, metadata=metadata)
-        keyword_hits = [chunk_id for chunk_id, _ in repository.search_keywords(query, limit=limit * 2)]
+        keyword_hits = [
+            (chunk_id, float(score))
+            for chunk_id, score in repository.search_keywords(query, limit=limit * 2)
+        ]
+        # U4：两路的原始分数在融合前留一份，否则 RRF 只留下名次、贡献不可见。
+        vector_scores = dict(vector_hits)
+        keyword_scores = dict(keyword_hits)
         results: list[RetrievedChunk] = []
-        for chunk_id, score in _rrf_fuse([vector_hits, keyword_hits])[:limit]:
+        fused = _rrf_fuse([[chunk_id for chunk_id, _ in vector_hits],
+                           [chunk_id for chunk_id, _ in keyword_hits]])[:limit]
+        for chunk_id, score in fused:
             chunk = repository.get_chunk(chunk_id)
             if chunk is not None:  # 真值源没有的分块不返回（孤立向量不外泄）
-                results.append(RetrievedChunk(chunk.text, score, chunk.chunk_id, _chunk_metadata(chunk)))
+                results.append(
+                    RetrievedChunk(
+                        chunk.text, score, chunk.chunk_id, _chunk_metadata(chunk),
+                        detail={
+                            # 与对外 score 同源同值（不在这里四舍五入，展示精度交给前端）
+                            "rrf_score": float(score),
+                            "vector_score": vector_scores.get(chunk_id),
+                            "keyword_score": keyword_scores.get(chunk_id),
+                        },
+                    )
+                )
         return results
 
     def build_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, separator: str = "\n\n") -> str:
