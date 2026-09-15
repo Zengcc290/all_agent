@@ -22,6 +22,8 @@ class Neo4jGraphStore:
         self.driver = driver
         self._local: dict[str, list[dict[str, Any]]] = {}
         self._reverse: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        #: 内存回退下的实体属性（Neo4j 侧由 ON CREATE/ON MATCH 维护同样的三项）。
+        self._entities: dict[str, dict[str, Any]] = {}
         if self.driver is None and uri:
             try:
                 from neo4j import GraphDatabase
@@ -38,6 +40,12 @@ class Neo4jGraphStore:
         target: str,
         *,
         properties: Mapping[str, Any] | None = None,
+        source_domain: str = "",
+        target_domain: str = "",
+        source_aliases: list[str] | None = None,
+        target_aliases: list[str] | None = None,
+        source_importance: float = 0.5,
+        target_importance: float = 0.5,
     ) -> None:
         if not all(
             isinstance(value, str) and value.strip()
@@ -66,12 +74,55 @@ class Neo4jGraphStore:
                 self._reverse.setdefault(target, []).append((source, edge))
             else:
                 existing["properties"].update(props)
+            self._merge_entity(source, source_domain, source_aliases, source_importance)
+            self._merge_entity(target, target_domain, target_aliases, target_importance)
             return
-        query = "MERGE (a:MemoryEntity {name: $source}) MERGE (b:MemoryEntity {name: $target}) MERGE (a)-[r:RELATED {kind: $relation}]->(b) SET r += $properties"
+        # ON MATCH 只更新别名：实体的 domain/importance 由首次创建它的那次抽取决定，
+        # 后续边写入不该把它们覆盖成空值。
+        query = (
+            "MERGE (a:MemoryEntity {name: $source}) "
+            "ON CREATE SET a.domain = $source_domain, a.aliases = $source_aliases, a.importance = $source_importance "
+            "ON MATCH SET a.aliases = CASE WHEN size($source_aliases) = 0 THEN a.aliases ELSE $source_aliases END "
+            "MERGE (b:MemoryEntity {name: $target}) "
+            "ON CREATE SET b.domain = $target_domain, b.aliases = $target_aliases, b.importance = $target_importance "
+            "ON MATCH SET b.aliases = CASE WHEN size($target_aliases) = 0 THEN b.aliases ELSE $target_aliases END "
+            "MERGE (a)-[r:RELATED {kind: $relation}]->(b) SET r += $properties"
+        )
         with self.driver.session(database=self.database) as session:
             session.run(
-                query, source=source, target=target, relation=relation, properties=props
+                query,
+                source=source,
+                target=target,
+                relation=relation,
+                properties=props,
+                source_domain=source_domain,
+                target_domain=target_domain,
+                source_aliases=list(source_aliases or []),
+                target_aliases=list(target_aliases or []),
+                source_importance=source_importance,
+                target_importance=target_importance,
             ).consume()
+
+    def _merge_entity(
+        self, name: str, domain: str, aliases: list[str] | None, importance: float
+    ) -> None:
+        """In-memory twin of the Cypher ON CREATE/ON MATCH entity clauses."""
+
+        known = list(aliases or [])
+        entity = self._entities.get(name)
+        if entity is None:
+            self._entities[name] = {
+                "domain": domain,
+                "aliases": known,
+                "importance": importance,
+            }
+        elif known:
+            entity["aliases"] = known
+
+    def entity(self, name: str) -> dict[str, Any]:
+        """Entity attributes as recorded by the in-memory projection (empty if unseen)."""
+
+        return dict(self._entities.get(name, {}))
 
     # Common aliases used by graph-oriented clients.
     upsert_relation = add_relation
@@ -143,6 +194,83 @@ class Neo4jGraphStore:
                 query, source=source, relation=relation, target=target
             ).consume()
             return bool(getattr(result.counters, "relationships_deleted", 0))
+
+    def path_query(
+        self, start: str, target: str, *, max_depth: int = 3, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Simple paths between two entities, up to ``max_depth`` hops.
+
+        Each result is ``{"entities": [...], "relations": [{source, relation, target}, ...]}``;
+        the in-memory fallback mirrors what the Cypher returns.
+        """
+
+        if not all(
+            isinstance(value, str) and value.strip() for value in (start, target)
+        ):
+            raise ValueError("start and target must be non-empty strings")
+        if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1:
+            raise ValueError("max_depth must be a positive integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        if self.driver is None:
+            return self._local_paths(start, target, max_depth=max_depth, limit=limit)
+        # 变长区间的上界不能参数化，只能拼进语句；已用 int() 收敛为整数。
+        query = (
+            f"MATCH p=(a:MemoryEntity {{name: $start}})-[*1..{int(max_depth)}]-(b:MemoryEntity {{name: $target}}) "
+            "RETURN [n IN nodes(p) | n.name] AS entities, "
+            "[r IN relationships(p) | {source: startNode(r).name, relation: r.kind, target: endNode(r).name}] AS relations "
+            "LIMIT $limit"
+        )
+        with self.driver.session(database=self.database) as session:
+            return [
+                {
+                    "entities": list(record["entities"]),
+                    "relations": [dict(relation) for relation in record["relations"]],
+                }
+                for record in session.run(query, start=start, target=target, limit=limit)
+            ]
+
+    def _neighbours(self, entity: str) -> list[tuple[str, str, bool]]:
+        """``(other_end, relation, is_outgoing)`` for every edge touching ``entity``."""
+
+        values = [
+            (edge["target"], edge["relation"], True)
+            for edge in self._local.get(entity, [])
+        ]
+        values += [
+            (source, edge["relation"], False)
+            for source, edge in self._reverse.get(entity, [])
+        ]
+        return values
+
+    def _local_paths(
+        self, start: str, target: str, *, max_depth: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """BFS over simple paths; shortest paths come first because it is a queue."""
+
+        paths: list[dict[str, Any]] = []
+        queue: list[tuple[str, list[str], list[dict[str, str]]]] = [(start, [start], [])]
+        while queue and len(paths) < limit:
+            node, entities, relations = queue.pop(0)
+            if len(relations) >= max_depth:
+                continue
+            for other, relation, outgoing in self._neighbours(node):
+                if other in entities:  # 简单路径：不重复经过同一实体，天然无环
+                    continue
+                step = {
+                    "source": node if outgoing else other,
+                    "relation": relation,
+                    "target": other if outgoing else node,
+                }
+                if other == target:
+                    paths.append(
+                        {"entities": [*entities, other], "relations": [*relations, step]}
+                    )
+                    if len(paths) >= limit:
+                        break
+                    continue
+                queue.append((other, [*entities, other], [*relations, step]))
+        return paths
 
     def delete_memory_relation(self, memory_id: str) -> bool:
         """Remove a relation created for a specific semantic memory item."""

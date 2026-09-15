@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from ..base import BaseMemory, MemoryItem, MemoryType
-from ..ids import legacy_fact_id_for, relation_id_for
+from ..ids import entity_id_for, legacy_fact_id_for, relation_id_for
 
 if TYPE_CHECKING:
     from ..storage import Neo4jGraphStore
@@ -68,12 +68,16 @@ class SemanticMemory(BaseMemory):
                 merged_metadata["active"] = True
                 merged_metadata["superseded_by"] = []
                 merged_metadata["superseded_at"] = ""
-            return self.add(
+            updated = self.add(
                 f"{subject} {predicate} {object}",
                 metadata=merged_metadata,
                 importance=max(existing.importance, confidence),
                 item_id=fact_id,
             )
+            # 合并/撤回也要刷边：否则图里那条边会一直保留旧的 active/memory_id，
+            # 与 SQLite 事实条目（active 真值）不一致（F6）。
+            self._write_edge(subject, predicate, object, updated, merged_metadata)
+            return updated
         item_metadata = dict(metadata or {})
         item_metadata.update(
             {
@@ -89,9 +93,17 @@ class SemanticMemory(BaseMemory):
             importance=confidence,
             item_id=fact_id,
         )
-        graph_properties = {
+        self._write_edge(subject, predicate, object, item, item_metadata)
+        return item
+
+    def _graph_properties(
+        self, item: MemoryItem, metadata: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Edge properties for one fact; the same key set is written on every path."""
+
+        properties: dict[str, Any] = {
             "memory_id": item.id,
-            "confidence": confidence,
+            "confidence": metadata.get("confidence", 1.0),
         }
         for key in (
             "evidence",
@@ -106,12 +118,48 @@ class SemanticMemory(BaseMemory):
             "superseded_at",
             "supersedes",
         ):
-            if key in item_metadata:
-                graph_properties[key] = item_metadata[key]
+            if key in metadata:
+                properties[key] = metadata[key]
+        return properties
+
+    def _endpoint_attributes(self, name: str) -> dict[str, Any]:
+        """``domain``/``aliases``/``importance`` of an endpoint's entity item.
+
+        The extraction pipeline writes entities before relations, so the item is
+        normally present; a miss simply leaves the graph node at its defaults.
+        """
+
+        item = self.document_store.get(entity_id_for(name))
+        if item is None or item.metadata.get("kind") != "entity":
+            return {}
+        return {
+            "domain": str(item.metadata.get("domain", "")),
+            "aliases": list(item.metadata.get("aliases") or []),
+            "importance": float(item.importance),
+        }
+
+    def _write_edge(
+        self,
+        subject: str,
+        predicate: str,
+        object: str,
+        item: MemoryItem,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        source_entity = self._endpoint_attributes(subject)
+        target_entity = self._endpoint_attributes(object)
         self.graph_store.add_relation(
-            subject, predicate, object, properties=graph_properties
+            subject,
+            predicate,
+            object,
+            properties=self._graph_properties(item, metadata),
+            source_domain=str(source_entity.get("domain", "")),
+            target_domain=str(target_entity.get("domain", "")),
+            source_aliases=list(source_entity.get("aliases") or []),
+            target_aliases=list(target_entity.get("aliases") or []),
+            source_importance=float(source_entity.get("importance", 0.5)),
+            target_importance=float(target_entity.get("importance", 0.5)),
         )
-        return item
 
     def add_relation(
         self,
