@@ -22,7 +22,9 @@ import json
 import math
 import os
 import re
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from collections import Counter
@@ -198,6 +200,36 @@ class APIEmbedding(BaseEmbedding):
         return f"APIEmbedding(model={self.model!r}, dimension={self.dimension}, base_url={self.base_url!r})"
 
 
+#: Shown when the gateway port refuses connections.  Deliberately address-free:
+#: the tunnel command belongs to deployment docs, not to the source tree.
+EMBED_GATEWAY_HINT = (
+    "embedding gateway unreachable - start the SSH port-forward that backs "
+    "EMBEDDING_BASE_URL, then retry"
+)
+
+
+def gateway_reachable(base_url: str, *, timeout: float = 1.0) -> bool:
+    """Return True when the ``/embed`` gateway port accepts a TCP connection now.
+
+    Used to *report* degraded state (``/api/health``) and, from Phase 3 on, to
+    pick a retrieval path.  It must never be used to swap embedding providers:
+    the gateway, the public API and ``HashEmbedding`` produce mutually
+    incompatible vector spaces, so a configured-but-down gateway stays
+    configured and callers degrade to keyword search instead - substituting the
+    hash space would mix incompatible vectors into an existing index.
+    """
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    parsed = urllib.parse.urlsplit(base_url if "//" in base_url else f"//{base_url}")
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class EmbedServerEmbedding(BaseEmbedding):
     """Client for a custom embed gateway exposed at ``POST {base_url}/embed``.
 
@@ -316,7 +348,7 @@ def _embed_server_request(embedding: EmbedServerEmbedding, values: list[str]) ->
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"embedding API HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"embedding API request failed: {exc.reason}") from exc
+        raise RuntimeError(f"embedding API request failed: {exc.reason}. {EMBED_GATEWAY_HINT}") from exc
     except ValueError as exc:
         raise RuntimeError(f"embedding API returned invalid JSON: {exc}") from exc
 

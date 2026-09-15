@@ -54,6 +54,7 @@ from constants import (
 )
 from core import ExecutionContext
 from memory import MemoryManager, MemoryType
+from memory.embedding import gateway_reachable
 from memory.rag import RAGPipeline
 
 from .graph_builder import build_graph
@@ -480,11 +481,16 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         embedding = getattr(the_manager(), "embedding", None)
         # APIEmbedding 与 EmbedServerEmbedding 都带 base_url，都是远端向量实现；
         # HashEmbedding 离线兜底没有 base_url。用属性而非类名判断，避免重复导入。
-        embedding_mode = "api" if getattr(embedding, "base_url", None) else "local-hash"
+        base_url = getattr(embedding, "base_url", None)
+        embedding_mode = "api" if base_url else "local-hash"
+        # 只上报隧道可达性，供 UI/调用方判断是否已降级为关键词检索（D8）；
+        # 绝不因为不可达就换向量空间。
+        embedding_reachable = gateway_reachable(base_url) if base_url else True
         return {
             "ok": True,
             "chat_ready": ready,
             "embedding_mode": embedding_mode,
+            "embedding_reachable": embedding_reachable,
             "embedding": getattr(embedding, "to_dict", dict)(),
             "search_available": search_available(),
         }

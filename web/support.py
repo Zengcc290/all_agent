@@ -130,10 +130,11 @@ def get_manager() -> MemoryManager:
     if _manager is None:
         with _manager_lock:
             if _manager is None:
-                _manager = MemoryManager(
-                    MemoryConfig(sqlite_path=str(DB_PATH)),
-                    embedding=build_embedding(),
-                )
+                # 读 HELLOAGENTS_MEMORY_* 全套（Qdrant/Neo4j 开关在这里生效）；
+                # 未配置时与旧行为完全一致（内存向量 + 内存图）。
+                config = MemoryConfig.from_env()
+                config.sqlite_path = str(DB_PATH)  # MEMORY_DB_PATH 优先级不变
+                _manager = MemoryManager(config, embedding=build_embedding())
     return _manager
 
 

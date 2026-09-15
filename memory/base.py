@@ -319,7 +319,11 @@ class MemoryConfig:
         for field_name in cls.__dataclass_fields__:
             key = f"{prefix}{field_name.upper()}"
             raw = os.getenv(key)
-            if raw is None:
+            if raw is None or not raw.strip():
+                # 空值等同于未设置：``VAR=`` 是 .env 里最常见的占位写法，
+                # 直接透传会让 embedding_api_key / embedding_model /
+                # embedding_base_url 这类「非空字符串」字段在 __post_init__
+                # 里抛 ValueError，使整个 from_env 不可用。
                 continue
             if field_name in {"working_memory_capacity", "search_limit", "embedding_dimension", "embedding_batch_size"}:
                 values[field_name] = int(raw)
@@ -329,8 +333,9 @@ class MemoryConfig:
                 continue
             else:
                 values[field_name] = raw
-        if values.get("embedding_api_key") is None:
-            values["embedding_api_key"] = os.getenv("DASHSCOPE_API_KEY")
+        if not values.get("embedding_api_key"):
+            # 同理：空的 DASHSCOPE_API_KEY 表示「没配 key」，而不是「配了空 key」。
+            values["embedding_api_key"] = (os.getenv("DASHSCOPE_API_KEY") or "").strip() or None
         return cls(**values)
 
     def to_dict(self) -> dict[str, object]:

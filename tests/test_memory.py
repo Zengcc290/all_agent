@@ -196,3 +196,22 @@ def test_only_in_memory_vector_store_is_rebuilt_at_startup(tmp_path):
         vector_store=InMemoryVectorStore(),
     )
     assert local.search("persisted item", limit=3), "本地内存索引必须从 SQLite 恢复"
+
+
+def test_from_env_treats_blank_values_as_unset(monkeypatch):
+    """回归：.env 里写 ``DASHSCOPE_API_KEY=`` / ``VAR=`` 不能让 from_env 崩掉。
+
+    Phase 0 把 from_env 接进 get_manager/build_default_manager 后暴露的既有 bug：
+    空字符串被当成「配了空 key」，在 __post_init__ 校验处抛 ValueError，
+    导致 Qdrant/Neo4j 开关的装配路径整体不可用。
+    """
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "")
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_API_KEY", "")
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_MODEL", "")
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_QDRANT_URL", "")
+
+    config = MemoryConfig.from_env()
+
+    assert config.embedding_api_key is None
+    assert config.embedding_model  # 回落到类默认值，而不是空串
+    assert config.qdrant_url in (None, "")  # 空 URL 表示「不启用 Qdrant」

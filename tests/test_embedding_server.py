@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from memory import EmbedServerEmbedding
+from memory.embedding import gateway_reachable
 
 
 def test_validation_rejects_bad_arguments():
@@ -117,3 +120,41 @@ def test_to_dict_reports_config():
         "dimension": 1024,
         "batch_size": 10,
     }
+
+
+def test_gateway_reachable_detects_closed_port():
+    assert gateway_reachable("http://127.0.0.1:1", timeout=0.5) is False
+    assert gateway_reachable("", timeout=0.5) is False
+
+
+def test_gateway_reachable_accepts_open_port():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    # 队列要够深：本测试不 accept()，两次探测都会留在 backlog 里。
+    listener.listen(64)
+    try:
+        port = listener.getsockname()[1]
+        assert gateway_reachable(f"http://127.0.0.1:{port}", timeout=0.5) is True
+        # 无 scheme 的写法也要能解析出端口。
+        assert gateway_reachable(f"127.0.0.1:{port}", timeout=0.5) is True
+    finally:
+        listener.close()
+
+
+def test_unreachable_gateway_error_names_the_fix():
+    """/api/health 之外，真正的调用失败也必须给出可操作的提示（而非裸 WinError）。"""
+    instance = EmbedServerEmbedding(base_url="http://127.0.0.1:1", timeout=0.5)
+    with pytest.raises(RuntimeError, match="port-forward"):
+        instance.embed("hello")
+
+
+def test_configured_gateway_is_never_swapped_for_hash(monkeypatch):
+    """D8 禁令：网关配置了就是配置了，不可达也不许换成 HashEmbedding 向量空间。"""
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("HELLOAGENTS_MEMORY_EMBEDDING_API_KEY", raising=False)
+
+    from memory.base import make_default_embedding
+
+    assert gateway_reachable("http://127.0.0.1:1", timeout=0.5) is False
+    assert isinstance(make_default_embedding(), EmbedServerEmbedding)
