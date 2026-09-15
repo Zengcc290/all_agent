@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from memory import InMemoryVectorStore, MemoryConfig, MemoryManager  # noqa: E402
 from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
+from memory.storage import ChunkRecord, DocumentRecord, DocumentRepository  # noqa: E402
 from web import create_app  # noqa: E402
 from web.support import HashEmbedding  # noqa: E402
 
@@ -59,6 +61,7 @@ def file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """文件库客户端：documents/chunks 真值源只在文件型 SQLite 上存在。"""
 
     monkeypatch.setenv("WEB_AUTOSEED", "0")
+    monkeypatch.setenv("EMBEDDING_TUNNEL_HINT", "")   # 断言固定，不受本机 .env 影响
     store = DriftVectorStore()
     manager = MemoryManager(
         MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
@@ -688,4 +691,97 @@ def test_health_reports_store_modes_and_degraded(file_client) -> None:
         "embedding_endpoint": "",
         "chat_ready": health["chat_ready"],
         "keyword_fallback": False,
+        "embedding_hint": "",
     }
+
+
+def test_revectorize_rebuilds_every_chunk(file_client) -> None:
+    client, store = file_client
+    document_id = _ingest_documents(client, ["重嵌入文档"])[0]
+    chunks = client.get(f"/api/documents/{document_id}").json()["chunks"]
+    store.ids.difference_update(chunk["chunk_id"] for chunk in chunks)   # 模拟索引丢失
+
+    res = client.post(f"/api/documents/{document_id}/revectorize").json()
+
+    # 已抽取过知识的文档不因重嵌入而回退状态：extracted 保持 extracted。
+    assert res == {"document_id": document_id, "chunks_reindexed": len(chunks), "status": "extracted"}
+    detail = client.get(f"/api/documents/{document_id}").json()
+    assert {chunk["vector_status"] for chunk in detail["chunks"]} == {"indexed"}
+    assert all(chunk["chunk_id"] in store.ids for chunk in detail["chunks"])
+    assert client.post("/api/documents/不存在/revectorize").status_code == 404
+
+
+class DeadGatewayEmbedding(HashEmbedding):
+    """已配置网关但连不上：用真实会被拒连的端口，逼出降级分支。"""
+
+    def __init__(self, port: int) -> None:
+        super().__init__()
+        self.base_url = f"http://127.0.0.1:{port}"
+
+
+def closed_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _dead_gateway_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("WEB_AUTOSEED", "0")
+    monkeypatch.setenv("EMBEDDING_TUNNEL_HINT", "ssh -N -L 10800:127.0.0.1:18000 root@example -p 10034")
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=DeadGatewayEmbedding(closed_port()),
+    )
+    return create_app(manager=manager), manager
+
+
+def test_ingest_fails_fast_with_the_tunnel_command_when_gateway_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """方案 §11.6：隧道断开时入库必须明确报错（含隧道命令），且不留下垃圾记录。"""
+
+    app, manager = _dead_gateway_client(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ingest",
+            files=_make_ingest_payload("降级.txt", "隧道没通时不应该写库。" * 10),
+        )
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert "嵌入网关不可达" in detail
+        assert "ssh -N -L 10800:127.0.0.1:18000 root@example -p 10034" in detail
+        # 快速失败：真值源里不应出现半吊子文档
+        assert client.get("/api/documents").json()["total"] == 0
+        assert manager.document_store.list(include_expired=True) == []
+        # health 把同一条命令下发给前端（前端不再硬编码）
+        assert client.get("/api/health").json()["degraded"] == {
+            "embedding": "unreachable",
+            "embedding_endpoint": manager.embedding.base_url,
+            "chat_ready": False,
+            "keyword_fallback": True,
+            "embedding_hint": "ssh -N -L 10800:127.0.0.1:18000 root@example -p 10034",
+        }
+    manager.close()
+
+
+def test_revectorize_reports_the_tunnel_command_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """先有文档再断隧道：重嵌入要 503 且带修复命令，而不是静默失败。"""
+
+    app, manager = _dead_gateway_client(tmp_path, monkeypatch)
+    monkeypatch.delenv("EMBEDDING_TUNNEL_HINT", raising=False)
+    with TestClient(app) as client:
+        repository = DocumentRepository(manager.config.sqlite_path)
+        try:
+            repository.upsert_document(DocumentRecord(document_id="doc-1", raw_text="正文", source="a.txt"))
+            repository.upsert_chunks([ChunkRecord(
+                chunk_id="doc-1:0", document_id="doc-1", chunk_index=0,
+                char_start=0, char_end=2, text="正文",
+            )])
+        finally:
+            repository.close()
+        response = client.post("/api/documents/doc-1/revectorize")
+        assert response.status_code == 503
+        assert "重嵌入已中止" in response.json()["detail"]
+        # 没有配 EMBEDDING_TUNNEL_HINT 时给通用指引，而不是编造命令
+        assert "见本地部署说明" in response.json()["detail"]
+    manager.close()

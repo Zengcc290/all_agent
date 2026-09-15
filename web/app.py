@@ -89,6 +89,25 @@ def _is_fact_item(item: Any) -> bool:
     return all(metadata.get(key) for key in ("subject", "predicate", "object"))
 
 
+def embedding_tunnel_hint() -> str:
+    """隧道命令由部署方通过环境变量下发，避免把服务器地址写进仓库。"""
+
+    return os.getenv("EMBEDDING_TUNNEL_HINT", "").strip()
+
+
+def embedding_unavailable_detail(manager: MemoryManager) -> str:
+    """网关已配置但连不上时给出可执行的说明（方案 §11.6）；可用时返回空串。"""
+
+    base_url = getattr(getattr(manager, "embedding", None), "base_url", None)
+    if not base_url or gateway_reachable(base_url):
+        return ""
+    hint = embedding_tunnel_hint()
+    return (
+        f"嵌入网关不可达（{base_url}），向量检索与入库已停用（不会切换到别的向量空间）。"
+        + (f"请先建立隧道：{hint}" if hint else "请先恢复嵌入网关，命令见本地部署说明。")
+    )
+
+
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=WEB_CHAT_MAX_CHARS)
     #: 回答模式：offline 只靠本地记忆，online 额外允许联网搜索（web.search）。
@@ -284,6 +303,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @app.post("/api/ingest")
     async def ingest(file: UploadFile) -> dict[str, Any]:
         filename = file.filename or "untitled"
+        # 降级验收（方案 §11.6）：嵌入网关不可达时明确报错并给出隧道命令，
+        # 而不是写出一条注定失败的文档记录或返回空结果。
+        embedding_hint = embedding_unavailable_detail(the_manager())
+        if embedding_hint:
+            raise HTTPException(status_code=503, detail=embedding_hint)
         tmp_path = await _save_upload(file, prefix="nebula-ingest-")
         try:
             items = app.state.pipeline.ingest_source(
@@ -576,9 +600,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         if "missing_vector" in requested and entries.get("missing_vector"):
             ids = entries["missing_vector"]
             chunks = [chunk for chunk in (repository.get_chunk(chunk_id) for chunk_id in ids) if chunk is not None]
-            base_url = getattr(manager.embedding, "base_url", None)
-            if base_url and not gateway_reachable(base_url):
-                raise HTTPException(status_code=503, detail="嵌入网关不可达，无法补向量（不会切换向量空间）")
+            unavailable = embedding_unavailable_detail(manager)
+            if unavailable:
+                raise HTTPException(status_code=503, detail=f"补向量已中止：{unavailable}")
             if chunks:
                 vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
                 for chunk, vector in zip(chunks, vectors, strict=True):
@@ -682,9 +706,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         if not chunks:
             raise HTTPException(status_code=422, detail="该文档没有分块，无法重嵌入")
         manager = the_manager()
-        base_url = getattr(manager.embedding, "base_url", None)
-        if base_url and not gateway_reachable(base_url):
-            raise HTTPException(status_code=503, detail="嵌入网关不可达，重嵌入已中止（不会切换向量空间）")
+        unavailable = embedding_unavailable_detail(manager)
+        if unavailable:
+            raise HTTPException(status_code=503, detail=f"重嵌入已中止：{unavailable}")
         try:
             vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
             for chunk, vector in zip(chunks, vectors, strict=True):
@@ -765,6 +789,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 "embedding_endpoint": base_url or "",
                 "chat_ready": ready,
                 "keyword_fallback": bool(base_url) and not embedding_reachable,
+                # 隧道命令由部署方通过 EMBEDDING_TUNNEL_HINT 下发，前端只负责显示。
+                "embedding_hint": embedding_tunnel_hint(),
             },
         }
 

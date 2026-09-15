@@ -75,7 +75,9 @@ def test_u3_storage_panel_is_wired_to_health_and_reconcile() -> None:
     assert 'apiGet("/api/reconcile"' in html
     assert 'apiPostJson("/api/reconcile"' in html
     # 降级时必须给出隧道命令，否则用户只知道坏了、不知道怎么修（D8）
-    assert "unreachable" in html and "TUNNEL_COMMAND" in html
+    assert "unreachable" in html and "embedding_hint" in html
+    # 命令由后端下发，前端不得硬编码服务器地址
+    assert "103.240.196.39" not in html
 
 
 def test_graphrag_mode_does_not_require_the_chat_model() -> None:
@@ -84,3 +86,27 @@ def test_graphrag_mode_does_not_require_the_chat_model() -> None:
     html = INDEX.read_text(encoding="utf-8")
 
     assert "chatReady || chatMode === \"graphrag\"" in html
+
+
+def test_u2_document_center_is_wired() -> None:
+    html = INDEX.read_text(encoding="utf-8")
+
+    assert 'id="documents-panel"' in html
+    assert 'id="doc-list"' in html and 'id="doc-detail"' in html
+    assert "apiGet(`/api/documents?" in html
+    assert "apiGet(`/api/documents/${encodeURIComponent(documentId)}`" in html
+    assert "/revectorize`" in html
+    # 方案 §10.1 点名 /api/import 零入口，U2 必须补上
+    assert 'apiPostForm("/api/import"' in html
+
+
+def test_u2_chunk_highlight_is_driven_by_truth_source_offsets() -> None:
+    """分块高亮必须用真值源的 char_start/char_end，不能在前端重新切分。"""
+
+    html = INDEX.read_text(encoding="utf-8")
+
+    assert "chunk.char_start" in html and "chunk.char_end" in html
+    assert "raw_text" in html
+    # 状态机进度与失败原因都要能看见（U2/U5）
+    assert "docBadge(item.status)" in html or "docBadge(doc.status)" in html
+    assert "doc.error" in html

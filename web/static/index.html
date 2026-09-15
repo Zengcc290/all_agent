@@ -835,6 +835,82 @@
     #storage-panel .storage-actions { display: flex; gap: 8px; margin-top: 12px; }
     #storage-panel .storage-actions .btn { flex: 1; }
 
+    /* U2 文档中心 */
+    #documents-panel {
+      position: absolute;
+      left: 28px;
+      top: 76px;
+      z-index: 30;
+      width: 400px;
+      max-height: calc(100vh - 230px);
+      display: flex;
+      flex-direction: column;
+      background: rgba(7, 11, 24, 0.93);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(56, 189, 248, 0.22);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      font-size: 11px;
+      line-height: 1.7;
+      color: #94a3b8;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+    }
+    #documents-panel[hidden] { display: none; }
+    .doc-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .doc-filters input, .doc-filters select {
+      flex: 1 1 90px;
+      min-width: 0;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 8px;
+      color: #cbd5e1;
+      font-size: 11px;
+      padding: 4px 8px;
+    }
+    #doc-list-wrap, #doc-detail-wrap { overflow-y: auto; }
+    .doc-item {
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 10px;
+      padding: 7px 9px;
+      margin-bottom: 6px;
+      cursor: pointer;
+    }
+    .doc-item:hover { border-color: rgba(56, 189, 248, 0.5); background: rgba(56, 189, 248, 0.06); }
+    .doc-item .doc-title { color: #e2e8f0; }
+    .doc-item .doc-meta { color: #475569; font-size: 10px; }
+    .doc-badge {
+      display: inline-block;
+      border-radius: 9999px;
+      padding: 0 7px;
+      font-size: 10px;
+      border: 1px solid currentColor;
+      margin-left: 6px;
+    }
+    .doc-badge.ok { color: #34d399; }
+    .doc-badge.warn { color: #fbbf24; }
+    .doc-badge.err { color: #f87171; }
+    .doc-badge.dim { color: #64748b; }
+    .doc-pager { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    .doc-pager .btn { flex: 0 0 auto; }
+    #doc-detail .doc-text {
+      max-height: 40vh;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(15, 23, 42, 0.75);
+      border-radius: 10px;
+      padding: 8px 10px;
+      color: #cbd5e1;
+      font-size: 11px;
+    }
+    #doc-detail mark.doc-chunk {
+      background: rgba(56, 189, 248, 0.16);
+      color: #e2e8f0;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    #doc-detail mark.doc-chunk.pending { background: rgba(251, 191, 36, 0.18); }
+    #doc-detail .doc-actions { display: flex; gap: 8px; margin-top: 8px; }
     /* U1 图谱推理证据列表 */
     #evidence-list .evidence-item {
       border-left: 2px solid rgba(56, 189, 248, 0.4);
@@ -864,6 +940,7 @@
     </div>
     <button id="btn-add-knowledge" class="action-btn primary">＋ 添加知识</button>
     <button id="btn-ingest" class="action-btn">⤒ 导入文档</button>
+    <button id="btn-documents" class="action-btn">▤ 文档中心</button>
     <button id="btn-export" class="action-btn">⤓ 导出星图</button>
     <button id="btn-chat" class="action-btn">✦ 知识管家</button>
   </div>
@@ -898,6 +975,38 @@
     <span><span class="sk">事实边</span><b id="stat-edges">–</b></span>
     <span><span class="sk">知识块</span><b id="stat-chunks">–</b></span>
     <button class="stat-btn" id="btn-storage" aria-expanded="false" aria-controls="storage-panel">存储健康</button>
+  </div>
+
+  <div id="documents-panel" hidden aria-label="文档中心">
+    <div class="storage-head">
+      <span>▤ 文档中心 · SQLite 真值源</span>
+      <button class="close-chat" id="docs-close" aria-label="关闭文档中心">✕</button>
+    </div>
+    <div class="doc-filters">
+      <input id="doc-tag" type="text" placeholder="按标签筛选…" aria-label="按标签筛选">
+      <select id="doc-status" aria-label="按状态筛选">
+        <option value="">全部状态</option>
+        <option value="uploaded">已上传</option>
+        <option value="parsed">已解析</option>
+        <option value="vectorized">已向量化</option>
+        <option value="extracted">已抽取</option>
+        <option value="failed">失败</option>
+      </select>
+      <button class="btn" id="doc-refresh">刷新</button>
+      <button class="btn" id="doc-import">恢复导出 JSON</button>
+    </div>
+    <div id="doc-list-wrap">
+      <div id="doc-list">正在加载…</div>
+      <div class="doc-pager">
+        <button class="btn" id="doc-prev">上一页</button>
+        <span id="doc-page-info" class="storage-dim">—</span>
+        <button class="btn" id="doc-next">下一页</button>
+      </div>
+    </div>
+    <div id="doc-detail-wrap" hidden>
+      <button class="btn" id="doc-back">← 返回列表</button>
+      <div id="doc-detail"></div>
+    </div>
   </div>
 
   <div id="storage-panel" hidden aria-label="存储健康与一致性">
@@ -1940,11 +2049,188 @@
   }
 
   // =====================================================================
-  // 10.2 U3 存储健康与一致性面板（/api/health + /api/reconcile）
+  // 10.3 U2 文档中心（/api/documents：真值源列表 / 详情 / 重索引）
+  // =====================================================================
+  const DOC_STATUS = {
+    uploaded: ["已上传", "dim"],
+    parsed: ["已解析", "warn"],
+    vectorized: ["已向量化", "ok"],
+    extracted: ["已抽取", "ok"],
+    failed: ["失败", "err"],
+  };
+  const docState = { page: 1, pageSize: 8, total: 0, current: null };
+
+  const docBadge = (status) => {
+    const [label, cls] = DOC_STATUS[status] || [status || "未知", "dim"];
+    return `<span class="doc-badge ${cls}">${escapeHtml(label)}</span>`;
+  };
+
+  function renderDocList(payload) {
+    docState.total = payload.total || 0;
+    const items = payload.items || [];
+    const list = $("doc-list");
+    if (!items.length) {
+      list.innerHTML = `<div class="doc-meta">还没有文档：点右上角「⤒ 导入文档」摄取，或用「恢复导出 JSON」导回之前的备份。</div>`;
+    } else {
+      list.innerHTML = items.map(item => `
+        <div class="doc-item" data-doc="${escapeHtml(item.document_id)}" role="button" tabindex="0">
+          <div class="doc-title">${escapeHtml(shortTitle(item.title || item.source || item.document_id))}${docBadge(item.status)}</div>
+          <div class="doc-meta">${item.chunk_count} 块 · ${escapeHtml(item.source || "本机")} · ${escapeHtml((item.tags || []).join("/") || "无标签")}</div>
+        </div>`).join("");
+    }
+    const pages = Math.max(1, Math.ceil(docState.total / docState.pageSize));
+    $("doc-page-info").textContent = `第 ${docState.page} / ${pages} 页 · 共 ${docState.total} 篇`;
+    $("doc-prev").disabled = docState.page <= 1;
+    $("doc-next").disabled = docState.page >= pages;
+  }
+
+  async function loadDocuments(page) {
+    docState.page = Math.max(1, page || docState.page);
+    const params = new URLSearchParams({
+      page: String(docState.page),
+      page_size: String(docState.pageSize),
+    });
+    const tag = $("doc-tag").value.trim();
+    const status = $("doc-status").value;
+    if (tag) params.set("tag", tag);
+    if (status) params.set("status", status);
+    try {
+      renderDocList(await apiGet(`/api/documents?${params.toString()}`, 20000));
+    } catch (err) {
+      $("doc-list").innerHTML = `<div class="err">加载失败：${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  // 按 char_start/char_end 高亮分块：区间来自真值源，和 raw_text 同源（方案 2.3）。
+  function renderDocText(doc) {
+    const text = doc.raw_text || "";
+    const chunks = (doc.chunks || []).slice().sort((a, b) => a.char_start - b.char_start);
+    if (!chunks.length) return escapeHtml(text) || '<span class="doc-meta">（无原文）</span>';
+    let html = "", cursor = 0;
+    for (const chunk of chunks) {
+      const start = Math.max(cursor, Number(chunk.char_start) || 0);
+      const end = Math.min(text.length, Number(chunk.char_end) || 0);
+      if (start > cursor) html += escapeHtml(text.slice(cursor, start));
+      if (end > start) {
+        const cls = chunk.vector_status === "indexed" ? "" : " pending";
+        html += `<mark class="doc-chunk${cls}" data-chunk="${escapeHtml(chunk.chunk_id)}" `
+          + `data-status="${escapeHtml(chunk.vector_status)}" data-index="${Number(chunk.chunk_index) + 1}" `
+          + `title="第 ${Number(chunk.chunk_index) + 1} 块 · ${escapeHtml(chunk.vector_status)}">`
+          + `${escapeHtml(text.slice(start, end))}</mark>`;
+      }
+      cursor = Math.max(cursor, end);
+    }
+    return html + escapeHtml(text.slice(cursor));
+  }
+
+  function renderDocDetail(doc) {
+    docState.current = doc;
+    const chunks = doc.chunks || [];
+    const indexed = chunks.filter(chunk => chunk.vector_status === "indexed").length;
+    $("doc-detail").innerHTML = `
+      <div class="doc-title">${escapeHtml(shortTitle(doc.title || doc.source || doc.document_id))}${docBadge(doc.status)}</div>
+      <div class="doc-meta">${escapeHtml(doc.source || "本机")} · ${chunks.length} 块（已建索引 ${indexed}） · 权限 ${escapeHtml(doc.permission || "private")}</div>
+      ${doc.error ? `<div class="err">解析/向量化错误：${escapeHtml(doc.error)}</div>` : ""}
+      <div class="doc-text" id="doc-text">${renderDocText(doc)}</div>
+      <div class="doc-actions">
+        <button class="btn" id="doc-revectorize">重索引（重嵌入全部块）</button>
+      </div>`;
+    $("doc-text").addEventListener("click", (event) => {
+      const mark = event.target.closest("mark.doc-chunk");
+      if (!mark) return;
+      toast(`第 ${mark.dataset.index} 块 · 向量状态 ${mark.dataset.status}`);
+    });
+    $("doc-revectorize").addEventListener("click", () => revectorizeDocument(doc.document_id));
+  }
+
+  async function openDocument(documentId) {
+    $("doc-list-wrap").hidden = true;
+    $("doc-detail-wrap").hidden = false;
+    $("doc-detail").innerHTML = "正在读取原文…";
+    try {
+      renderDocDetail(await apiGet(`/api/documents/${encodeURIComponent(documentId)}`, 30000));
+    } catch (err) {
+      $("doc-detail").innerHTML = `<div class="err">读取失败：${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function revectorizeDocument(documentId) {
+    toast("正在重嵌入…（远端网关逐批推理）");
+    try {
+      const res = await apiPostJson(`/api/documents/${encodeURIComponent(documentId)}/revectorize`, {}, 180000);
+      toast(`已重嵌入 ${res.chunks_reindexed} 块，文档状态 ${res.status}`, "ok");
+    } catch (err) {
+      toast("重嵌入失败：" + err.message, "err");
+    }
+    await openDocument(documentId);
+    await loadDocuments(docState.page);
+  }
+
+  function showDocList() {
+    $("doc-detail-wrap").hidden = true;
+    $("doc-list-wrap").hidden = false;
+    docState.current = null;
+  }
+
+  function openDocumentsPanel(open) {
+    const panel = $("documents-panel");
+    panel.hidden = !open;
+    if (!open) return;
+    $("storage-panel").hidden = true;   // 两个左侧面板互斥，避免叠在一起
+    if (!docState.total) loadDocuments(1);
+  }
+
+  $("btn-documents").addEventListener("click", () => {
+    openDocumentsPanel($("documents-panel").hidden);
+  });
+  $("docs-close").addEventListener("click", () => openDocumentsPanel(false));
+  $("doc-refresh").addEventListener("click", () => loadDocuments(1));
+  $("doc-prev").addEventListener("click", () => loadDocuments(docState.page - 1));
+  $("doc-next").addEventListener("click", () => loadDocuments(docState.page + 1));
+  $("doc-back").addEventListener("click", showDocList);
+  $("doc-tag").addEventListener("change", () => loadDocuments(1));
+  $("doc-status").addEventListener("change", () => loadDocuments(1));
+  $("doc-list").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-doc]");
+    if (card) openDocument(card.dataset.doc);
+  });
+  $("doc-list").addEventListener("keydown", (event) => {
+    const card = event.target.closest("[data-doc]");
+    if (card && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openDocument(card.dataset.doc);
+    }
+  });
+
+  // U2：补上此前零入口的 POST /api/import（导出 JSON 的恢复路径）
+  const importInput = document.createElement("input");
+  importInput.type = "file";
+  importInput.accept = ".json";
+  importInput.hidden = true;
+  document.body.appendChild(importInput);
+  $("doc-import").addEventListener("click", () => importInput.click());
+  importInput.addEventListener("change", async () => {
+    const file = importInput.files[0];
+    importInput.value = "";
+    if (!file) return;
+    toast(`正在恢复《${file.name}》…`);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await apiPostForm("/api/import", form, 120000);
+      toast(`已导入 ${res.imported} 条，跳过 ${res.skipped} 条`, "ok");
+      await loadGraph();
+      await loadDocuments(1);
+    } catch (err) {
+      toast("导入失败：" + err.message, "err");
+    }
+  });
+
+  // =====================================================================
+  // 10.4 U3 存储健康与一致性面板（/api/health + /api/reconcile）
   // =====================================================================
   let lastHealth = null;
-  // 隧道命令来自部署说明（方案 §0.1）；本机单人使用，前端只在降级时展示。
-  const TUNNEL_COMMAND = "ssh -N -L 10800:127.0.0.1:18000 root@103.240.196.39 -p 10034";
+  // 隧道命令不写死在前端：由 /api/health 的 degraded.embedding_hint 下发（部署方配在 .env）。
   const DRIFT_LABEL = {
     missing_vector: "缺向量（真值有 · 向量无）",
     orphan_vector: "孤儿向量（向量有 · 真值无）",
@@ -1974,7 +2260,8 @@
         unreachable ? "err" : embedded === "hash" ? "warn" : "ok"),
       row("聊天模型", degraded.chat_ready ? "已配置（DeepSeek）" : "未配置", degraded.chat_ready ? "ok" : ""),
     ].join("") + (unreachable
-      ? `<div class="warn">当前为<b>关键词检索模式</b>（FTS5 + 图谱）；向量检索与入库不可用，恢复隧道后自动回到向量检索。</div><code>${TUNNEL_COMMAND}</code>`
+      ? `<div class="warn">当前为<b>关键词检索模式</b>（FTS5 + 图谱）；向量检索与入库不可用，恢复隧道后自动回到向量检索。</div>${
+        degraded.embedding_hint ? `<code>${escapeHtml(degraded.embedding_hint)}</code>` : ""}`
       : "");
 
     const counts = reconcile && reconcile.counts;
@@ -2006,6 +2293,7 @@
     storagePanel.hidden = !storagePanel.hidden;
     $("btn-storage").setAttribute("aria-expanded", String(!storagePanel.hidden));
     if (storagePanel.hidden) return;
+    $("documents-panel").hidden = true;   // 与文档中心互斥
     renderStoragePanel(lastHealth, null);
     await refreshReconcile();
   });
