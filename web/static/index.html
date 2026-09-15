@@ -766,6 +766,86 @@
     }
     #stats-bar b { color: #94a3b8; font-weight: 600; }
     #stats-bar .sk { color: #334155; margin-right: 4px; }
+    #stats-bar .stat-btn {
+      pointer-events: auto;
+      background: none;
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 9999px;
+      color: #7dd3fc;
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      padding: 2px 10px;
+      cursor: pointer;
+    }
+    #stats-bar .stat-btn:hover { background: rgba(56, 189, 248, 0.12); }
+    #stats-bar .stat-btn.warn { color: #fbbf24; border-color: rgba(251, 191, 36, 0.45); }
+
+    /* U3 存储健康与一致性面板 */
+    #storage-panel {
+      position: absolute;
+      left: 28px;
+      bottom: 66px;
+      z-index: 30;
+      width: 330px;
+      max-height: 62vh;
+      overflow-y: auto;
+      background: rgba(7, 11, 24, 0.92);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(56, 189, 248, 0.22);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      font-size: 11px;
+      line-height: 1.7;
+      color: #94a3b8;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+    }
+    #storage-panel[hidden] { display: none; }
+    #storage-panel .storage-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #cbd5e1;
+      font-size: 12px;
+      letter-spacing: 0.6px;
+      margin-bottom: 8px;
+    }
+    #storage-panel .storage-row { display: flex; justify-content: space-between; gap: 10px; }
+    #storage-panel .storage-row b { color: #e2e8f0; font-weight: 600; }
+    #storage-panel .storage-sec { margin-top: 10px; }
+    #storage-panel .storage-sec > .storage-title {
+      color: #475569;
+      font-size: 10px;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+    #storage-panel .ok { color: #34d399; }
+    #storage-panel .warn { color: #fbbf24; }
+    #storage-panel .err { color: #f87171; }
+    #storage-panel code {
+      display: block;
+      margin-top: 6px;
+      padding: 6px 8px;
+      background: rgba(15, 23, 42, 0.9);
+      border-radius: 8px;
+      color: #7dd3fc;
+      font-size: 10px;
+      word-break: break-all;
+      user-select: all;
+    }
+    #storage-panel .storage-actions { display: flex; gap: 8px; margin-top: 12px; }
+    #storage-panel .storage-actions .btn { flex: 1; }
+
+    /* U1 图谱推理证据列表 */
+    #evidence-list .evidence-item {
+      border-left: 2px solid rgba(56, 189, 248, 0.4);
+      padding: 4px 0 4px 8px;
+      margin-bottom: 6px;
+      font-size: 11px;
+      color: #94a3b8;
+      cursor: pointer;
+    }
+    #evidence-list .evidence-item:hover { border-left-color: #38bdf8; color: #e2e8f0; }
+    #evidence-list .evidence-meta { color: #475569; font-size: 10px; }
 
     #edge-toggle-btn.active { color: #34d399; box-shadow: 0 0 12px rgba(52, 211, 153, 0.4); }
   </style>
@@ -817,6 +897,30 @@
     <span><span class="sk">天体</span><b id="stat-total">–</b></span>
     <span><span class="sk">事实边</span><b id="stat-edges">–</b></span>
     <span><span class="sk">知识块</span><b id="stat-chunks">–</b></span>
+    <button class="stat-btn" id="btn-storage" aria-expanded="false" aria-controls="storage-panel">存储健康</button>
+  </div>
+
+  <div id="storage-panel" hidden aria-label="存储健康与一致性">
+    <div class="storage-head">
+      <span>✦ 存储与一致性</span>
+      <button class="close-chat" id="storage-close" aria-label="关闭存储面板">✕</button>
+    </div>
+    <div class="storage-sec">
+      <div class="storage-title">三库归属（D1：全部在本机）</div>
+      <div id="storage-modes">读取中…</div>
+    </div>
+    <div class="storage-sec">
+      <div class="storage-title">计数</div>
+      <div id="storage-counts">—</div>
+    </div>
+    <div class="storage-sec">
+      <div class="storage-title">漂移（真值 ↔ 向量 ↔ 图）</div>
+      <div id="storage-drift">—</div>
+    </div>
+    <div class="storage-actions">
+      <button class="btn" id="btn-reconcile">重新对账</button>
+      <button class="btn" id="btn-repair">一键修复</button>
+    </div>
   </div>
 
   <div id="detail-drawer">
@@ -845,6 +949,14 @@
           <span id="relations-count" class="subnodes-count">0 条关联</span>
         </div>
         <div id="relations-list"></div>
+      </div>
+
+      <div id="evidence-section" class="subnodes-section" style="display:none">
+        <div class="subnodes-header">
+          <span>⟡ 检索依据（混合检索命中）</span>
+          <span id="evidence-count" class="subnodes-count">0 条</span>
+        </div>
+        <div id="evidence-list"></div>
       </div>
 
       <div id="subnodes-section" class="subnodes-section">
@@ -898,6 +1010,7 @@
       <select id="chat-mode-select" title="回答模式" aria-label="回答模式">
         <option value="offline">🧠 非联网 · 仅记忆</option>
         <option value="online">🌐 联网 · 记忆+搜索</option>
+        <option value="graphrag">🕸 图谱推理 · 多跳（本地，不需要聊天模型）</option>
       </select>
       <textarea id="chat-textarea" placeholder="输入问题…（Enter 发送 / Shift+Enter 换行）"></textarea>
       <button id="chat-send-btn" disabled>发送</button>
@@ -967,6 +1080,40 @@
   // =====================================================================
   const graph = { nodes: [], edges: [], byId: new Map(), stars: [] };
   const UNCLASSIFIED = "未分类";
+
+  // U1 图谱推理高亮态：实体名集合 + 无向边键集合，drawEdges/render 消费。
+  const highlight = { entities: new Set(), edges: new Set() };
+  const edgeKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+  function nodeForEntity(name) {
+    const wanted = String(name || "").trim();
+    if (!wanted) return null;
+    for (const node of graph.nodes) {
+      if (node.kind !== "entity") continue;
+      if (node.title === wanted || node.id === `ent:${wanted}`) return node;
+    }
+    return null;
+  }
+
+  // 多跳结果 → 图上高亮：实体名进 entities，相邻实体在图中真实存在的边进 edges。
+  function highlightPath(paths) {
+    highlight.entities.clear();
+    highlight.edges.clear();
+    for (const path of paths || []) {
+      const chain = path.entities || [];
+      for (const name of chain) highlight.entities.add(name);
+      for (let i = 0; i + 1 < chain.length; i += 1) {
+        const a = nodeForEntity(chain[i]), b = nodeForEntity(chain[i + 1]);
+        if (a && b) highlight.edges.add(edgeKey(a.id, b.id));
+      }
+    }
+    return highlight;
+  }
+
+  function clearHighlight() {
+    highlight.entities.clear();
+    highlight.edges.clear();
+  }
 
   async function loadGraph() {
     const data = await apiGet("/api/graph", 30000);
@@ -1266,6 +1413,7 @@
     const pad = 60 / zoom;
     const viewL = camX - width / 2 / zoom - pad, viewR = camX + width / 2 / zoom + pad;
     const viewT = camY - height / 2 / zoom - pad, viewB = camY + height / 2 / zoom + pad;
+    const hasPath = highlight.edges.size > 0;
     for (const edge of graph.edges) {
       const s = graph.byId.get(edge.source), t = graph.byId.get(edge.target);
       if (!s || !t || s.wx == null || t.wx == null) continue;
@@ -1273,17 +1421,26 @@
           t.wx < viewL || t.wx > viewR || t.wy < viewT || t.wy > viewB) continue;
       const ps = project2D(s.wx, s.wy), pt = project2D(t.wx, t.wy);
       const isHot = hoverNodeRef && (hoverNodeRef.id === s.id || hoverNodeRef.id === t.id);
-      const dimmed = hoverNodeRef && !isHot;
-      const alpha = dimmed ? 0.04 : (isHot ? 0.9 : 0.16 + Math.min(0.2, (edge.confidence || 1) * 0.2));
+      const inPath = hasPath && highlight.edges.has(edgeKey(s.id, t.id));
+      const dimmed = (hoverNodeRef && !isHot) || (hasPath && !inPath);
+      const alpha = dimmed ? 0.04 : (isHot || inPath ? 0.9 : 0.16 + Math.min(0.2, (edge.confidence || 1) * 0.2));
       if (alpha <= 0.05) continue;
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(ps.px, ps.py);
       ctx.quadraticCurveTo((ps.px + pt.px) / 2, (ps.py + pt.py) / 2, pt.px, pt.py);
-      ctx.strokeStyle = hexToRgba(s.color || "#38bdf8", alpha);
-      ctx.lineWidth = isHot ? 2.2 : 1;
-      if ((edge.confidence || 1) < 0.6) ctx.setLineDash([5, 7]);
-      if (isHot) { ctx.shadowColor = s.color || "#38bdf8"; ctx.shadowBlur = 14; }
+      ctx.strokeStyle = inPath ? "rgba(125, 211, 252, 1)" : hexToRgba(s.color || "#38bdf8", alpha);
+      ctx.lineWidth = inPath ? 2.6 : (isHot ? 2.2 : 1);
+      if (inPath) {
+        // 推理路径流光：虚线偏移随时间滚动，与静态图区分。
+        ctx.setLineDash([12, 8]);
+        ctx.lineDashOffset = -(globalTime * 26) % 20;
+        ctx.shadowColor = "#7dd3fc";
+        ctx.shadowBlur = 16;
+      } else {
+        if ((edge.confidence || 1) < 0.6) ctx.setLineDash([5, 7]);
+        if (isHot) { ctx.shadowColor = s.color || "#38bdf8"; ctx.shadowBlur = 14; }
+      }
       ctx.stroke();
       ctx.restore();
     }
@@ -1351,10 +1508,12 @@
       n.renderedRadius = Math.max(1.8, n.radius * zoom);
       n._px = p.px; n._py = p.py;
       const isFocused = currentFocusNode && currentFocusNode.id === n.id;
+      // U1：落在推理路径上的实体同焦点一样点亮，让多跳结果在图上可见。
+      const inPath = highlight.entities.size > 0 && n.kind === "entity" && highlight.entities.has(n.title);
       const isHover = Math.hypot(mouseX - p.px, mouseY - p.py) < Math.max(14, n.renderedRadius * 1.3);
       if (isHover && !isDragging) hoveredNode = n;
       const twinkle = Math.sin(globalTime * n.twinkleSpeed + n.twinklePhase);
-      drawCelestialBody(p, n.renderedRadius, n.color, isFocused || isHover, twinkle);
+      drawCelestialBody(p, n.renderedRadius, n.color, isFocused || isHover || inPath, twinkle);
     }
     hoverNodeRef = hoveredNode;
     canvas.style.cursor = hoveredNode ? "pointer" : (isDragging ? "grabbing" : "grab");
@@ -1720,12 +1879,24 @@
   let chatMode = "offline";
   let chatPendingMode = null;
   let chatSending = false;
+  let backendUp = false;   // /api/health 是否通：图谱推理不需要聊天模型，要单独放行
 
-  const modeLabel = (mode) => (mode === "online" ? "联网 · 记忆+搜索" : "非联网 · 仅记忆");
+  const modeLabel = (mode) => (
+    mode === "online" ? "联网 · 记忆+搜索"
+      : mode === "graphrag" ? "图谱推理 · 多跳"
+        : "非联网 · 仅记忆"
+  );
+
+  function refreshSendButton() {
+    // graphrag 是纯本地检索（无 LLM），只要后端活着就可用（D9：LLM 只用于问答与抽取）。
+    const usable = backendUp && (chatReady || chatMode === "graphrag");
+    chatSendBtn.disabled = chatSending || !usable;
+  }
 
   function applyChatMode(mode) {
     chatMode = mode;
     chatModeSelect.value = mode;
+    refreshSendButton();
   }
 
   function onChatModeChange() {
@@ -1740,24 +1911,142 @@
   }
   chatModeSelect.addEventListener("change", onChatModeChange);
 
+  // U1：把检索依据逐条写进抽屉，点一条高亮对应天体。
+  function renderEvidence(items) {
+    const section = $("evidence-section"), list = $("evidence-list");
+    const evidence = (items || []).filter(item => item && item.id);
+    section.style.display = evidence.length ? "block" : "none";
+    $("evidence-count").textContent = `${evidence.length} 条`;
+    list.innerHTML = "";
+    for (const item of evidence) {
+      const meta = item.metadata || {};
+      const label = meta.title || meta.source || item.content || item.id;
+      const row = document.createElement("div");
+      row.className = "evidence-item";
+      const chunkIndex = meta.chunk_index;
+      row.innerHTML = `
+        <div>${escapeHtml(shortTitle(label))}</div>
+        <div class="evidence-meta">${escapeHtml(meta.source || "本机记忆")} · 相似度 ${
+          Number(item.score || 0).toFixed(3)}${chunkIndex == null ? "" : ` · 第 ${Number(chunkIndex) + 1} 块`}</div>`;
+      const node = graph.byId.get(item.id);
+      if (node) {
+        row.addEventListener("click", () => { currentFocusNode = node; renderDrawer(node); });
+      } else {
+        row.style.cursor = "default";
+      }
+      list.appendChild(row);
+    }
+    return evidence.length;
+  }
+
+  // =====================================================================
+  // 10.2 U3 存储健康与一致性面板（/api/health + /api/reconcile）
+  // =====================================================================
+  let lastHealth = null;
+  // 隧道命令来自部署说明（方案 §0.1）；本机单人使用，前端只在降级时展示。
+  const TUNNEL_COMMAND = "ssh -N -L 10800:127.0.0.1:18000 root@103.240.196.39 -p 10034";
+  const DRIFT_LABEL = {
+    missing_vector: "缺向量（真值有 · 向量无）",
+    orphan_vector: "孤儿向量（向量有 · 真值无）",
+    missing_edge: "缺边（事实有 · 图边无）",
+  };
+  const row = (key, value, cls) =>
+    `<div class="storage-row"><span>${key}</span><b class="${cls || ""}">${value}</b></div>`;
+
+  function renderStoragePanel(health, reconcile) {
+    if (health) lastHealth = health;
+    const h = lastHealth || {};
+    const modes = h.store_modes || {};
+    const degraded = h.degraded || {};
+    const embedded = degraded.embedding || "hash";
+    const unreachable = embedded === "unreachable";
+    const drift = (reconcile && reconcile.drift) || [];
+    const badge = $("btn-storage");
+    badge.classList.toggle("warn", unreachable || drift.length > 0);
+    badge.textContent = unreachable || drift.length ? "存储健康 ⚠" : "存储健康";
+
+    if ($("storage-panel").hidden) return;   // 关闭时不重绘内容
+    $("storage-modes").innerHTML = [
+      row("文档真值源", escapeHtml(modes.document || "—")),
+      row("向量库", escapeHtml(modes.vector || "—")),
+      row("图库", escapeHtml(modes.graph || "—")),
+      row("嵌入出网", { gateway: "网关（隧道）", api: "云端 API", hash: "本地哈希（无远端）", unreachable: "不可达 · 已降级" }[embedded] || escapeHtml(embedded),
+        unreachable ? "err" : embedded === "hash" ? "warn" : "ok"),
+      row("聊天模型", degraded.chat_ready ? "已配置（DeepSeek）" : "未配置", degraded.chat_ready ? "ok" : ""),
+    ].join("") + (unreachable
+      ? `<div class="warn">当前为<b>关键词检索模式</b>（FTS5 + 图谱）；向量检索与入库不可用，恢复隧道后自动回到向量检索。</div><code>${TUNNEL_COMMAND}</code>`
+      : "");
+
+    const counts = reconcile && reconcile.counts;
+    $("storage-counts").innerHTML = counts ? [
+      row("分块", counts.chunks),
+      row("已建索引", counts.chunks_indexed_sqlite),
+      row("向量点", counts.qdrant_points < 0 ? "未知" : counts.qdrant_points),
+      row("事实", counts.facts),
+      row("图边", counts.neo4j_edges < 0 ? "未知" : counts.neo4j_edges),
+    ].join("") : '<span style="color:#475569">点「重新对账」查看三库计数</span>';
+
+    $("storage-drift").innerHTML = !reconcile
+      ? '<span style="color:#475569">未对账</span>'
+      : drift.length
+        ? drift.map(item => `<div class="warn">${DRIFT_LABEL[item.kind] || escapeHtml(item.kind)} · ${item.count} 条</div>`).join("")
+        : '<span class="ok">三库一致 ✓</span>';
+  }
+
+  async function refreshReconcile() {
+    try {
+      renderStoragePanel(lastHealth, await apiGet("/api/reconcile", 20000));
+    } catch (err) {
+      $("storage-drift").textContent = "对账失败：" + err.message;
+    }
+  }
+
+  const storagePanel = $("storage-panel");
+  $("btn-storage").addEventListener("click", async () => {
+    storagePanel.hidden = !storagePanel.hidden;
+    $("btn-storage").setAttribute("aria-expanded", String(!storagePanel.hidden));
+    if (storagePanel.hidden) return;
+    renderStoragePanel(lastHealth, null);
+    await refreshReconcile();
+  });
+  $("storage-close").addEventListener("click", () => {
+    storagePanel.hidden = true;
+    $("btn-storage").setAttribute("aria-expanded", "false");
+  });
+  $("btn-reconcile").addEventListener("click", refreshReconcile);
+  $("btn-repair").addEventListener("click", async () => {
+    $("storage-drift").textContent = "修复中…";
+    try {
+      const res = await apiPostJson("/api/reconcile", { repair: ["missing_vector", "missing_edge"] }, 180000);
+      const fixed = res.repaired || {};
+      toast(`已修复：补向量 ${fixed.missing_vector || 0} 条 / 补图边 ${fixed.missing_edge || 0} 条`, "ok");
+    } catch (err) {
+      toast("修复失败：" + err.message, "err");
+    }
+    await refreshReconcile();
+  });
+
   async function checkHealth() {
     try {
       const h = await apiGet("/api/health", 8000);
+      backendUp = true;
       chatReady = !!h.chat_ready;
       $("chat-status-dot").classList.toggle("on", chatReady);
       $("chat-status-text").textContent = chatReady
         ? "在线 · 已接入你的知识库"
-        : "未配置聊天模型（provider.toml）";
-      chatSendBtn.disabled = !chatReady;
+        : "未配置聊天模型（provider.toml）· 图谱推理仍可用";
       const onlineOption = chatModeSelect.querySelector('option[value="online"]');
       onlineOption.textContent = h.search_available
         ? "🌐 联网 · 记忆+搜索"
         : "🌐 联网 · 记忆+搜索（未配置搜索，将按非联网回答）";
+      renderStoragePanel(h, null);
     } catch (_) {
+      backendUp = false;
       chatReady = false;
+      $("chat-status-dot").classList.remove("on");
       $("chat-status-text").textContent = "服务不可达";
-      chatSendBtn.disabled = true;
     }
+    refreshSendButton();
   }
 
   function appendBubble(text, who) {
@@ -1777,12 +2066,38 @@
     chatText.value = "";
     appendBubble(text, "me");
     const think = appendBubble(
-      usedMode === "online" ? "正在联网检索并思考…" : "正在检索知识库并思考…",
+      usedMode === "online" ? "正在联网检索并思考…"
+        : usedMode === "graphrag" ? "正在做多跳图检索…"
+          : "正在检索知识库并思考…",
       "ai"
     );
     think.classList.add("thinking");
     chatSendBtn.disabled = true;
     try {
+      if (usedMode === "graphrag") {
+        // U1：本地多跳图推理（不经过 LLM），命中路径在星云图上高亮，证据进抽屉。
+        const res = await apiPostJson("/api/graph-rag", { query: text, limit: 8, hops: 2 }, 60000);
+        const paths = res.paths || [];
+        const evidence = res.evidence || [];
+        highlightPath(paths);
+        think.classList.remove("thinking");
+        const chains = paths.slice(0, 4).map(path => `关系：${(path.entities || []).join(" → ")}`);
+        const shown = renderEvidence(evidence);
+        if (!paths.length && !shown) {
+          clearHighlight();
+          think.textContent = "知识库里还没有可用的关系或证据：先导入文档或添加一条三元组。";
+          return;
+        }
+        think.textContent = [
+          paths.length
+            ? `多跳检索找到 ${paths.length} 条路径，图上已高亮 ${highlight.edges.size} 条引力桥与 ${highlight.entities.size} 个实体：`
+            : "没有找到多跳路径，以下是检索命中的依据：",
+          ...chains,
+          shown ? `证据 ${shown} 条，见右侧抽屉「检索依据」，点击可定位天体。` : "",
+        ].filter(Boolean).join("\n");
+        drawer.classList.add("visible");
+        return;
+      }
       const res = await apiPostJson("/api/chat", { message: text, mode: usedMode }, 180000);
       think.classList.remove("thinking");
       const sources = (res.sources || [])
@@ -1804,7 +2119,7 @@
         chatPendingMode = null;
         chatModeHint.hidden = true;
       }
-      chatSendBtn.disabled = !chatReady;
+      refreshSendButton();
       chatMsgs.scrollTop = chatMsgs.scrollHeight;
     }
   }
