@@ -124,6 +124,19 @@ class Neo4jGraphStore:
 
         return dict(self._entities.get(name, {}))
 
+    def relation_memory_ids(self) -> list[str]:
+        """``memory_id`` of every edge (reconcile compares this against facts)."""
+
+        if self.driver is None:
+            return [
+                str(edge["properties"].get("memory_id") or "")
+                for edges in self._local.values()
+                for edge in edges
+            ]
+        query = "MATCH ()-[r:RELATED]->() RETURN r.memory_id AS memory_id"
+        with self.driver.session(database=self.database) as session:
+            return [str(record["memory_id"]) for record in session.run(query)]
+
     # Common aliases used by graph-oriented clients.
     upsert_relation = add_relation
 

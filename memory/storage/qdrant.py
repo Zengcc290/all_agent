@@ -108,10 +108,48 @@ class QdrantVectorStore(BaseVectorStore):
         self.client.delete(collection_name=self.collection_name, points_selector=PointIdsList(points=[self._point_id(item_id)]))
         return True
 
+    def _ensure_ready_for_read(self) -> bool:
+        """Attach to an existing collection without creating one.
+
+        ``_ready`` is only set by writes, so a process that merely reads (the
+        reconcile endpoint, a UI session) would otherwise report an empty
+        collection as "no vectors".
+        """
+
+        if self._ready:
+            return True
+        try:
+            if not self.client.collection_exists(collection_name=self.collection_name):
+                return False
+        except Exception:  # noqa: BLE001 - 探测失败按「读不到」处理，由调用方降级
+            return False
+        self._ready = True
+        return True
+
+    def list_ids(self, *, limit: int = 10000) -> list[str]:
+        """Every app-level id in the collection (reconcile needs the full set)."""
+
+        if not self._ensure_ready_for_read():
+            return []
+        scroll = getattr(self.client, "scroll", None)
+        if not callable(scroll):
+            return []
+        points, _ = scroll(
+            collection_name=self.collection_name,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        ids: list[str] = []
+        for point in points:
+            payload = point.payload or {}
+            ids.append(str(payload.get("chunk_id") or payload.get("id") or point.id))
+        return ids
+
     def search(self, vector: list[float], *, limit: int = 10, memory_type: MemoryType | str | None = None) -> list[tuple[str, float]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        if not self._ready:
+        if not self._ensure_ready_for_read():
             return []
         from qdrant_client.models import FieldCondition, Filter, MatchValue
         conditions = [FieldCondition(key="namespace", match=MatchValue(value=self.namespace))]

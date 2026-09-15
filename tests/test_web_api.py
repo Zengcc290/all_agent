@@ -11,7 +11,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from memory import MemoryConfig, MemoryManager  # noqa: E402
+from memory import InMemoryVectorStore, MemoryConfig, MemoryManager  # noqa: E402
 from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 from web import create_app  # noqa: E402
 from web.support import HashEmbedding  # noqa: E402
@@ -34,6 +34,54 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 def _make_ingest_payload(filename: str, text: str) -> dict:
     return {"file": (filename, io.BytesIO(text.encode("utf-8")), "text/plain")}
+
+
+class DriftVectorStore(InMemoryVectorStore):
+    """内存向量库 + 可枚举 id：对账接口需要，且能人为制造缺向量的漂移。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: set[str] = set()
+
+    def upsert(self, item) -> None:
+        super().upsert(item)
+        self.ids.add(item.id)
+
+    def upsert_chunk(self, chunk_id, vector, **kwargs) -> None:
+        self.ids.add(chunk_id)
+
+    def list_ids(self) -> list[str]:
+        return sorted(self.ids)
+
+
+@pytest.fixture()
+def file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """文件库客户端：documents/chunks 真值源只在文件型 SQLite 上存在。"""
+
+    monkeypatch.setenv("WEB_AUTOSEED", "0")
+    store = DriftVectorStore()
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=HashEmbedding(),
+        vector_store=store,
+    )
+    app = create_app(manager=manager)
+    with TestClient(app) as test_client:
+        yield test_client, store
+    manager.close()
+
+
+def _ingest_documents(client: TestClient, names: list[str]) -> list[str]:
+    """上传若干文档，返回它们的 document_id（按创建顺序）。"""
+
+    for name in names:
+        response = client.post(
+            "/api/ingest",
+            files=_make_ingest_payload(f"{name}.txt", f"{name} 的内容，讲的是混合检索与向量库。" * 8),
+        )
+        assert response.status_code == 200, response.text
+    listing = client.get("/api/documents", params={"page_size": 50}).json()
+    return [item["document_id"] for item in listing["items"]]
 
 
 def test_graph_empty_then_seeded(client: TestClient) -> None:
@@ -534,3 +582,110 @@ def test_get_agent_registers_the_four_memory_tools(
         support.close_manager()
         monkeypatch.setattr(support, "_agent", None)
         monkeypatch.setattr(support, "_pipeline", None)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: 文档中心、统计、三库对账
+# ---------------------------------------------------------------------------
+
+
+def test_list_documents_pagination(file_client) -> None:
+    client, _ = file_client
+    _ingest_documents(client, ["文档甲", "文档乙", "文档丙"])
+
+    first = client.get("/api/documents", params={"page_size": 2}).json()
+    second = client.get("/api/documents", params={"page_size": 2, "page": 2}).json()
+
+    assert first["total"] == second["total"] == 3
+    assert len(first["items"]) == 2
+    assert len(second["items"]) == 1
+    assert first["items"][0]["chunk_count"] > 0
+    assert client.get("/api/documents", params={"page": 0}).status_code == 422
+
+
+def test_get_document_raw_text(file_client) -> None:
+    client, _ = file_client
+    document_id = _ingest_documents(client, ["边界文档"])[0]
+
+    payload = client.get(f"/api/documents/{document_id}").json()
+
+    assert payload["document_id"] == document_id
+    assert payload["chunks"]
+    for chunk in payload["chunks"]:
+        assert payload["raw_text"][chunk["char_start"] : chunk["char_end"]] == chunk["text"]
+    assert payload["status"] in {"vectorized", "extracted"}
+    assert client.get("/api/documents/不存在").status_code == 404
+
+
+def test_document_endpoints_need_a_file_database(client: TestClient) -> None:
+    """:memory: 存储没有真值源，必须明确报错而不是静默返回空列表。"""
+
+    response = client.get("/api/documents")
+
+    assert response.status_code == 400
+    assert "内存模式" in response.json()["detail"]
+
+
+def test_stats_endpoint(file_client) -> None:
+    client, _ = file_client
+    document_id = _ingest_documents(client, ["统计文档"])[0]
+    detail = client.get(f"/api/documents/{document_id}").json()
+
+    stats = client.get("/api/stats").json()
+
+    assert stats["documents"] == 1
+    assert stats["chunks"] == len(detail["chunks"])
+    assert stats["chunks_indexed"] == len(detail["chunks"])
+    assert stats["facts"] == 0
+    assert stats["memories_total"] >= stats["chunks"]
+
+
+def test_reconcile_reports_drift(file_client) -> None:
+    client, store = file_client
+    document_id = _ingest_documents(client, ["漂移文档"])[0]
+    chunks = client.get(f"/api/documents/{document_id}").json()["chunks"]
+    store.ids.discard(chunks[0]["chunk_id"])
+
+    report = client.get("/api/reconcile").json()
+
+    assert report["counts"]["chunks"] == len(chunks)
+    # 向量库里除了 chunk 还有导入时记录的那条 episodic 记忆，所以只比对集合本身。
+    assert report["counts"]["qdrant_points"] == len(store.ids)
+    drift = {entry["kind"]: entry for entry in report["drift"]}
+    assert drift["missing_vector"]["count"] == 1
+    assert drift["missing_vector"]["ids"] == [chunks[0]["chunk_id"]]
+    assert "orphan_vector" not in drift
+
+
+def test_reconcile_repair_is_idempotent(file_client) -> None:
+    client, store = file_client
+    document_id = _ingest_documents(client, ["自愈文档"])[0]
+    chunk_id = client.get(f"/api/documents/{document_id}").json()["chunks"][0]["chunk_id"]
+    store.ids.discard(chunk_id)
+
+    first = client.post("/api/reconcile", json={"repair": ["missing_vector"]}).json()
+    second = client.post("/api/reconcile", json={"repair": ["missing_vector"]}).json()
+
+    assert first["repaired"]["missing_vector"] == 1
+    assert second["repaired"]["missing_vector"] == 0
+    assert client.get("/api/reconcile").json()["drift"] == []
+    assert chunk_id in store.ids
+    assert client.post("/api/reconcile", json={"repair": ["不存在的类型"]}).status_code == 422
+
+
+def test_health_reports_store_modes_and_degraded(file_client) -> None:
+    client, _ = file_client
+
+    health = client.get("/api/health").json()
+
+    assert health["store_modes"] == {
+        "document": "sqlite",
+        "vector": "DriftVectorStore",
+        "graph": "inmemory",
+    }
+    assert health["degraded"] == {
+        "embedding": "hash",
+        "embedding_endpoint": "",
+        "chat_ready": health["chat_ready"],
+        "keyword_fallback": False,
+    }

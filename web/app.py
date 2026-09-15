@@ -54,8 +54,9 @@ from constants import (
 )
 from core import ExecutionContext
 from memory import MemoryManager, MemoryType
-from memory.embedding import gateway_reachable
+from memory.embedding import EmbedServerEmbedding, gateway_reachable
 from memory.rag import RAGPipeline
+from memory.storage.document_repo import DocumentRepository
 
 from .graph_builder import build_graph
 from .seed import seed
@@ -73,6 +74,19 @@ from .support import (
     schedule_qa_extraction,
     search_available,
 )
+
+
+class ReconcileBody(BaseModel):
+    """对账修复请求；``repair`` 为空表示只报告不修。"""
+
+    repair: list[str] = Field(default_factory=list)
+
+
+def _is_fact_item(item: Any) -> bool:
+    """A semantic row that represents one (subject, predicate, object) fact."""
+
+    metadata = getattr(item, "metadata", {}) or {}
+    return all(metadata.get(key) for key in ("subject", "predicate", "object"))
 
 
 class ChatBody(BaseModel):
@@ -473,6 +487,243 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             invalidate_graph()
         return {"imported": imported, "skipped": skipped, "errors": errors}
 
+    # ------------------------------------------------------------------
+    # 文档中心与三库对账（documents/chunks 真值源 → 向量/图投影）
+    # ------------------------------------------------------------------
+    def the_repository() -> DocumentRepository:
+        """复用管道缓存的那个仓储：同一 sqlite 文件、自带锁、每作用域独立连接。"""
+
+        repository = app.state.pipeline.document_repo()
+        if repository is None:
+            raise HTTPException(
+                status_code=400,
+                detail="当前记忆库是内存模式（:memory:），没有 documents/chunks 真值源",
+            )
+        return repository
+
+    def fact_items() -> list[Any]:
+        return [item for item in the_manager().semantic.facts() if _is_fact_item(item)]
+
+    def projected_vector_ids() -> set[str] | None:
+        """Qdrant 里的 app 级 id 集合；无法枚举（存储不支持或不可达）时返回 None。"""
+
+        list_ids = getattr(the_manager().vector_store, "list_ids", None)
+        if not callable(list_ids):
+            return None
+        try:
+            return {str(value) for value in list_ids()}
+        except Exception:  # noqa: BLE001 - 读不到就跳过向量对账，不误报漂移
+            return None
+
+    def projected_edge_ids() -> set[str] | None:
+        """图投影里的 memory_id 集合（内存回退与 Neo4j 都实现同一方法）。"""
+
+        relation_ids = getattr(the_manager().graph_store, "relation_memory_ids", None)
+        if not callable(relation_ids):
+            return None
+        try:
+            return {str(value) for value in relation_ids() if str(value)}
+        except Exception:  # noqa: BLE001 - 同上
+            return None
+
+    def reconcile_report() -> dict[str, Any]:
+        """三库计数与漂移（只看不改）：真值源 ↔ 向量投影 ↔ 图投影。"""
+
+        manager = the_manager()
+        repository = app.state.pipeline.document_repo()
+        chunk_ids = set(repository.chunk_ids()) if repository is not None else set()
+        indexed = set(repository.chunk_ids(vector_status="indexed")) if repository is not None else set()
+        memory_ids = {item.id for item in manager.document_store.list(include_expired=True)}
+        facts = fact_items()
+        vectors = projected_vector_ids()
+        edges = projected_edge_ids()
+
+        drift: list[dict[str, Any]] = []
+        if vectors is not None:
+            missing = sorted(indexed - vectors)
+            orphan = sorted(vectors - chunk_ids - memory_ids)
+            if missing:
+                drift.append({"kind": "missing_vector", "count": len(missing), "ids": missing})
+            if orphan:
+                drift.append({"kind": "orphan_vector", "count": len(orphan), "ids": orphan})
+        if edges is not None:
+            missing_edges = sorted({item.id for item in facts} - edges)
+            if missing_edges:
+                drift.append({"kind": "missing_edge", "count": len(missing_edges), "ids": missing_edges})
+        return {
+            "counts": {
+                "chunks": len(chunk_ids),
+                "chunks_indexed_sqlite": len(indexed),
+                "qdrant_points": len(vectors) if vectors is not None else -1,
+                "facts": len(facts),
+                "neo4j_edges": len(edges) if edges is not None else -1,
+            },
+            "drift": drift,
+        }
+
+    def repair_drift(kinds: list[str]) -> dict[str, Any]:
+        """幂等自愈：只补缺失的投影，绝不删除或改写真值源。"""
+
+        requested = list(dict.fromkeys(kinds or []))
+        unknown = [kind for kind in requested if kind not in {"missing_vector", "missing_edge"}]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"不支持的修复类型：{', '.join(unknown)}")
+        repository = app.state.pipeline.document_repo()
+        manager = the_manager()
+        entries = {entry["kind"]: entry["ids"] for entry in reconcile_report()["drift"]}
+        repaired = {"missing_vector": 0, "missing_edge": 0}
+
+        if "missing_vector" in requested and entries.get("missing_vector"):
+            ids = entries["missing_vector"]
+            chunks = [chunk for chunk in (repository.get_chunk(chunk_id) for chunk_id in ids) if chunk is not None]
+            base_url = getattr(manager.embedding, "base_url", None)
+            if base_url and not gateway_reachable(base_url):
+                raise HTTPException(status_code=503, detail="嵌入网关不可达，无法补向量（不会切换向量空间）")
+            if chunks:
+                vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
+                for chunk, vector in zip(chunks, vectors, strict=True):
+                    manager.vector_store.upsert_chunk(
+                        chunk.chunk_id,
+                        vector,
+                        document_id=chunk.document_id,
+                        chunk_index=chunk.chunk_index,
+                        source="",
+                        memory_type=MemoryType.SEMANTIC.value,
+                    )
+                    repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
+                repaired["missing_vector"] = len(chunks)
+                for document_id in {chunk.document_id for chunk in chunks}:
+                    document = repository.get_document(document_id)
+                    if document is not None and document.status == "parsed":
+                        repository.set_status(document_id, "vectorized")
+
+        if "missing_edge" in requested and entries.get("missing_edge"):
+            wanted = set(entries["missing_edge"])
+            for item in fact_items():
+                if item.id not in wanted:
+                    continue
+                manager.semantic.add_fact(
+                    str(item.metadata["subject"]),
+                    str(item.metadata["predicate"]),
+                    str(item.metadata["object"]),
+                    metadata=item.metadata,
+                    confidence=float(item.importance),
+                    item_id=item.id,
+                )
+                repaired["missing_edge"] += 1
+
+        return {"repaired": repaired}
+
+    @app.get("/api/documents")
+    def list_documents(tag: str = "", status: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        repository = the_repository()
+        try:
+            items, total = repository.list_documents(tag=tag, status=status, page=page, page_size=page_size)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        counts = repository.chunk_counts()
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": [
+                {
+                    "document_id": item.document_id,
+                    "title": item.title,
+                    "source": item.source,
+                    "tags": item.tags,
+                    "status": item.status,
+                    "chunk_count": counts.get(item.document_id, 0),
+                    "created_at": item.created_at,
+                }
+                for item in items
+            ],
+        }
+
+    @app.get("/api/documents/{document_id}")
+    def get_document(document_id: str) -> dict[str, Any]:
+        repository = the_repository()
+        document = repository.get_document(document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return {
+            "document_id": document.document_id,
+            "title": document.title,
+            "raw_text": document.raw_text,
+            "source": document.source,
+            "tags": document.tags,
+            "permission": document.permission,
+            "status": document.status,
+            "error": document.error,
+            "created_at": document.created_at,
+            "updated_at": document.updated_at,
+            "chunks": [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "chunk_index": chunk.chunk_index,
+                    "char_start": chunk.char_start,
+                    "char_end": chunk.char_end,
+                    "text": chunk.text,
+                    "vector_status": chunk.vector_status,
+                }
+                for chunk in repository.list_chunks(document_id)
+            ],
+        }
+
+    @app.post("/api/documents/{document_id}/revectorize")
+    def revectorize_document(document_id: str) -> dict[str, Any]:
+        """重建该文档的向量投影；网关不可达时明确失败，绝不切换到别的向量空间（D8）。"""
+
+        repository = the_repository()
+        document = repository.get_document(document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        chunks = repository.list_chunks(document_id)
+        if not chunks:
+            raise HTTPException(status_code=422, detail="该文档没有分块，无法重嵌入")
+        manager = the_manager()
+        base_url = getattr(manager.embedding, "base_url", None)
+        if base_url and not gateway_reachable(base_url):
+            raise HTTPException(status_code=503, detail="嵌入网关不可达，重嵌入已中止（不会切换向量空间）")
+        try:
+            vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
+            for chunk, vector in zip(chunks, vectors, strict=True):
+                manager.vector_store.upsert_chunk(
+                    chunk.chunk_id,
+                    vector,
+                    document_id=chunk.document_id,
+                    chunk_index=chunk.chunk_index,
+                    source=document.source,
+                    memory_type=MemoryType.SEMANTIC.value,
+                )
+                repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"重嵌入失败：{type(exc).__name__}: {exc}") from exc
+        status = "extracted" if document.status == "extracted" else "vectorized"
+        repository.set_status(document_id, status)
+        return {"document_id": document_id, "chunks_reindexed": len(chunks), "status": status}
+
+    @app.get("/api/stats")
+    def stats() -> dict[str, Any]:
+        manager = the_manager()
+        repository = app.state.pipeline.document_repo()
+        counts = repository.stats() if repository is not None else {"documents": 0, "chunks": 0, "chunks_indexed": 0}
+        return {
+            **counts,
+            "facts": len(fact_items()),
+            "memories_total": len(manager.document_store.list(include_expired=True)),
+        }
+
+    @app.get("/api/reconcile")
+    def reconcile() -> dict[str, Any]:
+        return reconcile_report()
+
+    @app.post("/api/reconcile")
+    def reconcile_repair(body: ReconcileBody) -> dict[str, Any]:
+        return repair_drift(body.repair)
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         ready, _ = chat_ready()
@@ -486,6 +737,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         # 只上报隧道可达性，供 UI/调用方判断是否已降级为关键词检索（D8）；
         # 绝不因为不可达就换向量空间。
         embedding_reachable = gateway_reachable(base_url) if base_url else True
+        manager = the_manager()
+        if not base_url:
+            embedding_state = "hash"
+        elif isinstance(embedding, EmbedServerEmbedding):
+            embedding_state = "gateway"
+        else:
+            embedding_state = "api"
+        if base_url and not embedding_reachable:
+            embedding_state = "unreachable"
         return {
             "ok": True,
             "chat_ready": ready,
@@ -493,6 +753,19 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "embedding_reachable": embedding_reachable,
             "embedding": getattr(embedding, "to_dict", dict)(),
             "search_available": search_available(),
+            # 三个存储各自的实现（D1：全部在本机），UI 用它区分「本地真值 / 本地投影」。
+            "store_modes": {
+                "document": "memory" if str(getattr(manager.document_store, "path", "")) == ":memory:" else "sqlite",
+                "vector": type(manager.vector_store).__name__,
+                "graph": "neo4j" if getattr(manager.graph_store, "driver", None) is not None else "inmemory",
+            },
+            # 两个出网点的实时状态（D8/D9）：嵌入不可达时检索只能走 FTS5，UI 必须如实提示。
+            "degraded": {
+                "embedding": embedding_state,
+                "embedding_endpoint": base_url or "",
+                "chat_ready": ready,
+                "keyword_fallback": bool(base_url) and not embedding_reachable,
+            },
         }
 
     # ------------------------------------------------------------------

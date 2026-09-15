@@ -358,6 +358,30 @@ class DocumentRepository:
         return [(row["chunk_id"], -float(row["rank"])) for row in rows]
 
     # -- reporting -----------------------------------------------------
+    def chunk_counts(self) -> dict[str, int]:
+        """``{document_id: chunk_count}`` in one query (list view needs it per row)."""
+
+        with self._connection_scope() as connection:
+            rows = connection.execute(
+                "SELECT document_id, count(*) AS n FROM chunks GROUP BY document_id"
+            ).fetchall()
+        return {row["document_id"]: int(row["n"]) for row in rows}
+
+    def chunk_ids(self, *, vector_status: str = "") -> list[str]:
+        """Chunk ids, optionally filtered by ``vector_status`` (reconcile input)."""
+
+        if vector_status:
+            self._check_choice("vector_status", vector_status, CHUNK_VECTOR_STATUSES)
+        with self._connection_scope() as connection:
+            if vector_status:
+                rows = connection.execute(
+                    "SELECT chunk_id FROM chunks WHERE vector_status = ? ORDER BY chunk_id",
+                    (vector_status,),
+                ).fetchall()
+            else:
+                rows = connection.execute("SELECT chunk_id FROM chunks ORDER BY chunk_id").fetchall()
+        return [row["chunk_id"] for row in rows]
+
     def stats(self) -> dict[str, int]:
         with self._connection_scope() as connection:
             documents = connection.execute("SELECT count(*) AS n FROM documents").fetchone()["n"]
