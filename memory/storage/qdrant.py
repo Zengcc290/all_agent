@@ -63,9 +63,43 @@ class QdrantVectorStore(BaseVectorStore):
             return
         self._ensure_collection(len(item.embedding))
         from qdrant_client.models import PointStruct
-        payload = item.to_dict()
+        payload = self._light_payload(item)
         payload["namespace"] = self.namespace
         self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(item.id), vector=item.embedding, payload=payload)])
+
+    def upsert_chunk(self, chunk_id: str, vector: list[float], *, document_id: str = "", chunk_index: int = 0, source: str = "", memory_type: str = "semantic") -> None:
+        """Write one chunk vector with the narrow chunk payload (方案 2.2).
+
+        Used by the projection reindex path: the ingest path still goes through
+        :meth:`upsert`/``MemoryManager.add``, and both resolve to the same
+        ``chunk_id`` so the SQLite look-back is identical either way.
+        """
+        if not vector:
+            return
+        self._ensure_collection(len(vector))
+        from qdrant_client.models import PointStruct
+        payload: dict[str, Any] = {
+            "chunk_id": chunk_id,
+            "document_id": document_id,
+            "chunk_index": chunk_index,
+            "source": source,
+            "memory_type": memory_type,
+            # namespace 由存储层补，与 upsert() 同一口径：search() 强制按它过滤，
+            # 缺了这个键的点会永远检索不到。
+            "namespace": self.namespace,
+        }
+        self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(chunk_id), vector=vector, payload=payload)])
+
+    @staticmethod
+    def _light_payload(item: MemoryItem) -> dict[str, Any]:
+        """Projection payload: only what回查 and filtering need.
+
+        The chunk text and metadata already live in SQLite (真值源), and the
+        1024-float embedding was the bulk of every point; keeping a full copy in
+        Qdrant would be a second, drift-prone truth.
+        """
+        full = item.to_dict()
+        return {key: full.get(key) for key in ("id", "memory_type", "created_at", "expires_at")}
 
     def delete(self, item_id: str) -> bool:
         if not self._ready:
@@ -88,7 +122,12 @@ class QdrantVectorStore(BaseVectorStore):
             points = self.client.search(collection_name=self.collection_name, query_vector=vector, query_filter=query_filter, limit=limit)
         except AttributeError:
             points = self.client.query_points(collection_name=self.collection_name, query=vector, query_filter=query_filter, limit=limit).points
-        return [(str((point.payload or {}).get("id", point.id)), float(point.score)) for point in points]
+        hits: list[tuple[str, float]] = []
+        for point in points:
+            payload = point.payload or {}
+            # chunk 点优先用 chunk_id；老点沿用 id；两者皆无才退回 Qdrant 点 id。
+            hits.append((str(payload.get("chunk_id") or payload.get("id") or point.id), float(point.score)))
+        return hits
 
     @staticmethod
     def _point_id(item_id: str) -> str:

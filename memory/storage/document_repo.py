@@ -27,6 +27,8 @@ DOCUMENT_STATUSES = ("uploaded", "parsed", "vectorized", "extracted", "failed")
 CHUNK_VECTOR_STATUSES = ("pending", "indexed", "failed")
 #: ``documents.permission`` - 决定是否允许离开本机（D9）。
 PERMISSIONS = ("private", "shared", "public")
+#: FTS5 分词器优先级：``trigram`` 支持中文子串，退化时用 ``unicode61``。
+FTS_TOKENIZERS = ("trigram", "unicode61")
 
 
 @dataclass
@@ -73,6 +75,8 @@ class DocumentRepository:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
+        #: ``trigram`` / ``unicode61``，FTS5 不可用时为 ``None``（检索退化为纯向量）。
+        self.fts_tokenizer: str | None = None
         if self.path == ":memory:":
             self._connection = sqlite3.connect(self.path, check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
@@ -130,6 +134,57 @@ class DocumentRepository:
                 """
             )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id)")
+            self._initialize_fts(connection)
+
+    def _initialize_fts(self, connection: sqlite3.Connection) -> None:
+        """Build the FTS5 index over ``chunks.text`` (external content + triggers).
+
+        FTS5 is what keeps retrieval alive when the embedding tunnel is down
+        (D8), so a build without FTS5 is recorded in ``fts_tokenizer`` instead
+        of preventing the repository from opening at all.
+        """
+
+        existing = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'"
+        ).fetchone()
+        rebuild = existing is None
+        if existing is not None:
+            # 表已存在：沿用当初建成的分词器，避免把 unicode61 误报为 trigram。
+            self.fts_tokenizer = "trigram" if "trigram" in (existing["sql"] or "") else "unicode61"
+        else:
+            for tokenizer in FTS_TOKENIZERS:
+                try:
+                    connection.execute(
+                        "CREATE VIRTUAL TABLE chunks_fts USING fts5("
+                        "text, content='chunks', content_rowid='rowid', "
+                        f"tokenize='{tokenizer}')"
+                    )
+                except sqlite3.OperationalError:
+                    connection.execute("DROP TABLE IF EXISTS chunks_fts")
+                    continue
+                self.fts_tokenizer = tokenizer
+                break
+        if self.fts_tokenizer is None:
+            return
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN"
+            "  INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);"
+            " END"
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN"
+            "  INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.rowid, old.text);"
+            " END"
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN"
+            "  INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.rowid, old.text);"
+            "  INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);"
+            " END"
+        )
+        if rebuild:
+            # 外部内容表不会自己回填：为 FTS 之前就存在的 chunks 行建一次索引。
+            connection.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
 
     # -- documents -----------------------------------------------------
     def upsert_document(self, doc: DocumentRecord) -> None:
@@ -275,6 +330,33 @@ class DocumentRepository:
                 "UPDATE chunks SET vector_status = ? WHERE chunk_id = ?", (status, chunk_id)
             )
 
+    # -- keyword search (FTS5) -----------------------------------------
+    @staticmethod
+    def _fts_query(query: str) -> str:
+        """Turn a raw user query into a safe FTS5 phrase: quote it, double inner quotes.
+
+        Mandatory, not theoretical: bare ``abc-123`` makes FTS5 read ``-`` as
+        column syntax and raises ``no such column: 123`` (same for ``型号: X200``),
+        which surfaced as a 500 before this existed.
+        """
+
+        return '"' + query.replace('"', '""') + '"'
+
+    def search_keywords(self, query: str, *, limit: int = 10) -> list[tuple[str, float]]:
+        """BM25 keyword search over chunks; higher score means more relevant."""
+        if self.fts_tokenizer is None or not isinstance(query, str) or not query.strip():
+            return []
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with self._connection_scope() as connection:
+            rows = connection.execute(
+                "SELECT c.chunk_id AS chunk_id, bm25(chunks_fts) AS rank "
+                "FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid "
+                "WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (self._fts_query(query), limit),
+            ).fetchall()
+        return [(row["chunk_id"], -float(row["rank"])) for row in rows]
+
     # -- reporting -----------------------------------------------------
     def stats(self) -> dict[str, int]:
         with self._connection_scope() as connection:
@@ -328,6 +410,7 @@ class DocumentRepository:
 __all__ = [
     "CHUNK_VECTOR_STATUSES",
     "DOCUMENT_STATUSES",
+    "FTS_TOKENIZERS",
     "PERMISSIONS",
     "ChunkRecord",
     "DocumentRecord",

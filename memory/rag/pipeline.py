@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from constants import (
 )
 
 from ..base import MemoryItem, MemorySearchResult, MemoryType
+from ..embedding import gateway_reachable
 from ..manager import MemoryManager
 from ..storage.document_repo import (
     PERMISSIONS,
@@ -80,6 +82,31 @@ def _document_permission(metadata: Mapping[str, Any]) -> str:
     return permission if permission in PERMISSIONS else "private"
 
 
+def _hybrid_enabled() -> bool:
+    """混合检索开关（``HELLOAGENTS_MEMORY_HYBRID``，默认开；关闭即回到纯向量）。"""
+
+    return os.getenv("HELLOAGENTS_MEMORY_HYBRID", "").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _rrf_fuse(rank_lists: list[list[str]], *, k: int = 60) -> list[tuple[str, float]]:
+    """Reciprocal Rank Fusion: 只按名次计分，避免余弦与 bm25 两套量纲混算。"""
+
+    scores: dict[str, float] = {}
+    for hits in rank_lists:
+        for rank, chunk_id in enumerate(hits, start=1):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _chunk_metadata(chunk: ChunkRecord) -> dict[str, Any]:
+    return {
+        "document_id": chunk.document_id,
+        "chunk_index": chunk.chunk_index,
+        "char_start": chunk.char_start,
+        "char_end": chunk.char_end,
+    }
+
+
 class RAGPipeline:
     def __init__(
         self,
@@ -96,6 +123,8 @@ class RAGPipeline:
         self.graph = GraphRAGPipeline(self.manager)
         self.last_ingest_report: dict[str, Any] = {}
         self._repository: DocumentRepository | None = None
+        #: 最近一次混合检索的降级说明（空串表示向量路正常），供 UI/健康检查展示。
+        self.last_retrieval_note = ""
 
     def document_repo(self) -> DocumentRepository | None:
         """The ``documents``/``chunks`` source of truth, or ``None`` if unavailable.
@@ -236,7 +265,52 @@ class RAGPipeline:
         )
 
     def retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
-        return [RetrievedChunk.from_result(result) for result in self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata)]
+        repository = self.document_repo()
+        results: list[RetrievedChunk] = []
+        for result in self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata):
+            # 正文以 chunks 真值源为准（同一 id 的内容可能已被修正）；查不到再退回 memories。
+            chunk = repository.get_chunk(result.item.id) if repository is not None else None
+            if chunk is None:
+                results.append(RetrievedChunk.from_result(result))
+            else:
+                results.append(
+                    RetrievedChunk(chunk.text, float(result.score), result.item.id, result.item.metadata)
+                )
+        return results
+
+    def _vector_hits(self, query: str, *, limit: int, threshold: float | None, metadata: Mapping[str, Any] | None) -> list[str]:
+        """Vector-path ids; empty (and noted) when the embedding path is unusable."""
+
+        base_url = getattr(self.manager.embedding, "base_url", None)
+        if base_url and not gateway_reachable(base_url):
+            self.last_retrieval_note = f"嵌入网关不可达（{base_url}），本次检索降级为纯关键词（FTS5）。"
+            return []
+        try:
+            results = self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata)
+        except (ConnectionError, OSError, RuntimeError) as exc:
+            self.last_retrieval_note = f"向量检索失败，本次检索降级为纯关键词（FTS5）：{type(exc).__name__}: {exc}"
+            return []
+        return [result.item.id for result in results]
+
+    def hybrid_retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
+        """向量路 × FTS5 关键词路，RRF 融合；向量不可用时退化为纯关键词（D8）。
+
+        精确词（型号、编号、代码标识符）向量区分度差，转述又只有向量能召回，
+        两路互补；任一投影不可用都不能让检索整体失败。
+        """
+
+        repository = self.document_repo()
+        if not _hybrid_enabled() or repository is None:
+            return self.retrieve(query, limit=limit, threshold=threshold, metadata=metadata)
+        self.last_retrieval_note = ""
+        vector_hits = self._vector_hits(query, limit=limit * 2, threshold=threshold, metadata=metadata)
+        keyword_hits = [chunk_id for chunk_id, _ in repository.search_keywords(query, limit=limit * 2)]
+        results: list[RetrievedChunk] = []
+        for chunk_id, score in _rrf_fuse([vector_hits, keyword_hits])[:limit]:
+            chunk = repository.get_chunk(chunk_id)
+            if chunk is not None:  # 真值源没有的分块不返回（孤立向量不外泄）
+                results.append(RetrievedChunk(chunk.text, score, chunk.chunk_id, _chunk_metadata(chunk)))
+        return results
 
     def build_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, separator: str = "\n\n") -> str:
         if not isinstance(separator, str):

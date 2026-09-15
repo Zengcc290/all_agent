@@ -1,0 +1,256 @@
+"""Phase 3: Qdrant 轻量化 payload、命中回查 chunks、FTS5 × 向量 RRF 混合检索。
+
+覆盖方案 P3 的验收点：payload 只留回查/过滤所需键、search 优先 chunk_id、
+维度校验不变、FTS5 触发器同步、精确词命中、转义不 500、RRF 融合排序、
+配置开关回到纯向量、嵌入不可达时降级为纯关键词（D8）。
+"""
+
+from __future__ import annotations
+
+import socket
+from types import SimpleNamespace
+
+import pytest
+from conftest import HashEmbedding
+
+from memory import MemoryConfig, MemoryManager
+from memory.base import MemoryItem, MemoryType
+from memory.rag import Document
+from memory.rag.pipeline import RAGPipeline, _rrf_fuse
+from memory.storage.document_repo import ChunkRecord, DocumentRecord, DocumentRepository
+from memory.storage.qdrant import QdrantVectorStore
+
+
+class FakeQdrantClient:
+    """Minimal QdrantClient stand-in: records upserts, replays canned search hits."""
+
+    def __init__(self, *, exists: bool = False, existing_size: int | None = None, hits: list | None = None) -> None:
+        self.exists, self.existing_size, self.hits = exists, existing_size, hits or []
+        self.points: list = []
+        self.vectors_config = None
+        self.searches: list[dict] = []
+
+    def collection_exists(self, *, collection_name: str) -> bool:
+        return self.exists
+
+    def create_collection(self, *, collection_name: str, vectors_config) -> None:
+        self.exists = True
+        self.vectors_config = vectors_config
+
+    def get_collection(self, *, collection_name: str):
+        return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(size=self.existing_size)))
+
+    def upsert(self, *, collection_name: str, points: list) -> None:
+        self.points.extend(points)
+
+    def search(self, *, collection_name: str, query_vector, query_filter, limit: int) -> list:
+        self.searches.append({"query_vector": query_vector, "query_filter": query_filter, "limit": limit})
+        return self.hits[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Qdrant payload / look-back key
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_chunk_payload_lightweight():
+    client = FakeQdrantClient()
+    store = QdrantVectorStore(client=client, namespace="tests")
+
+    store.upsert_chunk("doc:3", [0.1, 0.2], document_id="doc", chunk_index=3, source="file.pdf")
+
+    payload = client.points[0].payload
+    # 方案 2.2 的 5 个业务键 + 存储层补的 namespace（search 强制按它过滤，缺了就永远查不到）。
+    assert payload == {
+        "chunk_id": "doc:3",
+        "document_id": "doc",
+        "chunk_index": 3,
+        "source": "file.pdf",
+        "memory_type": "semantic",
+        "namespace": "tests",
+    }
+    assert "embedding" not in payload
+
+
+def test_upsert_memory_payload_drops_heavy_fields():
+    client = FakeQdrantClient()
+    store = QdrantVectorStore(client=client, namespace="tests")
+    item = MemoryItem(content="整段正文", memory_type=MemoryType.SEMANTIC, embedding=[0.1, 0.2], metadata={"a": 1})
+
+    store.upsert(item)
+
+    payload = client.points[0].payload
+    assert set(payload) == {"id", "memory_type", "created_at", "expires_at", "namespace"}
+    assert payload["id"] == item.id
+    assert payload["memory_type"] == "semantic"
+    assert "embedding" not in payload and "content" not in payload and "metadata" not in payload
+
+
+def test_search_prefers_chunk_id():
+    hits = [
+        SimpleNamespace(id="uuid-point", payload={"chunk_id": "doc:1", "id": "old-field"}, score=0.9),
+        SimpleNamespace(id="uuid-point-2", payload={"id": "doc:2"}, score=0.5),
+        SimpleNamespace(id="uuid-point-3", payload=None, score=0.1),
+    ]
+    store = QdrantVectorStore(client=FakeQdrantClient(hits=hits), namespace="tests")
+    store._ensure_collection(2)
+
+    assert store.search([0.1, 0.2], limit=3) == [("doc:1", 0.9), ("doc:2", 0.5), ("uuid-point-3", 0.1)]
+
+
+def test_dimension_mismatch_still_raises():
+    client = FakeQdrantClient(exists=True, existing_size=8)
+    store = QdrantVectorStore(client=client, dimension=4, namespace="tests")
+
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        store.upsert(MemoryItem(content="x", memory_type=MemoryType.SEMANTIC, embedding=[0.1] * 4))
+
+
+# ---------------------------------------------------------------------------
+# FTS5 keyword path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def repo(tmp_path):
+    repository = DocumentRepository(tmp_path / "memory.sqlite3")
+    yield repository
+    repository.close()
+
+
+def seed_chunks(repository: DocumentRepository, texts: list[str]) -> None:
+    repository.upsert_document(DocumentRecord(document_id="d1", raw_text=" ".join(texts), status="parsed"))
+    repository.upsert_chunks(
+        [ChunkRecord(f"d1:{index}", "d1", index, 0, len(text), text) for index, text in enumerate(texts)]
+    )
+
+
+def test_fts_index_syncs_on_insert_update_delete(repo: DocumentRepository):
+    assert repo.fts_tokenizer in {"trigram", "unicode61"}  # 本机实测为 trigram
+    seed_chunks(repo, ["第一个分块讲混合检索。"])
+    assert [chunk_id for chunk_id, _ in repo.search_keywords("混合检索")] == ["d1:0"]
+
+    repo.upsert_chunk(ChunkRecord("d1:1", "d1", 1, 0, 10, "第二个分块讲图数据库 Neo4j。"))
+    assert [chunk_id for chunk_id, _ in repo.search_keywords("Neo4j")] == ["d1:1"]
+
+    repo.upsert_chunk(ChunkRecord("d1:1", "d1", 1, 0, 10, "第二个分块被改写，不再有那个词。"))
+    assert repo.search_keywords("Neo4j") == []
+
+    repo.delete_document("d1")
+    assert repo.search_keywords("混合检索") == []
+
+
+def test_keyword_search_finds_exact_identifier(repo: DocumentRepository):
+    seed_chunks(repo, ["设备型号 X200 支持混合检索。", "完全无关的另一段文本。"])
+
+    hits = repo.search_keywords("X200")
+
+    assert [chunk_id for chunk_id, _ in hits] == ["d1:0"]
+    # 分数口径是「越大越相关」（bm25 取负），便于调用方排序。
+    assert hits[0][1] > 0
+
+
+def test_fts_query_escapes_dash_and_colon(repo: DocumentRepository):
+    """本机实测：不转义时 abc-123 抛 no such column: 123，接口直接 500。"""
+
+    seed_chunks(repo, ["编号 abc-123 已登记。"])
+
+    assert [chunk_id for chunk_id, _ in repo.search_keywords("abc-123")] == ["d1:0"]
+    assert repo.search_keywords("型号: X200") == []  # 不抛异常即达标
+    assert DocumentRepository._fts_query("abc-123") == '"abc-123"'
+
+
+def test_fts_query_escapes_embedded_quote(repo: DocumentRepository):
+    seed_chunks(repo, ['引号 " 不能破坏 MATCH 语法。'])
+
+    assert DocumentRepository._fts_query('a"b') == '"a""b"'
+    repo.search_keywords('引号 " 不')  # 不抛异常
+
+
+def test_keyword_search_ignores_blank_query_and_rejects_bad_limit(repo: DocumentRepository):
+    seed_chunks(repo, ["有内容。"])
+
+    assert repo.search_keywords("   ") == []
+
+    with pytest.raises(ValueError, match="limit"):
+        repo.search_keywords("内容", limit=0)
+
+
+# ---------------------------------------------------------------------------
+# RRF fusion and degradation
+# ---------------------------------------------------------------------------
+
+
+def test_rrf_fuse_prefers_common_hits():
+    fused = _rrf_fuse([["a", "b", "c"], ["b", "a"]])
+
+    assert [chunk_id for chunk_id, _ in fused] == ["a", "b", "c"]
+    assert fused[0][1] == pytest.approx(1 / 61 + 1 / 62)  # hit by both paths
+    assert _rrf_fuse([[], []]) == []
+
+
+class DeadGatewayEmbedding(HashEmbedding):
+    """Vector-capable, but with a gateway address nobody listens on (tunnel down)."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        self.base_url = base_url
+
+
+def closed_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def build_pipeline(tmp_path, embedding) -> RAGPipeline:
+    manager = MemoryManager(MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")), embedding=embedding)
+    return RAGPipeline(manager, auto_extract=False)
+
+
+def test_hybrid_retrieve_uses_both_paths(tmp_path):
+    pipeline = build_pipeline(tmp_path, HashEmbedding())
+    try:
+        pipeline.ingest(
+            Document("设备编号 abc-123 的混合检索配置。" * 8, id="doc-hybrid"),
+            chunk_size=120,
+            overlap=20,
+        )
+
+        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+
+        assert results
+        assert any("abc-123" in result.content for result in results)
+        assert results[0].metadata["document_id"] == "doc-hybrid"
+        assert pipeline.last_retrieval_note == ""
+    finally:
+        pipeline.close()
+
+
+def test_hybrid_falls_back_to_vector_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_HYBRID", "0")
+    pipeline = build_pipeline(tmp_path, HashEmbedding())
+    try:
+        pipeline.ingest(Document("关闭混合检索后走纯向量路径。" * 8, id="doc-off"), chunk_size=120, overlap=20)
+
+        assert [chunk.memory_id for chunk in pipeline.hybrid_retrieve("纯向量路径", limit=3)] == [
+            chunk.memory_id for chunk in pipeline.retrieve("纯向量路径", limit=3)
+        ]
+    finally:
+        pipeline.close()
+
+
+def test_hybrid_degrades_to_keyword_when_embedding_down(tmp_path):
+    """D8: with the tunnel down retrieval must degrade to FTS5, not fail."""
+
+    pipeline = build_pipeline(tmp_path, DeadGatewayEmbedding(f"http://127.0.0.1:{closed_port()}"))
+    try:
+        pipeline.ingest(Document("设备编号 abc-123 的降级检索。" * 8, id="doc-down"), chunk_size=120, overlap=20)
+
+        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+
+        assert results and "abc-123" in results[0].content
+        assert "降级" in pipeline.last_retrieval_note
+        assert "不可达" in pipeline.last_retrieval_note
+    finally:
+        pipeline.close()
