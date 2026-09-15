@@ -30,6 +30,21 @@ class Document:
         object.__setattr__(self, "metadata", dict(self.metadata or {}))
 
 
+@dataclass(frozen=True)
+class ChunkSpan:
+    """A chunk plus its character range inside the document's normalized text.
+
+    ``char_start``/``char_end`` index into
+    :meth:`DocumentProcessor.normalized_text`, which is also what
+    ``documents.raw_text`` stores - that shared origin is what makes the offsets
+    usable for re-slicing and for highlighting in the UI (方案 2.3).
+    """
+
+    chunk: Document
+    char_start: int
+    char_end: int
+
+
 class DocumentProcessor:
     """Parse common local formats and split text into searchable chunks."""
 
@@ -59,24 +74,41 @@ class DocumentProcessor:
             return Document(source, metadata=metadata or {})
         raise TypeError("source must be text, bytes, a path, or a text stream")
 
+    def normalized_text(self, document: Document) -> str:
+        """The single normalized form that both ``raw_text`` and chunking consume.
+
+        Whitespace is collapsed here and nowhere else: if ``documents.raw_text``
+        and the chunk offsets were derived from two different normalizations,
+        ``char_start``/``char_end`` would point at the wrong text.
+        """
+
+        return re.sub(r"\s+", " ", document.content).strip()
+
     def chunks(self, document: Document, *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[Document]:
+        return [span.chunk for span in self.chunks_with_spans(document, chunk_size=chunk_size, overlap=overlap)]
+
+    def chunks_with_spans(self, document: Document, *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[ChunkSpan]:
+        """Split ``document`` and keep each chunk's range in the normalized text."""
         if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
             raise ValueError("chunk_size must be a positive integer")
         if isinstance(overlap, bool) or not isinstance(overlap, int) or overlap < 0 or overlap >= chunk_size:
             raise ValueError("overlap must be non-negative and smaller than chunk_size")
-        text = re.sub(r"\s+", " ", document.content).strip()
+        text = self.normalized_text(document)
         if not text:
             return []
         step = chunk_size - overlap
-        result: list[Document] = []
+        result: list[ChunkSpan] = []
         for index, start in enumerate(range(0, len(text), step)):
-            chunk = text[start : start + chunk_size]
+            end = min(start + chunk_size, len(text))
+            chunk = text[start:end]
             if not chunk:
                 break
             metadata = dict(document.metadata)
             metadata.update({"document_id": document.id, "chunk_index": index})
-            result.append(Document(chunk, id=f"{document.id}:{index}", metadata=metadata))
-            if start + chunk_size >= len(text):
+            result.append(
+                ChunkSpan(Document(chunk, id=f"{document.id}:{index}", metadata=metadata), start, end)
+            )
+            if end >= len(text):
                 break
         return result
 
@@ -127,4 +159,4 @@ def resolve_within(base_dir: str | Path, path: str | Path) -> Path:
     return resolved
 
 
-__all__ = ["Document", "DocumentProcessor", "resolve_within"]
+__all__ = ["ChunkSpan", "Document", "DocumentProcessor", "resolve_within"]

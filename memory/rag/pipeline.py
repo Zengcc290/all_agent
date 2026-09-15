@@ -18,6 +18,12 @@ from constants import (
 
 from ..base import MemoryItem, MemorySearchResult, MemoryType
 from ..manager import MemoryManager
+from ..storage.document_repo import (
+    PERMISSIONS,
+    ChunkRecord,
+    DocumentRecord,
+    DocumentRepository,
+)
 from .document import Document, DocumentProcessor, resolve_within
 from .graph_rag import GraphRAGPipeline, GraphRAGResult
 from .knowledge import (
@@ -58,6 +64,22 @@ def _accepts_graph_context(extractor: KnowledgeExtractor) -> bool:
     )
 
 
+def _document_tags(metadata: Mapping[str, Any]) -> list[str]:
+    """Read ``tags`` from caller-supplied metadata (list, single string, or none)."""
+
+    tags = metadata.get("tags") or []
+    if isinstance(tags, str):
+        return [tags]
+    return [str(tag) for tag in tags]
+
+
+def _document_permission(metadata: Mapping[str, Any]) -> str:
+    """Fail closed: anything unrecognized is ``private``, i.e. stays on this machine."""
+
+    permission = str(metadata.get("permission", "private"))
+    return permission if permission in PERMISSIONS else "private"
+
+
 class RAGPipeline:
     def __init__(
         self,
@@ -73,6 +95,23 @@ class RAGPipeline:
         self.auto_extract = auto_extract
         self.graph = GraphRAGPipeline(self.manager)
         self.last_ingest_report: dict[str, Any] = {}
+        self._repository: DocumentRepository | None = None
+
+    def document_repo(self) -> DocumentRepository | None:
+        """The ``documents``/``chunks`` source of truth, or ``None`` if unavailable.
+
+        Two cases return ``None`` instead of failing ingest: an injected document
+        store that is not SQLite-backed (no ``path``), and ``:memory:`` - a
+        second in-memory database would be a private connection that shares no
+        data with the store it is supposed to mirror.
+        """
+
+        path = getattr(self.manager.document_store, "path", None)
+        if not path or str(path) == ":memory:":
+            return None
+        if self._repository is None or self._repository.path != str(path):
+            self._repository = DocumentRepository(path)
+        return self._repository
 
     def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[MemoryItem]:
         values = [documents] if isinstance(documents, Document) else list(documents)
@@ -91,13 +130,44 @@ class RAGPipeline:
         # reusable and aliasable by chunk 2 without a full reload each time.
         resolver = EntityResolver(self.manager)
         accepts_context = _accepts_graph_context(self.extractor)
+        repository = self.document_repo()
         for document in values:
-            for chunk in self.processor.chunks(document, chunk_size=chunk_size, overlap=overlap):
+            source = str(document.metadata.get("source", document.id))
+            if repository is not None:
+                repository.upsert_document(
+                    DocumentRecord(
+                        document_id=document.id,
+                        title=str(document.metadata.get("title", "")),
+                        raw_text=self.processor.normalized_text(document),
+                        source=source,
+                        tags=_document_tags(document.metadata),
+                        permission=_document_permission(document.metadata),
+                        status="parsed",
+                    )
+                )
+            document_error: str | None = None
+            for span in self.processor.chunks_with_spans(document, chunk_size=chunk_size, overlap=overlap):
+                chunk = span.chunk
                 metadata = dict(chunk.metadata)
-                metadata.setdefault("source", document.metadata.get("source", document.id))
+                metadata.setdefault("source", source)
+                # 先写真值源（原文与分块边界）再写向量：反过来的话，向量写成功而
+                # 真值行失败就会留下无法解释的孤立向量。
+                if repository is not None:
+                    repository.upsert_chunk(
+                        ChunkRecord(
+                            chunk_id=chunk.id,
+                            document_id=document.id,
+                            chunk_index=int(chunk.metadata["chunk_index"]),
+                            char_start=span.char_start,
+                            char_end=span.char_end,
+                            text=chunk.content,
+                        )
+                    )
                 item = self.manager.add(chunk.content, memory_type=MemoryType.SEMANTIC, metadata=metadata, item_id=chunk.id)
                 items.append(item)
                 report["chunks"] += 1
+                if repository is not None:
+                    repository.set_chunk_vector_status(chunk.id, "indexed")
                 if not self.auto_extract:
                     continue
                 try:
@@ -131,7 +201,14 @@ class RAGPipeline:
                     report["retracted"] += materialized["retracted"]
                     report["skipped_relations"] += materialized["skipped_relations"]
                 except Exception as exc:  # noqa: BLE001 - extraction failure must not lose source text
-                    report["errors"].append(f"{type(exc).__name__}: {exc}")
+                    message = f"{type(exc).__name__}: {exc}"
+                    report["errors"].append(message)
+                    document_error = document_error or message
+            if repository is not None:
+                if document_error is None:
+                    repository.set_status(document.id, "extracted" if self.auto_extract else "vectorized")
+                else:
+                    repository.set_status(document.id, "failed", error=document_error)
         report["domains"] = list(dict.fromkeys(report["domains"]))
         self.last_ingest_report = report
         return items
@@ -185,9 +262,16 @@ class RAGPipeline:
         for item in items:
             if item.metadata.get("document_id") == document_id and self.manager.delete(item.id):
                 removed += 1
+        # 真值源同步删除，否则 documents/chunks 会留下永远查不到来源的孤儿行。
+        repository = self.document_repo()
+        if repository is not None:
+            repository.delete_document(document_id)
         return removed
 
     def close(self) -> None:
+        if self._repository is not None:
+            self._repository.close()
+            self._repository = None
         self.manager.close()
 
 

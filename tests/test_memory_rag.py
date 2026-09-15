@@ -391,3 +391,154 @@ def test_rag_tool_ingest_and_retrieve_with_persistence(
     )
     assert context.count == 1
     assert "zebra" in context.context
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: 摄取双写（documents/chunks 真值源 + 状态机）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def persistent_pipeline(tmp_path):
+    """File-backed manager: the repository and the store share one sqlite file."""
+
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=HashEmbedding(),
+    )
+    pipeline = RAGPipeline(manager)
+    yield pipeline
+    pipeline.close()
+
+
+class ExplodingExtractor:
+    def extract(self, text: str, *, metadata=None) -> ExtractionResult:
+        raise RuntimeError("知识抽取服务不可用")
+
+
+def test_ingest_persists_document_and_chunks(persistent_pipeline: RAGPipeline):
+    document = Document(
+        "Qdrant 是向量库。" * 40,
+        id="doc-persist",
+        metadata={
+            "source": "课程设计.txt",
+            "title": "存储架构",
+            "tags": ["课程设计", "权限A"],
+            "permission": "shared",
+        },
+    )
+    items = persistent_pipeline.ingest(document, chunk_size=200, overlap=40)
+
+    repo = persistent_pipeline.document_repo()
+    assert repo is not None
+    stored = repo.get_document("doc-persist")
+    assert stored is not None
+    assert stored.status == "extracted"
+    assert stored.title == "存储架构"
+    assert stored.source == "课程设计.txt"
+    assert stored.tags == ["课程设计", "权限A"]
+    assert stored.permission == "shared"
+    assert stored.raw_text == persistent_pipeline.processor.normalized_text(document)
+
+    chunks = repo.list_chunks("doc-persist")
+    assert len(chunks) == len(items) > 1
+    assert [chunk.chunk_id for chunk in chunks] == [item.id for item in items]
+    assert all(chunk.vector_status == "indexed" for chunk in chunks)
+    assert repo.stats() == {
+        "documents": 1,
+        "chunks": len(items),
+        "chunks_indexed": len(items),
+    }
+
+
+def test_ingest_raw_text_matches_chunk_source(persistent_pipeline: RAGPipeline):
+    """raw_text 与分块必须同源，否则 char_start/char_end 定位不到原文（方案 2.3）。"""
+
+    document = Document("混合检索 RRF 融合。" * 30, id="doc-spans")
+    persistent_pipeline.ingest(document, chunk_size=120, overlap=20)
+
+    repo = persistent_pipeline.document_repo()
+    stored = repo.get_document("doc-spans")
+    chunks = repo.list_chunks("doc-spans")
+
+    assert stored is not None
+    for chunk in (chunks[0], chunks[-1]):
+        assert stored.raw_text[chunk.char_start : chunk.char_end] == chunk.text
+    assert chunks[0].char_start == 0
+    assert chunks[-1].char_end <= len(stored.raw_text)
+
+
+def test_ingest_marks_vectorized_when_extraction_is_off(persistent_pipeline: RAGPipeline):
+    persistent_pipeline.auto_extract = False
+    persistent_pipeline.ingest(Document("关闭抽取时终态是 vectorized。", id="doc-nokx"))
+
+    repo = persistent_pipeline.document_repo()
+    stored = repo.get_document("doc-nokx")
+    assert stored is not None and stored.status == "vectorized"
+
+
+def test_extractor_failure_marks_document_failed(tmp_path):
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=HashEmbedding(),
+    )
+    pipeline = RAGPipeline(manager, extractor=ExplodingExtractor())
+    try:
+        items = pipeline.ingest(Document("抽取会抛异常。", id="doc-fail"))
+
+        repo = pipeline.document_repo()
+        stored = repo.get_document("doc-fail")
+        assert stored is not None
+        assert stored.status == "failed"
+        assert stored.error and "知识抽取服务不可用" in stored.error
+        # 抽取失败不能丢原文：分块照样已入库且已索引。
+        assert repo.stats() == {"documents": 1, "chunks": len(items), "chunks_indexed": len(items)}
+        assert pipeline.last_ingest_report["errors"]
+    finally:
+        pipeline.close()
+
+
+def test_reingest_is_idempotent(persistent_pipeline: RAGPipeline):
+    document = Document("重复导入必须幂等。" * 20, id="doc-again")
+    first_items = persistent_pipeline.ingest(document, chunk_size=100, overlap=20)
+    created_at = persistent_pipeline.document_repo().get_document("doc-again").created_at
+
+    second_items = persistent_pipeline.ingest(document, chunk_size=100, overlap=20)
+
+    repo = persistent_pipeline.document_repo()
+    assert repo.count_documents() == 1
+    assert len(second_items) == len(first_items)
+    assert repo.stats()["chunks"] == len(first_items)
+    assert repo.get_document("doc-again").created_at == created_at
+
+
+def test_delete_document_also_clears_repository(persistent_pipeline: RAGPipeline):
+    persistent_pipeline.ingest(Document("待删除的文档。" * 10, id="doc-del", metadata={"source": "x"}))
+    repo = persistent_pipeline.document_repo()
+    assert repo.stats()["chunks"] > 0
+
+    removed = persistent_pipeline.delete_document("doc-del")
+
+    assert removed > 0
+    assert repo.get_document("doc-del") is None
+    assert repo.stats() == {"documents": 0, "chunks": 0, "chunks_indexed": 0}
+
+
+def test_in_memory_store_skips_repository_and_still_ingests(pipeline: RAGPipeline):
+    """:memory: 存储没有可共享的真值文件，必须跳过双写而不是写进另一个内存库。"""
+
+    assert pipeline.document_repo() is None
+    items = pipeline.ingest(Document("内存模式照常可摄入。", id="doc-mem"))
+    assert [item.id for item in items] == ["doc-mem:0"]
+    assert pipeline.manager.document_store.get("doc-mem:0") is not None
+
+
+def test_unknown_permission_and_scalar_tags_are_safe(persistent_pipeline: RAGPipeline):
+    persistent_pipeline.ingest(
+        Document("权限值非法时必须按 private 处理。", id="doc-perm", metadata={"permission": "secret", "tags": "单个标签"})
+    )
+
+    stored = persistent_pipeline.document_repo().get_document("doc-perm")
+    assert stored is not None
+    assert stored.permission == "private"
+    assert stored.tags == ["单个标签"]
