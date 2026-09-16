@@ -349,8 +349,16 @@ async def test_registered_provider_is_used_for_completion(monkeypatch):
     agent_module = importlib.import_module("agents.agent")
     monkeypatch.setattr(agent_module, "LLM", ProviderLLM)
     agent = DemoAgent("test")
-    monkeypatch.setattr(agent, "detect_models", lambda *_: ["model-a"])
-    agent.add_provider("provider-a", "api-key", "https://example.invalid/v1", "model-a")
+    from agents.providers import ProviderProfile
+
+    profile = ProviderProfile(
+        name="provider-a",
+        base_url="https://example.invalid/v1",
+        api_key="api-key",
+        default_model="model-a",
+        models=("model-a",),
+    )
+    agent.provider_registry._profiles = {profile.name: profile}
 
     answer = await agent.run_with_tools(
         [{"role": "user", "content": "hello"}], provider_name="provider-a"

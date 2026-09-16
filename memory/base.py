@@ -440,9 +440,6 @@ class BaseMemory:
             raise
         return item
 
-    remember = add
-    store = add
-
     def get(self, item_id: str) -> MemoryItem | None:
         item = self.document_store.get(item_id)
         if item is not None and item.is_expired and item.memory_type == self.memory_type:
@@ -456,9 +453,6 @@ class BaseMemory:
             return False
         self.vector_store.delete(item_id)
         return self.document_store.delete(item_id)
-
-    remove = delete
-    retrieve = get
 
     def search(self, query: str, *, limit: int | None = None, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[MemorySearchResult]:
         if not isinstance(query, str):
@@ -490,8 +484,6 @@ class BaseMemory:
             if len(results) >= limit:
                 break
         return results
-
-    query = search
 
     def list(self, *, include_expired: bool = False) -> list[MemoryItem]:
         """List records for this memory type without touching the vector index.

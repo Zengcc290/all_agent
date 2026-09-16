@@ -142,7 +142,7 @@ def test_agent_reexports_the_shared_helpers():
 
     import importlib
 
-    # agents.__init__ 也导出了一个名为 ``agent`` 的工厂，必须按模块路径取。
+    # 必须按模块路径取，避免与测试里的局部变量 ``agent`` 撞名。
     agent_module = importlib.import_module("agents.agent")
 
     assert agent_module._field is message_utils.field
@@ -151,18 +151,17 @@ def test_agent_reexports_the_shared_helpers():
     assert agent_module._safe_tool_name is message_utils.safe_tool_name
     assert agent_module._safe_tool_call_error is message_utils.safe_tool_call_error
 
-    # agents/__init__ 也导出了同样名为 ``agent``/``react`` 的工厂，按模块路径取。
     react_module = importlib.import_module("agents.react")
 
     assert react_module._field is message_utils.field
     assert react_module._message_dict is message_utils.message_dict
 
 
-def test_llm_field_alias_matches_the_shared_helper():
+def test_llm_uses_the_shared_field_helper():
     import importlib
 
     llm = importlib.import_module("agents.llm")
 
-    assert llm._field({"a": 1}, "a") == 1
-    assert llm._field(BareObject(a=2), "a") == 2
-    assert llm._field(None, "a", "x") == "x"
+    assert llm.field({"a": 1}, "a") == 1
+    assert llm.field(BareObject(a=2), "a") == 2
+    assert llm.field(None, "a", "x") == "x"

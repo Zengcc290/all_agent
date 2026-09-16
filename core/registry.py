@@ -168,9 +168,6 @@ class ToolRegistry:
             "implementation": implementation,
         }
 
-    def summaries(self) -> list[dict[str, Any]]:
-        return [tool.spec.summary() for tool, _ in self.snapshot().values()]
-
     def specs(self) -> list[ToolSpec]:
         return [tool.spec for tool, _ in self.snapshot().values()]
 

@@ -116,7 +116,7 @@ def _assemble_streaming_response(
     echoer = _FinalAnswerEchoer(echo_mode, echo_write) if echo_mode else None
     try:
         for chunk in stream:
-            choices = _field(chunk, "choices")
+            choices = field(chunk, "choices")
             if not choices:
                 continue
             choice = choices[0]
@@ -127,34 +127,34 @@ def _assemble_streaming_response(
                         on_first_chunk()
                     except Exception:
                         LOGGER.debug("on_first_chunk callback failed", exc_info=True)
-            if (reason := _field(choice, "finish_reason")) is not None:
+            if (reason := field(choice, "finish_reason")) is not None:
                 finish_reason = reason
-            delta = _field(choice, "delta")
+            delta = field(choice, "delta")
             if delta is None:
                 continue
-            if (piece := _field(delta, "content")):
+            if (piece := field(delta, "content")):
                 content_parts.append(piece)
                 if echoer is not None:
                     echoer.feed(piece)
-            raw_fragments = _field(delta, "tool_calls")
+            raw_fragments = field(delta, "tool_calls")
             if not raw_fragments:
                 continue
             for fragment in raw_fragments:
-                index = _field(fragment, "index") or 0
+                index = field(fragment, "index") or 0
                 entry = tool_calls.setdefault(
                     index,
                     {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
                 )
-                if (fragment_id := _field(fragment, "id")):
+                if (fragment_id := field(fragment, "id")):
                     entry["id"] = (
                         fragment_id if not entry["id"] else entry["id"] + fragment_id
                     )
-                function = _field(fragment, "function")
+                function = field(fragment, "function")
                 if function is None:
                     continue
-                if (name := _field(function, "name")):
+                if (name := field(function, "name")):
                     entry["function"]["name"] += name
-                if (arguments := _field(function, "arguments")):
+                if (arguments := field(function, "arguments")):
                     entry["function"]["arguments"] += arguments
     finally:
         if echoer is not None:
@@ -244,10 +244,6 @@ class LLM:
             )
         except ImportError as exc:
             raise RuntimeError("The 'openai' package is required to use LLM.") from exc
-
-    @staticmethod
-    def get_query() -> str:
-        return input("请输入你的问题：")
 
     def complete_streaming(
         self,
@@ -430,12 +426,12 @@ class LLM:
         """
         try:
             for chunk in response:
-                choices = _field(chunk, "choices")
+                choices = field(chunk, "choices")
                 if not choices:
                     continue
                 choice = choices[0]
-                delta = _field(choice, "delta")
-                content = _field(delta, "content")
+                delta = field(choice, "delta")
+                content = field(delta, "content")
                 if content:
                     print(content, end="", flush=True)
                     yield content
@@ -447,9 +443,3 @@ class LLM:
                 except Exception:
                     # Closing is best effort; never hide a useful stream error.
                     LOGGER.debug("failed to close LLM stream", exc_info=True)
-
-
-def _field(value: Any, key: str, default: Any = None) -> Any:
-    """Backward-compatible alias for :func:`message_utils.field`."""
-
-    return field(value, key, default)

@@ -304,9 +304,6 @@ TIMELINE_DOMAIN = "时间线"
 TIMELINE_ENTITY = "事件时间线"
 TIMELINE_ID = "ent:__timeline__"
 
-#: 历史常量（保留以兼容旧引用）：文档知识块已改为按内容自动分类到主题恒星系。
-DOC_DOMAIN = "文档库"
-
 #: 星图节点文案截断长度（节点正文预览 / 事件标题 / 日期字符串）。
 NEBULA_CONTENT_PREVIEW_CHARS = 400
 NEBULA_EVENT_TITLE_CHARS = 24

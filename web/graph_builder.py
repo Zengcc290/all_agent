@@ -36,7 +36,6 @@ from memory import MemoryItem, MemoryManager
 from web.domain_classifier import classify_domain, majority_domain
 
 
-#: 领域 → 稳定颜色（crc32，跨进程稳定，Python 内建 hash 不稳定）。
 def domain_color(name: str) -> str:
     """领域 → 稳定颜色（crc32，跨进程稳定，Python 内建 hash 不稳定）。"""
     return NEBULA_PALETTE[zlib.crc32((name or DEFAULT_DOMAIN).encode("utf-8")) % len(NEBULA_PALETTE)]

@@ -65,10 +65,6 @@ from .providers import ProviderProfile, ProviderRegistry
 class Agent(ABC):
     """Agent shell with provider management and centralized tool execution."""
 
-    # An omitted max_rounds should not allow a malfunctioning provider to keep
-    # making requests forever.
-    UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
-
     # ``None`` means "use the active profile's tool_mode". Only a profile that
     # explicitly declares ``tool_mode = "none"`` disables tool support.
     TOOL_MODE_PROTOCOLS: Mapping[str, str | None] = {
@@ -274,10 +270,9 @@ class Agent(ABC):
         if auto_discover_tools:
             self.discover_tools(strict=discovery_strict)
         self.execution_manager = ToolExecutionManager(self.tools)
-        # ``providers`` and ``global_model`` remain read-only compatibility
-        # views for callers of the original prototype. New code should use
+        # ``providers`` remains a read-only compatibility
+        # view for callers of the original prototype. New code should use
         # ``provider_registry`` and ``active_profile``.
-        self.global_model: str | None = None
         self.role = ["user", "assistant", "system", "tool"]
         self.prompt: dict[str, str] = {}
         self.history: list[dict[str, Any]] = []
@@ -293,10 +288,6 @@ class Agent(ABC):
         self._frozen_manifest: dict[str, str] | None = None
         self._hot_tools: dict[str, str] = {}
         self.cache_epoch: int = 0
-
-    def clear_history(self) -> None:
-        self.history.clear()
-        self._profile_histories.clear()
 
     @abstractmethod
     def run(self, query: str) -> str:
@@ -610,7 +601,7 @@ class Agent(ABC):
 
         round_loop = ToolLoop(
             max_rounds,
-            safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
+            safety_limit=ToolLoop.DEFAULT_SAFETY_LIMIT,
         )
         for round_number in round_loop.rounds():
             current_snapshot = self.tools.snapshot()
@@ -937,40 +928,6 @@ class Agent(ABC):
     def list_profiles(self) -> list[dict[str, Any]]:
         return [profile.public_info() for profile in self.provider_registry.profiles.values()]
 
-    def add_provider(
-        self,
-        provider_name: str,
-        api_key: str,
-        base_url: str,
-        default_model: str,
-    ) -> None:
-        """Deprecated compatibility shim; prefer a TOML profile.
-
-        It deliberately does not probe ``/models``. The old API's network
-        probe made valid gateways impossible to configure when that endpoint
-        was unavailable.
-        """
-
-        self.provider_registry.register_ephemeral(
-            provider_name,
-            api_key=api_key,
-            base_url=base_url,
-            default_model=default_model,
-        )
-
-    def detect_models(self, base_url: str, api_key: str) -> list[str]:
-        """Deprecated compatibility helper for callers migrating to profiles."""
-
-        from openai import OpenAI
-
-        response = OpenAI(
-            api_key=api_key, base_url=base_url, max_retries=self.max_retries
-        ).models.list()
-        raw_models = _field(response, "data")
-        if not isinstance(raw_models, (list, tuple)):
-            raise TypeError("provider model response data must be a list")
-        return list(dict.fromkeys(str(_field(item, "id", item)).strip() for item in raw_models if str(_field(item, "id", item)).strip()))
-
     def _completion_target(
         self,
         profile_name: str | None,
@@ -991,23 +948,6 @@ class Agent(ABC):
 
         selected_provider = profile_name
         selected_model = model
-        if selected_model is None and isinstance(self.global_model, str):
-            possible_provider, separator, possible_model = self.global_model.partition(
-                ":"
-            )
-            qualified = (
-                separator
-                and possible_provider in self.provider_registry.profiles
-                and bool(possible_model)
-            )
-            if selected_provider is None and qualified:
-                selected_provider = possible_provider
-                selected_model = possible_model
-            elif selected_provider is not None and qualified:
-                if selected_provider == possible_provider:
-                    selected_model = possible_model
-            else:
-                selected_model = self.global_model
 
         if selected_provider is None and self.llm is not None:
             return self.llm, selected_model, "__injected__"
@@ -1035,29 +975,10 @@ class Agent(ABC):
     def set_system_prompt(self, prompt: str) -> None:
         self._set_prompt("system", prompt)
 
-    def set_user_prompt(self, prompt: str) -> None:
-        self._set_prompt("user", prompt)
-
-    def set_assistant_prompt(self, prompt: str) -> None:
-        self._set_prompt("assistant", prompt)
-
-    def set_tool_prompt(self, prompt: str) -> None:
-        self._set_prompt("tool", prompt)
-
     def _set_prompt(self, role: str, prompt: str) -> None:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
         self.prompt[role] = prompt
-
-    def set_global_model(self, model: str | None) -> None:
-        """Deprecated compatibility setter; prefer ``set_active_profile`` and ``model=``."""
-        if model is not None and (not isinstance(model, str) or not model.strip()):
-            raise ValueError("model must be a non-empty string or None")
-        self.global_model = model
-
-
-# Preserve the original public name while offering the conventional class name.
-agent = Agent
 
 
 def _strict_function_schema(schema: dict[str, Any]) -> dict[str, Any]:

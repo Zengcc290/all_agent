@@ -174,9 +174,6 @@ class Neo4jGraphStore:
         with self.driver.session(database=self.database) as session:
             return [str(record["memory_id"]) for record in session.run(query)]
 
-    # Common aliases used by graph-oriented clients.
-    upsert_relation = add_relation
-
     def get_relations(
         self, entity: str, *, relation: str | None = None, direction: str = "both"
     ) -> list[dict[str, Any]]:
@@ -221,29 +218,6 @@ class Neo4jGraphStore:
             ]
 
     related = get_relations
-
-    def delete_relation(self, source: str, relation: str, target: str) -> bool:
-        if self.driver is None:
-            before = len(self._local.get(source, []))
-            kept = [
-                e
-                for e in self._local.get(source, [])
-                if not (e["relation"] == relation and e["target"] == target)
-            ]
-            removed = [e for e in self._local.get(source, []) if e not in kept]
-            self._reverse[target] = [
-                (edge_source, edge)
-                for edge_source, edge in self._reverse.get(target, [])
-                if edge not in removed
-            ]
-            self._local[source] = kept
-            return len(self._local[source]) < before
-        query = "MATCH (a:MemoryEntity {name: $source})-[r:RELATED {kind: $relation}]->(b:MemoryEntity {name: $target}) DELETE r"
-        with self.driver.session(database=self.database) as session:
-            result = session.run(
-                query, source=source, relation=relation, target=target
-            ).consume()
-            return bool(getattr(result.counters, "relationships_deleted", 0))
 
     def path_query(
         self, start: str, target: str, *, max_depth: int = 3, limit: int = 50

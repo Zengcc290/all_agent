@@ -21,7 +21,5 @@ class PerceptualMemory(BaseMemory):
         item = self.get(item_id)
         return item.payload if item is not None else default
 
-    remember = store
-
 
 __all__ = ["PerceptualMemory"]

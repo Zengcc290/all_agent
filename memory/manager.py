@@ -89,9 +89,6 @@ class MemoryManager:
     def add(self, content: str, *, memory_type: MemoryType | str = MemoryType.WORKING, **kwargs: Any) -> MemoryItem:
         return self.for_type(memory_type).add(content, **kwargs)
 
-    remember = add
-    store = add
-
     def get(self, item_id: str, *, memory_type: MemoryType | str | None = None) -> MemoryItem | None:
         if memory_type is not None:
             return self.for_type(memory_type).get(item_id)
@@ -109,9 +106,6 @@ class MemoryManager:
             return False
         return self.for_type(item.memory_type).delete(item_id)
 
-    remove = delete
-    retrieve = get
-
     def search(self, query: str, *, memory_type: MemoryType | str | None = None, limit: int | None = None, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[MemorySearchResult]:
         if memory_type is not None:
             return self.for_type(memory_type).search(query, limit=limit, threshold=threshold, metadata=metadata)
@@ -127,15 +121,6 @@ class MemoryManager:
         found.sort(key=lambda result: (-result.score, result.item.created_at))
         return found[:limit]
 
-    query = search
-
-    def cleanup_expired(self) -> int:
-        removed = 0
-        for item in self.document_store.list(include_expired=True):
-            if item.is_expired and self.delete(item.id):
-                removed += 1
-        return removed
-
     def list(self, *, memory_type: MemoryType | str | None = None, include_expired: bool = False) -> list[MemoryItem]:
         if memory_type is not None:
             return self.for_type(memory_type).list(include_expired=include_expired)
@@ -145,9 +130,6 @@ class MemoryManager:
         if memory_type is not None:
             return self.for_type(memory_type).clear()
         return sum(memory.clear() for memory in self.memories.values())
-
-    def stats(self) -> dict[str, int]:
-        return {memory_type.value: len(self.document_store.list(memory_type=memory_type)) for memory_type in MemoryType}
 
     def close(self) -> None:
         self.document_store.close()

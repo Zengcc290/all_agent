@@ -397,10 +397,6 @@ class ReActAgent(Agent):
         "correct the capability intent and retry. Resolve multiple capabilities with "
         "`limit`: 20 when possible."
     )
-    # Keep the old public constant as a compatibility alias for callers that
-    # customized the previous lazy-loading prompt.
-    LAZY_REACT_INSTRUCTIONS = CATALOG_FIRST_REACT_INSTRUCTIONS
-
     SKILL_VIEW_REACT_INSTRUCTIONS = (
         "Names in `Available skills` are read-only instruction packages, not "
         "callable tools. When the task matches a skill's description or "
@@ -410,10 +406,6 @@ class ReActAgent(Agent):
         "content from its one-line description alone; descriptions are only "
         "matching hints."
     )
-    # ``max_rounds=None`` means the caller does not want to tune the limit,
-    # but a provider must still be prevented from keeping the process alive
-    # forever when it repeats a failing tool request.
-    UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
 
     def __init__(
         self,
@@ -574,58 +566,12 @@ class ReActAgent(Agent):
             raise KeyError(f"tool '{name}' is not registered")
         return f"{name}@{stored['version']}#{stored['schema_hash']}:1"
 
-    get_tool_confirmation_key = tool_confirmation_key
-
     def run(self, query: str, **kwargs: Any) -> str:
         """Synchronous convenience entry point for the ReAct loop."""
 
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
         return _run_sync(self.run_with_react(query, **kwargs))
-
-    async def arun(self, query: str, **kwargs: Any) -> str:
-        """Async alias matching common agent APIs."""
-
-        return await self.run_with_react(query, **kwargs)
-
-    async def run_react(
-        self,
-        messages: str | Sequence[Mapping[str, Any]],
-        context: ExecutionContext | None = None,
-        *,
-        max_rounds: int | None = None,
-        model: str | None = None,
-        temperature: float = DEFAULT_TEMPERATURE,
-        timeout: float = DEFAULT_TIMEOUT,
-        tool_names: list[str] | None = None,
-        profile_name: str | None = None,
-        provider_name: str | None = None,
-        use_history: bool = True,
-        defer_tool_loading: bool = True,
-        prompt_cache_key: str | None = None,
-        prompt_cache_retention: str | None = None,
-        enable_prompt_cache: bool = True,
-        stream_echo: bool = False,
-    ) -> str:
-        """Run one textual ReAct conversation to a final answer."""
-
-        return await self.run_with_react(
-            messages,
-            context,
-            max_rounds=max_rounds,
-            model=model,
-            temperature=temperature,
-            timeout=timeout,
-            tool_names=tool_names,
-            profile_name=profile_name,
-            provider_name=provider_name,
-            use_history=use_history,
-            defer_tool_loading=defer_tool_loading,
-            prompt_cache_key=prompt_cache_key,
-            prompt_cache_retention=prompt_cache_retention,
-            enable_prompt_cache=enable_prompt_cache,
-            stream_echo=stream_echo,
-        )
 
     async def run_with_react(
         self,
@@ -732,7 +678,7 @@ class ReActAgent(Agent):
             )
         round_loop = ToolLoop(
             max_rounds,
-            safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
+            safety_limit=ToolLoop.DEFAULT_SAFETY_LIMIT,
         )
         unmarked_answer_retries = 0
         malformed_answer_retries = 0
@@ -1536,10 +1482,3 @@ class ReActAgent(Agent):
             if self._openai_tool_name(name) == action:
                 return name
         return action
-
-
-# Public spellings used by different versions of the original prototype.
-ReactAgent = ReActAgent
-ReAct = ReActAgent
-React = ReActAgent
-react = ReActAgent

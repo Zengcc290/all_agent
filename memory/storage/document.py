@@ -27,9 +27,6 @@ class BaseDocumentStore(ABC):
     @abstractmethod
     def list(self, *, memory_type: MemoryType | str | None = None, include_expired: bool = False) -> list[MemoryItem]: ...
 
-    def save(self, item: MemoryItem) -> None:
-        self.upsert(item)
-
     def clear(self, memory_type: MemoryType | str | None = None) -> int:
         """Delete records, with a portable fallback for custom stores."""
         items = self.list(memory_type=memory_type, include_expired=True)

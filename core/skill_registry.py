@@ -69,10 +69,6 @@ class SkillRegistry:
     def get(self, name: str) -> SkillSpec:
         return self.resolve(name)[0]
 
-    def maybe_get(self, name: str) -> SkillSpec | None:
-        registration = self.maybe_resolve(name)
-        return registration[0] if registration is not None else None
-
     def snapshot(self) -> dict[str, tuple[SkillSpec, int]]:
         """Capture a stable name-to-spec view, ordered by skill name."""
 
