@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess  # noqa: S404 - 仅用于拉起本机 SSH 端口转发
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -36,6 +37,7 @@ from memory import (
     MemoryManager,
     utc_now,
 )
+from memory.embedding import gateway_reachable
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
 LOGGER = logging.getLogger(__name__)
@@ -78,9 +80,80 @@ def build_embedding():
     return HashEmbedding(dimension=MEMORY_EMBEDDING_DIMENSION)
 
 
+def ensure_embedding_tunnel() -> bool:
+    """按需自动建立嵌入隧道（EMBEDDING_BASE_URL 指向 10800 时）。
+
+    设计（D8 的配套便利，不改变向量空间语义）：
+    - 只在「配置了本地隧道网关」且「10800 不可达」时才拉起 SSH；
+    - 隧道参数来自 .env：``EMBEDDING_TUNNEL_KEY`` 指定私钥路径，
+      ``EMBEDDING_TUNNEL_HINT`` 里的服务器/端口作为兜底来源；
+    - 幂等：进程内只启动一次；已监听 10800 时直接返回 True；
+    - 不阻塞主流程：失败只记日志，嵌入仍按 D8 降级，绝不换向量空间。
+    """
+    global _tunnel_started
+    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
+    if not server_url:
+        return True  # 没配隧道网关（DashScope/Hash），无需隧道
+    if gateway_reachable(server_url):
+        return True  # 隧道已通（或网关已在跑）
+    with _tunnel_lock:
+        if _tunnel_started:
+            return False  # 本进程已试过一次，避免重复拉起
+        _tunnel_started = True
+    key_path = (os.getenv("EMBEDDING_TUNNEL_KEY") or "").strip()
+    hint = (os.getenv("EMBEDDING_TUNNEL_HINT") or "").strip()
+    if not key_path:
+        LOGGER.warning("嵌入网关不可达且未配置 EMBEDDING_TUNNEL_KEY，跳过自动隧道：%s", hint)
+        return False
+    if not Path(key_path).is_file():
+        LOGGER.warning("EMBEDDING_TUNNEL_KEY 指向的私钥不存在：%s", key_path)
+        return False
+    # 从 hint 解析转发参数（root@host -p port），解析不出就用默认值。
+    import re as _re
+
+    match = _re.search(r"(\S+)@(\S+)\s+-p\s+(\d+)", hint)
+    if not match:
+        LOGGER.warning("EMBEDDING_TUNNEL_HINT 无法解析出 user@host -p port：%s", hint)
+        return False
+    user, host, port = match.group(1), match.group(2), match.group(3)
+    # 本地端口取自 EMBEDDING_BASE_URL 的端口；远端固定 18000（隧道另一端网关）。
+    from urllib.parse import urlparse
+
+    local_port = urlparse(server_url).port or 10800
+    remote_port = os.getenv("EMBEDDING_TUNNEL_REMOTE_PORT", "18000").strip() or "18000"
+    cmd = [
+        "ssh", "-N",
+        "-L", f"{local_port}:127.0.0.1:{remote_port}",
+        f"{user}@{host}", "-p", port,
+        "-i", key_path,
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ExitOnForwardFailure=yes",
+    ]
+    try:
+        subprocess.Popen(  # noqa: S603 - 参数全部来自本机 .env，非外部输入
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        LOGGER.warning("自动建立嵌入隧道失败：%s", exc)
+        return False
+    # 最多等 15 秒让隧道就绪（网络秒连时通常 1-2 秒）。
+    import time
+
+    for _ in range(15):
+        time.sleep(1)
+        if gateway_reachable(server_url):
+            LOGGER.info("嵌入隧道已自动建立：%s -> %s@%s:%s", local_port, user, host, remote_port)
+            return True
+    LOGGER.warning("自动隧道已拉起但 %s 秒内未就绪，嵌入按 D8 降级", 15)
+    return False
+
+
 def build_knowledge_extractor():
     """Create the configured extractor, or a safe offline no-op fallback."""
-
     from agents.llm import LLM
     from agents.providers import ProviderRegistry
 
@@ -106,6 +179,10 @@ def build_knowledge_extractor():
 _manager: MemoryManager | None = None
 _manager_lock = Lock()
 _pipeline: RAGPipeline | None = None
+
+#: 嵌入隧道自动拉起的一次性标记（进程内幂等）。
+_tunnel_started = False
+_tunnel_lock = Lock()
 
 #: 每次问答/文档抽取实际写入图事实时递增。图缓存据此失效，避免为后台
 #: 抽取线程加锁，也避免抽取失败时白白重建星图。

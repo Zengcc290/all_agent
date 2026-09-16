@@ -83,6 +83,9 @@ def _chat_env(
     db_path = tmp_path / "chat-agent.sqlite3"
     monkeypatch.setenv("MEMORY_DB_PATH", str(db_path))
     monkeypatch.setenv("WEB_AUTOSEED", "0")
+    # 嵌入后端也必须隔离：.env 里的 EMBEDDING_BASE_URL 指向本机转发网关，
+    # 空串即视为未配置（回落到 HashEmbedding）；否则 memory.* 工具会真的去连隧道。
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "")
     monkeypatch.setattr(support, "DB_PATH", db_path)
     for name in ("_manager", "_pipeline", "_agent"):
         monkeypatch.setattr(support, name, None)

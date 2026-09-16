@@ -70,6 +70,7 @@ from .support import (
     chat_ready,
     chat_tool_names,
     close_manager,
+    ensure_embedding_tunnel,
     get_agent,
     get_manager,
     graph_revision,
@@ -178,6 +179,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         owns_manager = manager is None
+        # 按需自动建立嵌入隧道（配置了 EMBEDDING_BASE_URL 且 10800 不可达时）；
+        # 失败只降级不阻塞（D8：绝不因隧道问题换向量空间）。
+        ensure_embedding_tunnel()
         app.state.manager = manager if manager is not None else get_manager()
         app.state.pipeline = RAGPipeline(
             app.state.manager,
