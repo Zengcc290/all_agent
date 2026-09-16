@@ -27,7 +27,19 @@ class QdrantVectorStore(BaseVectorStore):
                 from qdrant_client import QdrantClient
             except ImportError as exc:
                 raise RuntimeError("QdrantVectorStore requires qdrant-client") from exc
-            client = QdrantClient(url=url, api_key=api_key) if url else QdrantClient(path=":memory:")
+            if url:
+                # 本机回环地址绝不走系统代理：httpx 默认信任环境/注册表代理，
+                # 用户开着 Clash 等代理时 127.0.0.1 请求会被转发到代理端口，
+                # 代理对回环目标返回 502。本地端点显式关掉 trust_env。
+                from urllib.parse import urlparse
+
+                parsed = urlparse(url)
+                if parsed.hostname in ("127.0.0.1", "localhost", "::1"):
+                    client = QdrantClient(url=url, api_key=api_key, trust_env=False)
+                else:
+                    client = QdrantClient(url=url, api_key=api_key)
+            else:
+                client = QdrantClient(path=":memory:")
         if not isinstance(collection_name, str) or not collection_name.strip():
             raise ValueError("collection_name must be non-empty")
         if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
