@@ -25,15 +25,20 @@ def test_manager_crud_search_and_type_isolation():
 
 def test_working_memory_ttl_and_capacity():
     manager = _manager(working_memory_capacity=2)
-    manager.working.set("a", 1, importance=0.1)
-    manager.working.set("b", 2, importance=0.9)
-    manager.working.set("c", 3, importance=0.9)
-    assert manager.working.get_value("a") is None
-    assert manager.working.get_value("c") == 3
-    expired = manager.working.add("short lived", ttl_seconds=0.01)
+    manager.working.add("item a", importance=0.1)
+    manager.working.add("item b", importance=0.9)
+    manager.working.add("item c", importance=0.9)
+
+    # 容量 2：最低重要性的 "item a" 被淘汰，另外两条保留。
+    assert sorted(item.content for item in manager.working.list()) == ["item b", "item c"]
+
+    # TTL 单独用一个容量充足的实例，避免容量淘汰掩盖过期判定。
+    ttl_manager = _manager(working_memory_capacity=8)
+    expired = ttl_manager.working.add("short lived", ttl_seconds=0.01)
     expired.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-    manager.document_store.upsert(expired)
-    assert manager.working.get(expired.id) is None
+    ttl_manager.document_store.upsert(expired)
+    assert ttl_manager.working.get(expired.id) is None
+    assert ttl_manager.working.list() == []
 
 
 def test_semantic_memory_graph_fallback():

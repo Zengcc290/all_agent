@@ -190,10 +190,5 @@ class QdrantVectorStore(BaseVectorStore):
         except (ValueError, AttributeError):
             return str(uuid.uuid5(uuid.NAMESPACE_URL, f"helloagents-memory:{item_id}"))
 
-    def clear(self) -> None:
-        if self._ready:
-            self.client.delete_collection(collection_name=self.collection_name)
-            self._ready = False
-
 
 __all__ = ["QdrantVectorStore"]

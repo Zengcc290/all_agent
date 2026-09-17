@@ -14,6 +14,7 @@ from .knowledge import (
     materialize_extraction,
     normalize_entity_name,
     predicate_key_for,
+    relation_id_for,
 )
 from .pipeline import RAGPipeline, RetrievedChunk
 

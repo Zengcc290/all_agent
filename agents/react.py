@@ -397,15 +397,6 @@ class ReActAgent(Agent):
         "correct the capability intent and retry. Resolve multiple capabilities with "
         "`limit`: 20 when possible."
     )
-    SKILL_VIEW_REACT_INSTRUCTIONS = (
-        "Names in `Available skills` are read-only instruction packages, not "
-        "callable tools. When the task matches a skill's description or "
-        "triggers, first call system.skill_catalog with `action`: `view` and "
-        "the skill's `skill_name`; the Observation returns the full skill file "
-        "content. Follow that content for the task. Never guess a skill's "
-        "content from its one-line description alone; descriptions are only "
-        "matching hints."
-    )
 
     def __init__(
         self,
@@ -989,10 +980,6 @@ class ReActAgent(Agent):
         ]
         if catalog_first:
             lines.extend((self.CATALOG_FIRST_REACT_INSTRUCTIONS, ""))
-        skill_entries = self._skill_directory_lines()
-        if skill_entries:
-            lines.extend((*skill_entries, ""))
-            lines.extend((self.SKILL_VIEW_REACT_INSTRUCTIONS, ""))
         # 注册清单是进程级快照，可能包含本次请求不可调用的工具（非联网模式下被
         # 白名单摘除的 web.search，或尚未加载 schema 的惰性工具），因此显式声明
         # 当前可调用范围。
@@ -1096,27 +1083,6 @@ class ReActAgent(Agent):
                 lines.append(f"- {name}: (see schema above or via catalog)")
         for name in sorted(set(roster) - set(renderable)):
             lines.append(f"- {name}: (implementation temporarily unavailable)")
-        return lines
-
-    def _skill_directory_lines(self) -> list[str]:
-        """Return deterministic skill-directory lines, or an empty list.
-
-        Mirrors ``Agent._with_registered_skill_names``: only names,
-        descriptions, versions, and triggers are listed so the ReAct
-        instruction block stays byte-for-byte stable for one skill set and
-        skill file content is fetched through ``system.skill_catalog`` on
-        demand.
-        """
-
-        snapshot = self.skills.snapshot()
-        if not snapshot:
-            return []
-        lines = ["Available skills (view content via system.skill_catalog):"]
-        for name, (spec, _) in snapshot.items():
-            entry = f"- {name} (v{spec.version}): {spec.description}"
-            if spec.triggers:
-                entry += " Triggers: " + ", ".join(spec.triggers)
-            lines.append(entry)
         return lines
 
     def _ensure_tool_loaded(self, name: str) -> None:

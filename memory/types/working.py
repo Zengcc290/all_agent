@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from ..base import BaseMemory, MemoryItem, MemoryType
@@ -21,29 +20,6 @@ class WorkingMemory(BaseMemory):
         item = super().add(content, **kwargs)
         self._evict_if_needed()
         return item
-
-    def set(self, key: str, value: Any, *, ttl_seconds: float | None = None, importance: float = 0.5, metadata: Mapping[str, Any] | None = None) -> MemoryItem:
-        if not isinstance(key, str) or not key.strip():
-            raise ValueError("key must be a non-empty string")
-        existing = self.get_by_key(key)
-        if existing is not None:
-            self.delete(existing.id)
-        merged = dict(metadata or {})
-        merged["key"] = key
-        return self.add(str(value), metadata=merged, payload=value, ttl_seconds=ttl_seconds, importance=importance, item_id=key)
-
-    def get_by_key(self, key: str) -> MemoryItem | None:
-        item = self.document_store.get(key)
-        if item is not None and item.memory_type == self.memory_type:
-            return None if item.is_expired else item
-        for candidate in self.list():
-            if candidate.metadata.get("key") == key:
-                return candidate
-        return None
-
-    def get_value(self, key: str, default: Any = None) -> Any:
-        item = self.get_by_key(key)
-        return item.payload if item is not None else default
 
     def _evict_if_needed(self) -> None:
         items = self.list()

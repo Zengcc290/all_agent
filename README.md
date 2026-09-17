@@ -11,17 +11,6 @@ Discovery outcomes and registration state are queryable from the Agent. See the
 [Chinese tool guide](tool/README.md) for the complete template rules and the
 function-level LLM/tool call chain.
 
-## On-demand skills
-
-`Agent` also scans the flat `skills` directory (one Markdown file per skill,
-`skills/<name>.md`) and registers a `system.skill_catalog` tool. Only
-skill names, descriptions, versions, and triggers stay in the persistent
-system message; the model loads the full instruction content on demand with
-`system.skill_catalog` (`action: view`), so skill bodies never fragment the
-prompt prefix cache. Adding, removing, or editing a skill changes the prompt
-cache key, starting a new cache namespace. Markdown skill files never execute
-code. See [skills/README.md](skills/README.md) for the Chinese authoring guide.
-
 ## Runtime logs
 
 Console output is deliberately narrow (`core/activity_log.py`). The activity
@@ -148,6 +137,6 @@ chat provider is configured. Set `NEBULA_PORT` to use another port. See
 [`web/README.md`](web/README.md) for the endpoint table, the data flow and the
 static front end layout.
 
-The `skills/` and `config/` directories are resolved relative to the project
-root and are therefore meant to run from a checkout (`python -m web.app`); they
-are not embedded in the built wheel.
+The `config/` directory is resolved relative to the project root and is
+therefore meant to run from a checkout (`python -m web.app`); it is not embedded
+in the built wheel.

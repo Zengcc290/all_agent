@@ -84,9 +84,6 @@ class DocumentProcessor:
 
         return re.sub(r"\s+", " ", document.content).strip()
 
-    def chunks(self, document: Document, *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[Document]:
-        return [span.chunk for span in self.chunks_with_spans(document, chunk_size=chunk_size, overlap=overlap)]
-
     def chunks_with_spans(self, document: Document, *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[ChunkSpan]:
         """Split ``document`` and keep each chunk's range in the normalized text."""
         if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:

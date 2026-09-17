@@ -13,7 +13,6 @@ from typing import Any
 
 from constants import (
     DEFAULT_MAX_RETRIES,
-    DEFAULT_SKILLS_ROOT,
     DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT,
     HISTORY_MAX_MESSAGES,
@@ -24,9 +23,6 @@ from constants import (
 )
 from core import (
     ExecutionContext,
-    SkillCatalogTool,
-    SkillDiscoveryReport,
-    SkillRegistry,
     ToolCall,
     ToolCatalogTool,
     ToolDiscoveryReport,
@@ -38,7 +34,6 @@ from core import (
     ToolSpecRepository,
     parse_openai_tool_calls,
 )
-from core import discover_skills as discover_skill_packages
 from core import discover_tools as discover_tool_modules
 from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
@@ -215,8 +210,6 @@ class Agent(ABC):
         auto_discover_tools: bool = True,
         tool_package: str | ModuleType = "tool",
         discovery_strict: bool = False,
-        auto_discover_skills: bool = True,
-        skills_root: str = DEFAULT_SKILLS_ROOT,
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string")
@@ -226,10 +219,6 @@ class Agent(ABC):
             raise TypeError("auto_discover_tools must be a boolean")
         if not isinstance(discovery_strict, bool):
             raise TypeError("discovery_strict must be a boolean")
-        if not isinstance(auto_discover_skills, bool):
-            raise TypeError("auto_discover_skills must be a boolean")
-        if not isinstance(skills_root, str) or not skills_root.strip():
-            raise TypeError("skills_root must be a non-empty string")
         if not isinstance(tool_package, ModuleType) and not (
             isinstance(tool_package, str) and tool_package.strip()
         ):
@@ -258,15 +247,6 @@ class Agent(ABC):
         if self.repository is not None:
             self.repository.save(self.catalog_tool.spec, replace=True)
         self.tool_discovery_report: ToolDiscoveryReport | None = None
-        # Skills are read-only instruction packages: the registry keeps specs
-        # only, and the catalog tool reads the skill file content on demand.
-        self.skills_root = skills_root
-        self.skills = SkillRegistry()
-        self.skill_catalog_tool = SkillCatalogTool(self.skills, root=skills_root)
-        self.skill_discovery_report: SkillDiscoveryReport | None = None
-        self.tools.register(self.skill_catalog_tool)
-        if auto_discover_skills:
-            self.discover_skills(strict=discovery_strict)
         if auto_discover_tools:
             self.discover_tools(strict=discovery_strict)
         self.execution_manager = ToolExecutionManager(self.tools)
@@ -395,25 +375,6 @@ class Agent(ABC):
             reload_modules=reload_modules,
         )
         self.tool_discovery_report = report
-        return report
-
-    def discover_skills(
-        self,
-        *,
-        root: str | None = None,
-        replace: bool = False,
-        strict: bool = False,
-    ) -> SkillDiscoveryReport:
-        """Scan the skills root and register discovered instruction packages."""
-
-        selected_root = self.skills_root if root is None else root
-        report = discover_skill_packages(
-            self.skills,
-            root=selected_root,
-            replace=replace,
-            strict=strict,
-        )
-        self.skill_discovery_report = report
         return report
 
     def is_tool_registered(
@@ -754,36 +715,6 @@ class Agent(ABC):
             )
         return messages
 
-    def _with_registered_skill_names(self) -> dict[str, str] | None:
-        """Return the persistent skill-directory system message, or ``None``.
-
-        The message is deterministic for a fixed set of skills so the
-        provider's prefix cache stays reusable across rounds. Only names,
-        descriptions, versions, and triggers belong here; skill file content is
-        deliberately excluded and loaded on demand through
-        ``system.skill_catalog`` so it never fragments the cached prefix.
-        """
-
-        snapshot = self.skills.snapshot()
-        if not snapshot:
-            return None
-        lines = [
-            (
-                "Available skills (read-only instruction packages; content is NOT "
-                "loaded yet). When the current task matches a skill's description "
-                "or triggers below, FIRST call system.skill_catalog with "
-                "action=view and that skill_name, then follow the returned "
-                "content. Never guess a skill's content from its description "
-                "alone:"
-            )
-        ]
-        for name, (spec, _) in snapshot.items():
-            entry = f"- {name} (v{spec.version}): {spec.description}"
-            if spec.triggers:
-                entry += " Triggers: " + ", ".join(spec.triggers)
-            lines.append(entry)
-        return {"role": "system", "content": "\n".join(lines)}
-
     def _with_registered_tool_names(
         self, conversation: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -791,8 +722,7 @@ class Agent(ABC):
 
         The inventory intentionally includes repository-only tools used by
         lazy loading, even when their full schemas are not yet supplied in the
-        provider's tool definitions. The skill directory is appended as a
-        second stable system message when any skill is registered.
+        provider's tool definitions.
         """
 
         names = set(self.tools.snapshot())
@@ -805,9 +735,6 @@ class Agent(ABC):
                 "content": "All registered tool names: " + inventory,
             }
         ]
-        skill_message = self._with_registered_skill_names()
-        if skill_message is not None:
-            prefix.append(skill_message)
         return [*prefix, *conversation]
 
     @staticmethod
@@ -850,11 +777,7 @@ class Agent(ABC):
         tool names are included through the hot-zone roster because their
         rendered block is part of the request tail, but hot reloads must not
         change the routing key: only ``cache_epoch`` (frozen-zone structural
-        changes) starts a new cache namespace.  Skill directory entries
-        (name, version, and content hash) are part of the cached system
-        message, so they are included for the same reason: adding, removing,
-        or editing a skill changes the cached prefix and therefore must start
-        a new cache namespace.
+        changes) starts a new cache namespace.
         """
 
         names = set(self.tools.snapshot())
@@ -865,10 +788,6 @@ class Agent(ABC):
         # frozen manifest only changes together with ``cache_epoch``.
         if self._frozen_manifest is not None:
             names = set(self._frozen_manifest)
-        skill_entries = [
-            (name, spec.version, spec.content_hash)
-            for name, (spec, _) in self.skills.snapshot().items()
-        ]
         material = {
             "version": PROMPT_CACHE_KEY_VERSION,
             "provider": provider_key,
@@ -876,7 +795,6 @@ class Agent(ABC):
             "mode": mode,
             "configured_prompt": self._configured_prompt_messages(),
             "tool_names": sorted(names),
-            "skill_entries": skill_entries,
             "cache_epoch": self.cache_epoch,
         }
         # ReAct keeps its protocol instructions in class constants.  Include
@@ -886,7 +804,6 @@ class Agent(ABC):
             material["react_instructions"] = [
                 getattr(self, "REACT_INSTRUCTIONS", ""),
                 getattr(self, "CATALOG_FIRST_REACT_INSTRUCTIONS", ""),
-                getattr(self, "SKILL_VIEW_REACT_INSTRUCTIONS", ""),
             ]
         encoded = json.dumps(
             material,

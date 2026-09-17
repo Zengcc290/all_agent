@@ -85,9 +85,6 @@ def test_initial_request_builds_frozen_manifest_and_empty_hot_zone():
     agent._sync_frozen_manifest()
     assert agent._frozen_manifest == {
         "test.react_echo": agent._prompt_fingerprint(EchoTool().spec),
-        "system.skill_catalog": agent._prompt_fingerprint(
-            agent.tools.get("system.skill_catalog").spec
-        ),
         "system.tool_catalog": agent._prompt_fingerprint(
             agent.tools.get("system.tool_catalog").spec
         ),

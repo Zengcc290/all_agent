@@ -16,7 +16,7 @@ Qdrant/Neo4j 端点、嵌入网关与隧道端口）；部署机密的覆盖入�
   - ``memory/storage/document_repo.py`` 的状态枚举（``DOCUMENT_STATUSES`` /
     ``CHUNK_VECTOR_STATUSES`` / ``PERMISSIONS`` / ``FTS_TOKENIZERS``）：与同文件
     的 DDL 同源，改表结构就得改它，分开会漂移。
-  - 各工具自己的协议上限（``tool/fs_*.py``、``tool/_shared.py`` 的 ``MAX_*`` /
+  - 各工具自己的协议上限（``tool/*.py`` 的 ``MAX_*``、``tool/_shared.py`` 的
     ``*_ENV``）：只被该工具读取，属工具契约的一部分。
   - ``web/domain_classifier.py`` 的 ``DOMAIN_KEYWORDS`` 词表、
     ``web/seed.py`` 的 ``SEED_MARK``、``agents/message_utils.py`` 的
@@ -25,8 +25,6 @@ Qdrant/Neo4j 端点、嵌入网关与隧道端口）；部署机密的覆盖入�
 """
 
 from __future__ import annotations
-
-import re
 
 # ---------------------------------------------------------------------------
 # Agent / LLM 请求默认值
@@ -42,9 +40,6 @@ DEFAULT_TIMEOUT = 60
 
 #: prompt-cache 路由键的命名空间版本，改动后旧缓存键全部失效。
 PROMPT_CACHE_KEY_VERSION = "pc-v1"
-
-#: 技能包根目录的默认位置（相对于项目根）。
-DEFAULT_SKILLS_ROOT = "skills"
 
 # ---------------------------------------------------------------------------
 # 工具循环（ToolLoop）
@@ -68,26 +63,6 @@ OBSERVATION_PREVIEW_CHARS = 400
 #: 单条会话历史保留的最大消息数（保留开头的 system 前缀，只裁剪旧对话轮）。
 #: 不设上限时历史会无限增长：每轮都把全部历史重发给模型，token 成本线性上升。
 HISTORY_MAX_MESSAGES = 60
-
-# ---------------------------------------------------------------------------
-# 技能包（skills/<name>.md）校验与发现
-#   所在文件：core/skill_models.py、core/skill_discovery.py、core/skill_registry.py
-# ---------------------------------------------------------------------------
-
-#: 技能名规则：kebab-case ASCII，最长 64 字符。
-SKILL_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
-
-MAX_DESCRIPTION_CHARS = 2000
-MAX_VERSION_CHARS = 32
-MAX_TRIGGER_CHARS = 200
-
-#: content_hash 必须是长度 64 的小写 SHA-256 十六进制摘要。
-CONTENT_HASH_LENGTH = 64
-
-SKILL_FILE_SUFFIX = ".md"
-LEGACY_SKILL_ENTRY_FILENAME = "SKILL.md"
-README_FILENAME = "README.md"
-ENABLED_FIELD = "enabled"
 
 # ---------------------------------------------------------------------------
 # 数据库文件名默认值（环境变量可覆盖运行时路径）
@@ -127,22 +102,20 @@ DEFAULT_QDRANT_PORT = 6333
 DEFAULT_NEO4J_BOLT_PORT = 7687
 DEFAULT_WEB_PORT = 8765
 
-#: 隧道另一端的 qwen-embed 网关端口。主机名与 SSH 端口属部署信息，**不写进
-#: 仓库**：由 .env 的 EMBEDDING_TUNNEL_HINT 或部署文档提供（见 .env 注释）。
-DEFAULT_EMBEDDING_TUNNEL_REMOTE_PORT = 18000
+#: 隧道另一端的 qwen-embed 网关端口由 .env 的 EMBEDDING_TUNNEL_HINT 或部署
+#: 文档提供（主机名与 SSH 端口属部署信息，**不写进仓库**）。
 
 #: 本地 Qdrant 端点。启用方式（.env，不入库）：
 #:   HELLOAGENTS_MEMORY_QDRANT_URL=http://127.0.0.1:6333
 DEFAULT_QDRANT_URL = f"http://{LOCALHOST}:{DEFAULT_QDRANT_PORT}"
 
-#: 本地 Neo4j 端点与账号。启用方式（.env，不入库）：
+#: 本地 Neo4j 端点。启用方式（.env，不入库）：
 #:   HELLOAGENTS_MEMORY_NEO4J_URI=bolt://127.0.0.1:7687
 #:   HELLOAGENTS_MEMORY_NEO4J_USERNAME=neo4j
 #:   HELLOAGENTS_MEMORY_NEO4J_PASSWORD=<你的密码>
-#: 密码这里只是 Neo4j 首次安装的出厂占位，真实密码只放 .env。
+#: 账号密码没有出厂默认值：MemoryConfig 的这两个字段默认为 None（不连接），
+#: 真实值只放 .env。
 DEFAULT_NEO4J_URI = f"bolt://{LOCALHOST}:{DEFAULT_NEO4J_BOLT_PORT}"
-DEFAULT_NEO4J_USERNAME = "neo4j"
-DEFAULT_NEO4J_PASSWORD = "neo4j"
 
 # ---------------------------------------------------------------------------
 # 嵌入服务（memory/embedding.py）
@@ -211,9 +184,6 @@ RAG_GRAPH_PATH_LIMIT = 20
 
 #: 图检索上下文拼装的最大字符数。
 RAG_CONTEXT_MAX_CHARS = 12000
-
-#: rag 工具 ingest 允许的单次文本上限（tool/rag_tool.py 的 Field le）。
-RAG_CHUNK_MAX = 100_000
 
 # ---------------------------------------------------------------------------
 # 知识抽取（memory/rag/knowledge.py）

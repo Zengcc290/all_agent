@@ -174,11 +174,7 @@ class MemoryItem:
     def is_expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= utc_now()
 
-    @property
-    def event_time(self) -> datetime:
-        return self.timestamp or self.created_at
-
-    def to_dict(self, *, include_payload: bool = True) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "id": self.id,
             "content": self.content,
@@ -192,16 +188,9 @@ class MemoryItem:
             "embedding": self.embedding,
             "modality": self.modality,
             "relations": _json_safe(self.relations),
+            "payload": _json_safe(self.payload),
         }
-        if include_payload:
-            result["payload"] = _json_safe(self.payload)
         return result
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> MemoryItem:
-        data = dict(value)
-        data["payload"] = _json_restore(data.get("payload"))
-        return cls(**data)
 
 
 def _json_safe(value: Any) -> Any:
@@ -384,7 +373,6 @@ class BaseMemory:
         metadata: Mapping[str, Any] | None = None,
         importance: float = 0.5,
         ttl_seconds: float | None = None,
-        ttl: float | None = None,
         expires_at: datetime | str | None = None,
         timestamp: datetime | str | None = None,
         item_id: str | None = None,
@@ -394,10 +382,6 @@ class BaseMemory:
     ) -> MemoryItem:
         if not isinstance(content, str):
             content = str(content)
-        if ttl is not None:
-            if ttl_seconds is not None:
-                raise ValueError("provide either ttl or ttl_seconds, not both")
-            ttl_seconds = ttl
         if expires_at is not None and ttl_seconds is not None:
             raise ValueError("provide either ttl_seconds or expires_at, not both")
         if ttl_seconds is None and self.memory_type == MemoryType.WORKING:

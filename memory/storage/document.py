@@ -27,11 +27,6 @@ class BaseDocumentStore(ABC):
     @abstractmethod
     def list(self, *, memory_type: MemoryType | str | None = None, include_expired: bool = False) -> list[MemoryItem]: ...
 
-    def clear(self, memory_type: MemoryType | str | None = None) -> int:
-        """Delete records, with a portable fallback for custom stores."""
-        items = self.list(memory_type=memory_type, include_expired=True)
-        return sum(1 for item in items if self.delete(item.id))
-
     def close(self) -> None:
         pass
 
@@ -142,14 +137,6 @@ class SQLiteDocumentStore(BaseDocumentStore):
             rows = connection.execute(query, params).fetchall()
         items = [self._decode(row) for row in rows]
         return items if include_expired else [item for item in items if not item.is_expired]
-
-    def clear(self, memory_type: MemoryType | str | None = None) -> int:
-        with self._connection_scope() as connection:
-            if memory_type is None:
-                cursor = connection.execute("DELETE FROM memories")
-            else:
-                cursor = connection.execute("DELETE FROM memories WHERE memory_type = ?", (MemoryType(memory_type).value,))
-            return cursor.rowcount
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> MemoryItem:

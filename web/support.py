@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess  # noqa: S404 - 仅用于拉起本机 SSH 端口转发
+import subprocess  # 仅用于拉起本机 SSH 端口转发
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -131,7 +131,7 @@ def ensure_embedding_tunnel() -> bool:
         "-o", "ExitOnForwardFailure=yes",
     ]
     try:
-        subprocess.Popen(  # noqa: S603 - 参数全部来自本机 .env，非外部输入
+        subprocess.Popen(  # 参数全部来自本机 .env，非外部输入
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

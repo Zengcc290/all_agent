@@ -39,7 +39,9 @@ def test_document_requires_non_empty_content_and_id():
 
 def test_processor_chunks_with_overlap_and_shared_metadata():
     document = Document("a" * 250, id="doc-1", metadata={"source": "unit-test"})
-    chunks = DocumentProcessor().chunks(document, chunk_size=100, overlap=20)
+    processor = DocumentProcessor()
+    spans = processor.chunks_with_spans(document, chunk_size=100, overlap=20)
+    chunks = [span.chunk for span in spans]
 
     assert [chunk.metadata["chunk_index"] for chunk in chunks] == [0, 1, 2]
     assert all(chunk.metadata["document_id"] == "doc-1" for chunk in chunks)
@@ -49,15 +51,20 @@ def test_processor_chunks_with_overlap_and_shared_metadata():
     # Overlapping windows repeat the tail of the previous chunk.
     assert chunks[1].content[:20] == chunks[0].content[80:]
     assert len(chunks[2].content) == 90
+    # 偏移必须落在规范化文本上：这是 documents/chunks 真值源的 char_start/char_end。
+    text = processor.normalized_text(document)
+    assert [text[span.char_start:span.char_end] for span in spans] == [
+        chunk.content for chunk in chunks
+    ]
 
 
 def test_processor_chunk_validation():
     processor = DocumentProcessor()
     document = Document("hello world")
     with pytest.raises(ValueError, match="chunk_size"):
-        processor.chunks(document, chunk_size=0)
+        processor.chunks_with_spans(document, chunk_size=0)
     with pytest.raises(ValueError, match="overlap"):
-        processor.chunks(document, chunk_size=10, overlap=10)
+        processor.chunks_with_spans(document, chunk_size=10, overlap=10)
 
 
 @pytest.mark.parametrize(

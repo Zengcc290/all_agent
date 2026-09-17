@@ -58,6 +58,17 @@ def test_search_normalizes_a_local_http_response():
     seen = {}
 
     class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            # 501 同样要先读完请求体再响应：否则服务器在客户端仍发送时就关闭
+            # 连接，Windows 上会偶发 ConnectionAbortedError，501 回退路径
+            # （本用例真正要覆盖的分支）便永远走不到。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self.send_response(501)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_GET(self):
             seen["query"] = parse_qs(urlsplit(self.path).query)
             seen["authorization"] = self.headers.get("Authorization")
