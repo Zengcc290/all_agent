@@ -43,6 +43,10 @@ from constants import (
     SILICONFLOW_API_KEY_ENV,
 )
 
+# config/services.toml 是"所有外部 API 调用"的集中配置（嵌入/搜索/Qdrant/Neo4j）。
+# core 不依赖 memory，此处导入无循环；只用于 from_env 的未设置字段兜底。
+from core.services_config import ServicesConfig, load_services_config
+
 from .embedding import (
     APIEmbedding,
     BaseEmbedding,
@@ -154,6 +158,36 @@ def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
         timeout=config.embedding_timeout,
         batch_size=config.embedding_batch_size,
     )
+
+
+def _merge_services_into(values: dict[str, object], services: ServicesConfig) -> None:
+    """Fill ``values`` with fields the environment left unset, from services.toml.
+
+    ``from_env`` builds ``values`` from ``HELLOAGENTS_MEMORY_*`` first; this
+    helper only adds a field when it is absent, so environment and explicit
+    constructor arguments always win over the shared services file.
+    """
+
+    embedding = services.embedding
+    merged = (
+        ("embedding_provider", embedding.provider),
+        ("embedding_base_url", embedding.base_url),
+        ("embedding_model", embedding.model),
+        ("embedding_api_key", embedding.api_key),
+        ("embedding_dimension", embedding.dimension),
+        ("embedding_batch_size", embedding.batch_size),
+        ("embedding_timeout", embedding.timeout),
+        ("qdrant_url", services.qdrant.url),
+        ("qdrant_collection", services.qdrant.collection),
+        ("qdrant_api_key", services.qdrant.api_key),
+        ("neo4j_uri", services.neo4j.uri),
+        ("neo4j_username", services.neo4j.username),
+        ("neo4j_password", services.neo4j.password),
+    )
+    for field_name, value in merged:
+        if value is None or field_name in values:
+            continue
+        values[field_name] = value
 
 
 def utc_now() -> datetime:
@@ -324,11 +358,13 @@ class MemoryConfig:
     # 端点/端口的单一事实来源是 constants.py 的「连接与端点」小节
     # （DEFAULT_QDRANT_URL / DEFAULT_NEO4J_URI / DEFAULT_*_PORT）。
     # 要连真服务就在 .env 里设（前缀由 from_env 的 prefix 决定）：
-    #   HELLOAGENTS_MEMORY_QDRANT_URL=http://127.0.0.1:6333
-    #   HELLOAGENTS_MEMORY_NEO4J_URI=bolt://127.0.0.1:7687  （+_USERNAME/_PASSWORD）
+    #   HELLOAGENTS_MEMORY_QDRANT_URL=https://xxxx.qdrant.tech   （+_QDRANT_API_KEY）
+    #   HELLOAGENTS_MEMORY_NEO4J_URI=bolt+s://xxxx.databases.neo4j.io  （+_USERNAME/_PASSWORD）
+    # 也可以在 config/services.toml 的 [qdrant] / [neo4j] 段集中配置（env 优先）。
     # 选型发生在 memory/manager.py：qdrant_url 非空才建 QdrantVectorStore。
     qdrant_url: str | None = None
     qdrant_collection: str = MEMORY_QDRANT_COLLECTION
+    qdrant_api_key: str | None = None
     neo4j_uri: str | None = None
     neo4j_username: str | None = None
     neo4j_password: str | None = None
@@ -371,6 +407,8 @@ class MemoryConfig:
             raise ValueError("default_ttl_seconds must be positive or None")
         if not isinstance(self.qdrant_collection, str) or not self.qdrant_collection.strip():
             raise ValueError("qdrant_collection must be non-empty")
+        if not isinstance(self.qdrant_api_key, (str, type(None))) or (isinstance(self.qdrant_api_key, str) and not self.qdrant_api_key.strip()):
+            raise ValueError("qdrant_api_key must be a non-empty string or None")
         if not isinstance(self.extra, dict):
             self.extra = dict(self.extra)
 
@@ -405,8 +443,14 @@ class MemoryConfig:
                 continue
             else:
                 values[field_name] = raw
+        # 环境变量没设置的字段，从 config/services.toml 补（env 优先：
+        # services.toml 是"所有外部 API 调用"的集中配置，见 core/services_config.py；
+        # 补进来的值同样要过下面的 __post_init__ 校验）。
+        _merge_services_into(values, load_services_config())
         if not values.get("embedding_api_key"):
             # 同理：空的 DASHSCOPE_API_KEY 表示「没配 key」，而不是「配了空 key」。
+            # 这一步放在 services.toml 合并之后：显式配置（含 services.toml）优先
+            # 于这个隐式旧环境变量回退。
             values["embedding_api_key"] = (os.getenv("DASHSCOPE_API_KEY") or "").strip() or None
         return cls(**values)
 

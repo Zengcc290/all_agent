@@ -1,0 +1,44 @@
+# 所有外部 API / 云服务调用的集中配置（模板，可安全提交）。
+#
+# 用法：复制本文件为 config/services.toml 再填写真实值（services.toml 已被
+# .gitignore 排除，不会提交）。密钥两种写法任选其一：
+#   api_key = "明文"         # 文件不入库，可以直接写（与 provider.toml 同款约定）
+#   api_key_env = "环境变量名" # 推荐：密钥放 .env，这里只写指向（同 provider.toml）
+#
+# 优先级：显式构造参数 > 环境变量 > 本文件。.env 里已有的值照旧生效，
+# 本文件只在"调用方和环境变量都没设置"时才补上。
+#
+# LLM 聊天模型不在这里——它是 provider.toml 的专属职责（config/provider.toml）。
+# 嵌入 SSH 隧道参数（EMBEDDING_TUNNEL_KEY/HINT 等部署信息）也不在这里，仍在 .env。
+
+[embedding]
+# 嵌入服务：端点、模型与凭据。provider 取值：auto | gateway | gemini | openai | hash。
+# 注意：provider = "auto" 时网关自动识别仍只看环境变量 EMBEDDING_BASE_URL；
+# 用本文件配网关端点请显式写 provider = "gateway"。
+# provider = "auto"
+# base_url = "http://127.0.0.1:10800"
+# model = "qwen3-embedding-0.6b"
+# api_key_env = "DASHSCOPE_API_KEY"   # 或 GEMINI_API_KEY / SILICONFLOW_API_KEY
+# dimension = 1024                    # 留空 = 首次响应自动识别
+# batch_size = 10
+# timeout = 30.0
+
+[search]
+# 联网搜索（AnySearch / OpenAI 兼容网关）。
+# base_url = "https://your-anysearch-endpoint/v1"
+# api_key_env = "SEARCH_API_KEY"
+# timeout = 5.0
+
+[qdrant]
+# Qdrant Cloud：https://cloud.qdrant.io 创建的集群。url 用公网 HTTPS 地址，
+# api_key 在集群页面复制。留空则维持"不连接、走内存回退"。
+# url = "https://xxxx-xxxx.us-east-1-0.aws.cloud.qdrant.io:6333"
+# api_key_env = "HELLOAGENTS_MEMORY_QDRANT_API_KEY"
+# collection = "helloagents_memory"
+
+[neo4j]
+# Neo4j Aura：https://console.neo4j.io 的实例。uri 是 bolt+s:// 地址，
+# username/password 在实例连接详情里；密码也支持 password_env 指向 .env。
+# uri = "bolt+s://xxxx.databases.neo4j.io"
+# username = "neo4j"
+# password_env = "HELLOAGENTS_MEMORY_NEO4J_PASSWORD"

@@ -44,6 +44,7 @@ class MemoryManager:
             self.vector_store = QdrantVectorStore(
                 url=self.config.qdrant_url,
                 collection_name=self.config.qdrant_collection,
+                api_key=self.config.qdrant_api_key,
                 dimension=self.config.embedding_dimension,
             )
         else:

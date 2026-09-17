@@ -26,6 +26,7 @@ from constants import (
     NEBULA_EVENT_TITLE_CHARS,
     QA_EXTRACT_CHUNK_SIZE,
 )
+from core.services_config import SearchService, load_services_config
 from memory import (
     MemoryConfig,
     MemoryItem,
@@ -301,7 +302,11 @@ SEARCH_TOOL_NAME = "web.search"
 
 
 def search_available() -> bool:
-    """AnySearch 是否已配置（base_url 与 api_key 同时存在才视为可用）。"""
+    """AnySearch 是否已配置（base_url 与 api_key 同时存在才视为可用）。
+
+    环境变量优先（SEARCH_* / ANYSEARCH_*），其次看 config/services.toml 的
+    [search] 段——那是外部 API 调用的集中配置。
+    """
     base_url = next(
         (
             value
@@ -325,7 +330,16 @@ def search_available() -> bool:
         ),
         None,
     )
-    return bool(base_url) and bool(api_key)
+    if base_url and api_key:
+        return True
+    search = _services_search()
+    return bool(search.base_url) and bool(search.api_key)
+
+
+def _services_search() -> SearchService:
+    """Search settings from config/services.toml; a blank/missing file yields all-None."""
+
+    return load_services_config().search
 
 
 def chat_tool_names(agent, *, online: bool) -> list[str] | None:

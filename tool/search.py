@@ -28,6 +28,7 @@ from pydantic import (
 
 from core import BaseTool, ToolSpec
 from core.parser import reject_json_constant
+from core.services_config import SearchService, load_services_config
 
 # Discovery uses this literal switch before constructing the tool.
 TOOL_ENABLED = True
@@ -211,22 +212,33 @@ class SearchTool(BaseTool):
         base_url: str | None = None,
         api_key: str | None = None,
         *,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> None:
         # Loading happens in the constructor (rather than module import) so
         # discovery remains free of configuration and I/O side effects.
-        if base_url is None or api_key is None:
+        if base_url is None or api_key is None or timeout is None:
             _load_dotenv()
-        self.base_url = (
-            base_url
-            if base_url is not None
-            else _first_env("SEARCH_BASE_URL", "ANYSEARCH_BASE_URL")
+        services = (
+            _services_search()
+            if base_url is None or api_key is None or timeout is None
+            else None
         )
-        self.api_key = (
-            api_key
-            if api_key is not None
-            else _first_env("SEARCH_API", "SEARCH_API_KEY", "ANYSEARCH_API_KEY")
-        )
+        if base_url is None:
+            # config/services.toml 是外部 API 的集中配置；env 优先，toml 兜底。
+            base_url = (
+                _first_env("SEARCH_BASE_URL", "ANYSEARCH_BASE_URL") or services.base_url
+            )
+        if api_key is None:
+            api_key = (
+                _first_env("SEARCH_API", "SEARCH_API_KEY", "ANYSEARCH_API_KEY")
+                or services.api_key
+            )
+        if timeout is None:
+            timeout = (
+                services.timeout if services is not None and services.timeout is not None else 30.0
+            )
+        self.base_url = base_url
+        self.api_key = api_key
         if self.base_url is not None and not isinstance(self.base_url, str):
             raise TypeError("base_url must be a string")
         if self.base_url is not None:
@@ -327,6 +339,12 @@ def _load_dotenv() -> None:
         # unavailable; the project declares python-dotenv as a dependency.
         return
     load_dotenv(override=False)
+
+
+def _services_search() -> SearchService:
+    """Search settings from config/services.toml; a blank/missing file yields all-None."""
+
+    return load_services_config().search
 
 
 def _first_env(*names: str) -> str | None:

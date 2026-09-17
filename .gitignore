@@ -27,5 +27,10 @@ config/provider.toml
 config/providers.toml
 !config/provider.example.toml
 
+# Local services profile (embedding/search/Qdrant/Neo4j) may contain plaintext
+# credentials. Publish only the sanitized services.example.toml template.
+config/services.toml
+!config/services.example.toml
+
 # Editor metadata / attachments
 .opensquilla/
