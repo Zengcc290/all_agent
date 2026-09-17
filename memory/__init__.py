@@ -30,9 +30,12 @@ from .base import (
 from .embedding import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_GEMINI_EMBEDDING_BASE_URL,
+    DEFAULT_GEMINI_EMBEDDING_MODEL,
     APIEmbedding,
     BaseEmbedding,
     EmbedServerEmbedding,
+    GeminiEmbedding,
     HashEmbedding,
     load_dotenv_once,
 )
@@ -52,6 +55,8 @@ from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemo
 __all__ = [
     "DEFAULT_EMBEDDING_BASE_URL",
     "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_GEMINI_EMBEDDING_BASE_URL",
+    "DEFAULT_GEMINI_EMBEDDING_MODEL",
     "APIEmbedding",
     "BaseDocumentStore",
     "BaseEmbedding",
@@ -61,6 +66,7 @@ __all__ = [
     "DocumentProcessor",
     "EmbedServerEmbedding",
     "EpisodicMemory",
+    "GeminiEmbedding",
     "HashEmbedding",
     "InMemoryVectorStore",
     "MemoryConfig",

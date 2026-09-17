@@ -22,19 +22,15 @@ from typing import Any
 from dotenv import load_dotenv
 
 from constants import (
-    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MEMORY_DB_FILENAME,
-    MEMORY_EMBEDDING_DIMENSION,
     NEBULA_EVENT_TITLE_CHARS,
     QA_EXTRACT_CHUNK_SIZE,
 )
 from memory import (
-    APIEmbedding,
-    EmbedServerEmbedding,
-    HashEmbedding,
     MemoryConfig,
     MemoryItem,
     MemoryManager,
+    make_default_embedding,
     utc_now,
 )
 from memory.embedding import gateway_reachable
@@ -55,29 +51,15 @@ DB_PATH = Path(os.getenv("MEMORY_DB_PATH") or (PROJECT_ROOT / DEFAULT_MEMORY_DB_
 os.environ.setdefault("MEMORY_DB_PATH", str(DB_PATH))
 
 
-def build_embedding():
-    """按优先级选择嵌入实现：本地转发网关 → DashScope key → 离线降级。
+def build_embedding(config: MemoryConfig | None = None):
+    """按 ``memory.base.make_default_embedding`` 的优先级选嵌入实现。
 
-    优先级最高的 ``EMBEDDING_BASE_URL`` 指向一个经端口转发暴露的
-    ``qwen-embed`` 网关（自定义 ``/embed`` 协议，见
-    ``memory.EmbedServerEmbedding``）；其次 ``DASHSCOPE_API_KEY`` 启用公网
-    qwen3-embedding-0.6b；都没有时退回 ``HashEmbedding`` 离线实现，保证整站
-    无网络也可运行。三个向量空间互不兼容，切换后需要重索引已有条目。
+    这里**只做转发**，不重复一份选型逻辑：曾经这里硬编码 ``DASHSCOPE_API_KEY``
+    + qwen 模型名 + 本机网关地址，导致 ``HELLOAGENTS_MEMORY_EMBEDDING_*`` 配好的
+    远端端点（含 Gemini）在 Web 侧完全不生效，而 Agent 工具侧却生效——同一个进程
+    两套向量空间。选型规则见 ``memory.base.make_default_embedding``。
     """
-    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
-    if server_url:
-        return EmbedServerEmbedding(
-            base_url=server_url,
-            dimension=MEMORY_EMBEDDING_DIMENSION,
-        )
-    api_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip()
-    if api_key:
-        return APIEmbedding(
-            api_key=api_key,
-            model=DEFAULT_EMBEDDING_MODEL,
-            dimension=MEMORY_EMBEDDING_DIMENSION,
-        )
-    return HashEmbedding(dimension=MEMORY_EMBEDDING_DIMENSION)
+    return make_default_embedding(config)
 
 
 def ensure_embedding_tunnel() -> bool:
@@ -211,7 +193,7 @@ def get_manager() -> MemoryManager:
                 # 未配置时与旧行为完全一致（内存向量 + 内存图）。
                 config = MemoryConfig.from_env()
                 config.sqlite_path = str(DB_PATH)  # MEMORY_DB_PATH 优先级不变
-                _manager = MemoryManager(config, embedding=build_embedding())
+                _manager = MemoryManager(config, embedding=build_embedding(config))
     return _manager
 
 

@@ -1,22 +1,29 @@
-"""Unified embedding service backed by an OpenAI-compatible HTTP API.
+"""Unified embedding service backed by remote HTTP APIs.
 
-Two implementations ship: :class:`APIEmbedding`, a vendor-neutral client for any
-provider that exposes the OpenAI ``/embeddings`` shape (DashScope for
-qwen3-embedding-0.6b, OpenAI, SiliconFlow, Zhipu, local vLLM, ...), and
-:class:`HashEmbedding`, the deterministic offline fallback used when no key is
-configured.  The abstract :class:`BaseEmbedding` interface stays so applications
-can inject their own model or callable without touching the rest of the system.
+Three remote implementations ship, each speaking a different wire protocol, plus
+the offline fallback:
+
+- :class:`APIEmbedding` - any provider exposing the OpenAI ``/embeddings`` shape
+  (DashScope for qwen3-embedding-0.6b, OpenAI, SiliconFlow, Zhipu, local vLLM).
+- :class:`GeminiEmbedding` - Google's ``:embedContent`` shape, which additionally
+  accepts images and mixed image+text in one request.
+- :class:`EmbedServerEmbedding` - the local port-forwarded ``qwen-embed`` gateway
+  (custom ``/embed`` protocol).
+- :class:`HashEmbedding` - deterministic offline fallback used when no provider is
+  configured, so the memory layer, web app and RAG pipeline keep working air-gapped.
 
 The default model is ``qwen3-embedding-0.6b`` (1024 dimensions) served by
 DashScope's OpenAI-compatible endpoint.  The API key is read from
 ``DASHSCOPE_API_KEY`` (or ``MemoryConfig.embedding_api_key`` / the
-``HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`` environment variable).  Without a key
-the hash fallback keeps local search working offline; the two vector spaces are
-not interchangeable, so switching keys requires re-indexing stored items.
+``HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`` environment variable); Gemini falls back
+to ``GEMINI_API_KEY``.  Without a key the hash fallback keeps local search working
+offline; every remote provider produces a different vector space, so switching
+providers requires re-indexing stored items.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -35,9 +42,15 @@ from constants import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_GEMINI_EMBEDDING_BASE_URL,
+    DEFAULT_GEMINI_EMBEDDING_MODEL,
+    GEMINI_API_KEY_ENV,
     LOCALHOST,
     MEMORY_EMBEDDING_DIMENSION,
 )
+
+#: Gemini ``embedContent`` 用这个头传 key（不是 ``Authorization: Bearer``）。
+GEMINI_EMBEDDING_API_KEY_HEADER = "x-goog-api-key"
 
 
 def load_dotenv_once() -> None:
@@ -70,6 +83,17 @@ class BaseEmbedding(ABC):
         if not all(isinstance(text, str) for text in values):
             raise TypeError("texts must contain strings")
         return [self.embed(text) for text in values]
+
+    def embed_item(self, text: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
+        """Embed one stored memory item.
+
+        Text-only by default.  ``BaseMemory.add`` routes every write through this
+        hook, so a multimodal backend (:class:`GeminiEmbedding`) overrides it to
+        fold ``payload``/``modality`` into the same vector - that is what makes a
+        stored image retrievable by its own content.  Providers that cannot embed
+        ``payload`` ignore it and keep embedding ``text``.
+        """
+        return self.embed(text)
 
 
 class HashEmbedding(BaseEmbedding):
@@ -479,12 +503,257 @@ def _extract_embedding_vectors(response: Any) -> list[list[float]]:
     return [vector for _, vector in indexed]
 
 
+#: 图片魔数 → MIME。声明错 MIME 会被服务端拒收，所以按魔数猜而不是一律写 PNG。
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def _image_mime_type(data: Any, fallback: str = "image/png") -> str:
+    """按魔数猜图片 MIME，猜不出就用 ``fallback``。"""
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        head = bytes(data)[:12]
+        for magic, mime in _IMAGE_MAGIC:
+            if head.startswith(magic):
+                return mime
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            return "image/webp"
+    return fallback
+
+
+class GeminiEmbedding(BaseEmbedding):
+    """Google Gemini ``:embedContent`` client: text, image and mixed input.
+
+    All three input shapes hit the same endpoint (``{base_url}/models/{model}:embedContent``)::
+
+        text   parts=[{"text": "..."}]
+        image  parts=[{"inline_data": {"mime_type": "image/png", "data": "<base64>"}}]
+        mixed  both parts in one request -> one fused multimodal vector
+
+    Differences from :class:`APIEmbedding`: the key travels in the
+    ``x-goog-api-key`` header instead of ``Authorization: Bearer``, the body is
+    ``{"content": {"parts": [...]}}`` rather than ``{"model", "input"}``, and the
+    vector comes back as ``embedding.values``.  When ``dimension`` is set it is
+    also sent as ``config.outputDimensionality`` so the server truncates (default
+    3072; 1536/768/128 are supported).  Vectors from this class are NOT
+    compatible with the other vector spaces.
+
+    ``client`` may be injected for tests: a callable ``client(payload, model=...)``
+    returning the parsed JSON object.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        model: str = DEFAULT_GEMINI_EMBEDDING_MODEL,
+        base_url: str = DEFAULT_GEMINI_EMBEDDING_BASE_URL,
+        dimension: int | None = None,
+        timeout: float = 30.0,
+        client: Any = None,
+        api_key_env: str = GEMINI_API_KEY_ENV,
+    ) -> None:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("base_url must be a non-empty string")
+        if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
+            raise ValueError("dimension must be a positive integer")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if not isinstance(api_key_env, str) or not api_key_env.strip():
+            raise ValueError("api_key_env must be a non-empty string")
+
+        if api_key is None:
+            load_dotenv_once()
+        resolved_key = api_key if api_key is not None else os.getenv(api_key_env)
+        if not resolved_key or not str(resolved_key).strip():
+            raise RuntimeError(
+                f"GeminiEmbedding requires an API key: pass api_key=... or set the "
+                f"{api_key_env} environment variable (a .env file in the project "
+                f"root is loaded automatically)"
+            )
+        self.api_key = str(resolved_key).strip()
+        self.model = model.strip()
+        self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
+        self.client = client
+        self.api_key_env = api_key_env
+        #: 0 = 尚未知：首次响应里学到；非 0 时同时作为 ``outputDimensionality`` 下发。
+        self.dimension = dimension or 0
+
+    # ------------------------------------------------------------------- parts
+
+    @staticmethod
+    def text_part(text: str) -> dict[str, Any]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return {"text": text}
+
+    @staticmethod
+    def image_part(data: Any, *, mime_type: str = "image/png") -> dict[str, Any]:
+        if not isinstance(mime_type, str) or not mime_type.strip():
+            raise ValueError("mime_type must be a non-empty string")
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            encoded = base64.b64encode(bytes(data)).decode("ascii")
+        elif isinstance(data, str) and data.strip():
+            encoded = data.strip()  # 调用方已经给的是 base64
+        else:
+            raise TypeError("image data must be bytes or a non-empty base64 string")
+        return {"inline_data": {"mime_type": mime_type.strip(), "data": encoded}}
+
+    def parts_for(self, text: str = "", *, image: Any = None, mime_type: str = "image/png") -> list[dict[str, Any]]:
+        """Assemble ``content.parts`` for one of the three input shapes."""
+        parts: list[dict[str, Any]] = []
+        if isinstance(text, str) and text.strip():
+            parts.append(self.text_part(text))
+        if image is not None:
+            parts.append(self.image_part(image, mime_type=mime_type))
+        if not parts:
+            raise ValueError("at least one of text/image must be provided")
+        return parts
+
+    # ------------------------------------------------------------------- embed
+
+    def embed(self, text: str) -> list[float]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return self.embed_parts([self.text_part(text)])
+
+    def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
+        # embedContent takes exactly one content per call, so batches are issued
+        # one request per text.
+        # ponytail: per-item requests; switch to :batchEmbedContents if the
+        # free tier's 100 requests/minute becomes the bottleneck.
+        values = list(texts)
+        if not all(isinstance(text, str) for text in values):
+            raise TypeError("texts must contain strings")
+        return [self.embed(text) for text in values]
+
+    def embed_image(self, data: Any, *, mime_type: str = "image/png") -> list[float]:
+        """Embed one image on its own (no accompanying text)."""
+        return self.embed_parts([self.image_part(data, mime_type=mime_type)])
+
+    def embed_multimodal(self, text: str, data: Any, *, mime_type: str = "image/png") -> list[float]:
+        """Embed text and image together into one fused vector."""
+        return self.embed_parts(self.parts_for(text, image=data, mime_type=mime_type))
+
+    def embed_item(self, text: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
+        """Route one stored item: image -> image, image+text -> mixed, else text."""
+        if payload is None:
+            return self.embed(text)
+        mime_type = _image_mime_type(payload)
+        if isinstance(text, str) and text.strip():
+            return self.embed_multimodal(text, payload, mime_type=mime_type)
+        return self.embed_image(payload, mime_type=mime_type)
+
+    def embed_parts(self, parts: list[dict[str, Any]]) -> list[float]:
+        """Raw escape hatch: send a caller-built ``parts`` list."""
+        if not isinstance(parts, list) or not parts:
+            raise ValueError("parts must be a non-empty list")
+        return _finish_gemini_vector(self, _gemini_request(self, parts))
+
+    # ------------------------------------------------------------------ config
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": type(self).__name__,
+            "model": self.model,
+            "base_url": self.base_url,
+            "dimension": self.dimension,
+        }
+
+    def __repr__(self) -> str:
+        return f"GeminiEmbedding(model={self.model!r}, base_url={self.base_url!r}, dimension={self.dimension})"
+
+
+def _gemini_request(embedding: GeminiEmbedding, parts: list[dict[str, Any]]) -> Any:
+    """POST one ``:embedContent`` call (or the injected test client) and parse JSON."""
+    payload: dict[str, Any] = {"content": {"parts": parts}}
+    if embedding.dimension:
+        # 只有显式配了维度才降维；留空即用服务端默认（3072）。
+        payload["config"] = {"outputDimensionality": embedding.dimension}
+    client = embedding.client
+    if client is not None:
+        if not callable(client):
+            raise TypeError("client must be callable")
+        return client(payload, model=embedding.model)
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{embedding.base_url}/models/{embedding.model}:embedContent",
+        data=body,
+        headers={
+            GEMINI_EMBEDDING_API_KEY_HEADER: embedding.api_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=embedding.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"embedding API HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"embedding API request failed: {exc.reason}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"embedding API returned invalid JSON: {exc}") from exc
+
+
+def _extract_gemini_vector(response: Any) -> list[float]:
+    """Read ``embedding.values``; also accept a ``embeddings[0].values`` list."""
+    if isinstance(response, dict):
+        embedding = response.get("embedding")
+        if embedding is None:
+            embeddings = response.get("embeddings")
+            embedding = embeddings[0] if isinstance(embeddings, list) and embeddings else None
+    else:
+        embedding = getattr(response, "embedding", None)
+        if embedding is None:
+            embeddings = getattr(response, "embeddings", None)
+            embedding = embeddings[0] if isinstance(embeddings, list) and embeddings else None
+    values = embedding.get("values") if isinstance(embedding, dict) else getattr(embedding, "values", None)
+    try:
+        # 归一成 list；None / 标量这类形状直接在这里失败，交给下面统一报错。
+        return list(values)
+    except TypeError as exc:
+        raise RuntimeError("embedding response did not contain embedding.values") from exc
+
+
+def _finish_gemini_vector(embedding: GeminiEmbedding, response: Any) -> list[float]:
+    """Validate one vector, learn the dimension, and enforce a configured one."""
+    raw = _extract_gemini_vector(response)
+    if not raw:
+        raise RuntimeError("embedding response contained empty vectors")
+    vector: list[float] = []
+    for value in raw:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("embedding response contained non-finite values") from exc
+        if not math.isfinite(number):
+            raise RuntimeError("embedding response contained non-finite values")
+        vector.append(number)
+    if embedding.dimension and embedding.dimension != len(vector):
+        raise RuntimeError(
+            f"embedding dimension {len(vector)} does not match expected dimension {embedding.dimension}"
+        )
+    embedding.dimension = len(vector)
+    return vector
+
+
 __all__ = [
     "DEFAULT_EMBEDDING_BASE_URL",
     "DEFAULT_EMBEDDING_BATCH_SIZE",
     "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_GEMINI_EMBEDDING_BASE_URL",
+    "DEFAULT_GEMINI_EMBEDDING_MODEL",
     "APIEmbedding",
     "BaseEmbedding",
     "EmbedServerEmbedding",
+    "GeminiEmbedding",
     "load_dotenv_once",
 ]

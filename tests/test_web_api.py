@@ -12,11 +12,10 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from memory import InMemoryVectorStore, MemoryConfig, MemoryManager  # noqa: E402
+from memory import HashEmbedding, InMemoryVectorStore, MemoryConfig, MemoryManager  # noqa: E402
 from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 from memory.storage import ChunkRecord, DocumentRecord, DocumentRepository  # noqa: E402
 from web import create_app, support  # noqa: E402
-from web.support import HashEmbedding  # noqa: E402
 
 
 @pytest.fixture()

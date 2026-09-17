@@ -151,8 +151,32 @@ MEMORY_SEARCH_LIMIT = 10
 #: 语义检索默认相似度阈值（0 表示不过滤）。
 MEMORY_SIMILARITY_THRESHOLD = 0.0
 
-#: qwen3-embedding-0.6b 的向量维度。
+#: qwen3-embedding-0.6b 的向量维度；也是离线 ``HashEmbedding`` 与转发网关的默认维度。
 MEMORY_EMBEDDING_DIMENSION = 1024
+
+#: 远端嵌入的期望向量维度。**出厂留空（None）= 不预设**：首次调用时从响应里
+#: 自动识别维度（``APIEmbedding`` / ``GeminiEmbedding`` 都把 0 当作「尚未知」），
+#: 因此接任意平台都不必先查文档。要固定维度就把整数填在这里。
+MEMORY_EMBEDDING_DIMENSION_REMOTE: int | None = None
+
+#: 嵌入提供方。``auto`` 按既有优先级自动判定（转发网关 → 远端 API → 离线兜底），
+#: 其余值强制指定：``gateway`` 本机转发网关（自定义 ``/embed``）、``gemini``
+#: Gemini ``:embedContent``、``openai`` OpenAI 兼容 ``/embeddings``、``hash`` 离线。
+MEMORY_EMBEDDING_PROVIDER_DEFAULT = "auto"
+MEMORY_EMBEDDING_PROVIDERS = ("auto", "gateway", "gemini", "openai", "hash")
+
+#: Gemini ``:embedContent`` 端点与默认模型（Google AI Studio）。
+#: 协议与 OpenAI 兼容端点不同：认证头 ``x-goog-api-key``、请求体
+#: ``{"content": {"parts": [...]}}``、响应 ``embedding.values``、可选
+#: ``config.outputDimensionality`` 降维（默认 3072，可降到 1536/768/128）。
+DEFAULT_GEMINI_EMBEDDING_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2"
+
+#: ``provider=auto`` 时据主机名判定走 Gemini 协议的标记。
+GEMINI_EMBEDDING_HOST = "generativelanguage.googleapis.com"
+
+#: Gemini 的 API key 环境变量名（``MemoryConfig.embedding_api_key`` 之外的回退）。
+GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
 
 #: 嵌入请求超时（秒）。
 MEMORY_EMBEDDING_TIMEOUT = 30.0

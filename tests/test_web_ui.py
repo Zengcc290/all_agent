@@ -14,10 +14,9 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from memory import MemoryConfig, MemoryManager  # noqa: E402
+from memory import HashEmbedding, MemoryConfig, MemoryManager  # noqa: E402
 from web import create_app  # noqa: E402
 from web.app import app as module_app  # noqa: E402
-from web.support import HashEmbedding  # noqa: E402
 
 INDEX = Path(__file__).resolve().parent.parent / "web" / "static" / "index.html"
 

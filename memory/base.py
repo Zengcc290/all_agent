@@ -24,9 +24,16 @@ from constants import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_GEMINI_EMBEDDING_BASE_URL,
+    DEFAULT_GEMINI_EMBEDDING_MODEL,
     DEFAULT_MEMORY_DB_FILENAME,
+    GEMINI_API_KEY_ENV,
+    GEMINI_EMBEDDING_HOST,
     MEMORY_DEFAULT_TTL_SECONDS,
     MEMORY_EMBEDDING_DIMENSION,
+    MEMORY_EMBEDDING_DIMENSION_REMOTE,
+    MEMORY_EMBEDDING_PROVIDER_DEFAULT,
+    MEMORY_EMBEDDING_PROVIDERS,
     MEMORY_EMBEDDING_TIMEOUT,
     MEMORY_QDRANT_COLLECTION,
     MEMORY_SEARCH_LIMIT,
@@ -35,7 +42,14 @@ from constants import (
     MEMORY_WORKING_CAPACITY,
 )
 
-from .embedding import APIEmbedding, BaseEmbedding, EmbedServerEmbedding, HashEmbedding, load_dotenv_once
+from .embedding import (
+    APIEmbedding,
+    BaseEmbedding,
+    EmbedServerEmbedding,
+    GeminiEmbedding,
+    HashEmbedding,
+    load_dotenv_once,
+)
 
 if TYPE_CHECKING:
     from .storage import BaseDocumentStore, BaseVectorStore
@@ -61,28 +75,76 @@ def default_sqlite_path() -> str:
 def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
     """Build the default embedding service from a (possibly implicit) config.
 
-    Uses ``MemoryConfig.from_env()`` when no config is supplied.  A local embed
-    gateway configured via ``EMBEDDING_BASE_URL`` (a forwarded-port service
-    speaking the custom ``/embed`` protocol) takes precedence, then
-    ``DASHSCOPE_API_KEY`` activates qwen3-embedding-0.6b, and without either
-    the deterministic offline :class:`~memory.embedding.HashEmbedding` is used
-    instead of raising, so the memory layer, the agent tools and the web app
-    stay usable offline.  These vector spaces are not interchangeable; changing
-    the provider requires re-indexing stored items.
+    Uses ``MemoryConfig.from_env()`` when no config is supplied.  Selection:
+
+    1. ``embedding_provider`` forces a backend when it is not ``"auto"``;
+    2. otherwise a local embed gateway configured via ``EMBEDDING_BASE_URL`` (a
+       forwarded-port service speaking the custom ``/embed`` protocol) wins;
+    3. otherwise a key (``embedding_api_key`` / ``GEMINI_API_KEY`` /
+       ``DASHSCOPE_API_KEY``) activates a remote API - Gemini's ``:embedContent``
+       when the endpoint host or model says Gemini, the OpenAI-compatible
+       ``/embeddings`` shape otherwise;
+    4. without any key the deterministic offline
+       :class:`~memory.embedding.HashEmbedding` is used instead of raising, so the
+       memory layer, the agent tools and the web app stay usable offline.
+
+    These vector spaces are not interchangeable; changing the provider requires
+    re-indexing stored items (``scripts/reindex_embeddings.py``).
     """
     config = config if config is not None else MemoryConfig.from_env()
     load_dotenv_once()
-    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
-    if server_url:
+    provider = (config.embedding_provider or MEMORY_EMBEDDING_PROVIDER_DEFAULT).strip().casefold()
+
+    if provider == "hash":
+        return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
+
+    # 转发网关与离线兜底沿用 1024 维默认值：网关那头是固定的 qwen-embed 模型。
+    if provider == "gateway":
         return EmbedServerEmbedding(
-            base_url=server_url,
-            dimension=config.embedding_dimension,
+            base_url=config.embedding_base_url,
+            dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION,
             timeout=config.embedding_timeout,
             batch_size=config.embedding_batch_size,
         )
+    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
+    if provider == "auto" and server_url:
+        return EmbedServerEmbedding(
+            base_url=server_url,
+            dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION,
+            timeout=config.embedding_timeout,
+            batch_size=config.embedding_batch_size,
+        )
+
+    use_gemini = provider == "gemini" or (
+        provider == "auto"
+        and (
+            GEMINI_EMBEDDING_HOST in config.embedding_base_url
+            or config.embedding_model.startswith("gemini-")
+        )
+    )
+    if use_gemini:
+        api_key = config.embedding_api_key or os.getenv(GEMINI_API_KEY_ENV)
+        if not api_key or not str(api_key).strip():
+            return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
+        # 留下的类默认值（qwen 的模型名与本机网关地址）说明调用方没填，
+        # 这里补成 Gemini 的值，省得只配一个 key 还要把端点抄一遍。
+        model = config.embedding_model
+        if model == DEFAULT_EMBEDDING_MODEL:
+            model = DEFAULT_GEMINI_EMBEDDING_MODEL
+        base_url = config.embedding_base_url
+        if base_url == DEFAULT_EMBEDDING_BASE_URL:
+            base_url = DEFAULT_GEMINI_EMBEDDING_BASE_URL
+        return GeminiEmbedding(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            dimension=config.embedding_dimension,
+            timeout=config.embedding_timeout,
+        )
+
     api_key = config.embedding_api_key or os.getenv("DASHSCOPE_API_KEY")
     if not api_key or not str(api_key).strip():
-        return HashEmbedding(dimension=config.embedding_dimension)
+        return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
     return APIEmbedding(
         api_key=api_key,
         model=config.embedding_model,
@@ -245,10 +307,13 @@ class MemoryConfig:
     working_memory_capacity: int = MEMORY_WORKING_CAPACITY
     search_limit: int = MEMORY_SEARCH_LIMIT
     similarity_threshold: float = MEMORY_SIMILARITY_THRESHOLD
-    # qwen3-embedding-0.6b emits 1024-dimensional vectors.
-    embedding_dimension: int = MEMORY_EMBEDDING_DIMENSION
+    # 远端嵌入的期望维度。留空（None）= 不预设，首次响应里自动识别；转发网关与
+    # 离线兜底不受影响，仍用 MEMORY_EMBEDDING_DIMENSION（1024）。
+    embedding_dimension: int | None = MEMORY_EMBEDDING_DIMENSION_REMOTE
+    # 嵌入提供方；auto = 按 EMBEDDING_BASE_URL / 端点主机 / 模型名自动判定。
+    embedding_provider: str = MEMORY_EMBEDDING_PROVIDER_DEFAULT
     # Embedding provider settings; an API key may also come from the
-    # ``DASHSCOPE_API_KEY`` environment variable when left unset here.
+    # ``DASHSCOPE_API_KEY`` / ``GEMINI_API_KEY`` environment variables.
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embedding_base_url: str = DEFAULT_EMBEDDING_BASE_URL
     embedding_api_key: str | None = None
@@ -277,8 +342,15 @@ class MemoryConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= 1:
                 raise ValueError(f"{name} must be between 0 and 1")
-        if isinstance(self.embedding_dimension, bool) or not isinstance(self.embedding_dimension, int) or self.embedding_dimension < 1:
-            raise ValueError("embedding_dimension must be a positive integer")
+        if self.embedding_dimension is not None and (
+            isinstance(self.embedding_dimension, bool)
+            or not isinstance(self.embedding_dimension, int)
+            or self.embedding_dimension < 1
+        ):
+            raise ValueError("embedding_dimension must be a positive integer or None (learn from the response)")
+        if not isinstance(self.embedding_provider, str) or self.embedding_provider.strip().casefold() not in MEMORY_EMBEDDING_PROVIDERS:
+            raise ValueError(f"embedding_provider must be one of {', '.join(MEMORY_EMBEDDING_PROVIDERS)}")
+        self.embedding_provider = self.embedding_provider.strip().casefold()
         for name in ("embedding_model", "embedding_base_url"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -321,7 +393,10 @@ class MemoryConfig:
                 # embedding_base_url 这类「非空字符串」字段在 __post_init__
                 # 里抛 ValueError，使整个 from_env 不可用。
                 continue
-            if field_name in {"working_memory_capacity", "search_limit", "embedding_dimension", "embedding_batch_size"}:
+            if field_name == "embedding_dimension":
+                # auto / none / 0 = 不预设：维度由首次响应决定（换远端平台不用改这里）。
+                values[field_name] = None if raw.casefold() in {"auto", "none", "0"} else int(raw)
+            elif field_name in {"working_memory_capacity", "search_limit", "embedding_batch_size"}:
                 values[field_name] = int(raw)
             elif field_name in {"default_ttl_seconds", "similarity_threshold", "embedding_timeout"}:
                 values[field_name] = None if raw.casefold() == "none" else float(raw)
@@ -360,6 +435,18 @@ class BaseMemory:
         self.vector_store = vector_store if vector_store is not None else InMemoryVectorStore()
         self.embedding = embedding if embedding is not None else make_default_embedding(self.config)
         self.memory_type = MemoryType(memory_type or self.memory_type)
+
+    def _embed_item(self, content: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
+        """Embed one write, letting multimodal backends fold in ``payload``.
+
+        ``BaseEmbedding.embed_item`` is text-only; ``GeminiEmbedding`` overrides it
+        to embed images and fused image+text.  Injected embeddings that are not
+        ``BaseEmbedding`` subclasses fall back to plain ``embed``.
+        """
+        embed_item = getattr(self.embedding, "embed_item", None)
+        if callable(embed_item):
+            return embed_item(content, payload=payload, modality=modality)
+        return self.embedding.embed(content)
 
     def _validate_embedding_dimension(self, vector: list[float]) -> None:
         expected = getattr(self.embedding, "dimension", 0)
@@ -405,7 +492,7 @@ class BaseMemory:
             modality=modality,
             relations=list(relations or []),
         )
-        item.embedding = self.embedding.embed(item.content)
+        item.embedding = self._embed_item(item.content, payload=payload, modality=modality)
         self._validate_embedding_dimension(item.embedding)
         # Persist first so a vector backend failure cannot create an index entry
         # for a record that does not exist in the source of truth.
