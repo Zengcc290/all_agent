@@ -109,13 +109,25 @@ class RelationCandidate(BaseModel):
     action: Literal["assert", "supersede", "retract"] = "assert"
     #: single 表示该 (subject, predicate) 只能有一个当前值；multi 可并列累积。
     cardinality: Literal["single", "multi"] = "multi"
+    #: F4 时间/状态分类：关系成立/失效时间点与时间段，空值视为无界。
+    valid_from: str = Field(default="", max_length=60)
+    valid_to: str = Field(default="", max_length=60)
+    #: fact 现在成立 / plan 计划中 / expired 已失效 / uncertain 不确定（降权不排除）。
+    status: Literal["fact", "plan", "expired", "uncertain", ""] = "fact"
+    #: 事件发生时刻（区别于关系写入时刻）。
+    event_at: str = Field(default="", max_length=60)
     confidence: float = Field(default=0.75, ge=0, le=1)
     evidence: str = Field(default="", max_length=1200)
 
-    @field_validator("subject", "predicate", "object", "evidence", mode="before")
+    @field_validator("subject", "predicate", "object", "evidence", "valid_from", "valid_to", "event_at", mode="before")
     @classmethod
     def normalize_strings(cls, value: Any) -> str:
         return _clean_text(value, max_length=1200)
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value: Any) -> str:
+        return _clean_text(value, max_length=20) if value is not None else ""
 
 
 class ExtractionResult(BaseModel):
@@ -262,6 +274,85 @@ class LLMKnowledgeExtractor:
         if not isinstance(value, dict):
             raise TypeError("knowledge extraction response must be a JSON object")
         return value
+
+
+class QueryDecomposer(Protocol):
+    """F3：把一句话拆成多种待测查询（协议，与 KnowledgeExtractor 同构）。"""
+
+    def decompose(self, query: str) -> list[str]: ...
+
+
+class NullQueryDecomposer:
+    """LLM 不可用时的安全降级：永不因分解失败而答不出来，返回原句。"""
+
+    def decompose(self, query: str) -> list[str]:
+        return [query.strip()] if isinstance(query, str) and query.strip() else []
+
+
+class LLMQueryDecomposer:
+    """Decompose one question into multiple probe queries through the chat client."""
+
+    SYSTEM_PROMPT = (
+        "你是检索问句分解器。只输出一个合法 JSON 对象，不要 Markdown、解释或额外文字。\n"
+        "任务：把用户的问句拆成若干更短的待测查询，交给检索工具分别执行后融合。\n"
+        "\n"
+        "【要求】\n"
+        "1. sub_queries 里每项是一条更短的查询；第一条必须是原句本身。\n"
+        "2. 最多 6 条；去重；不要添加原文没有的实体或数字。\n"
+        "3. 针对关系词、别称、上位词各给一条变体（如「小红的亲戚是谁」→「小红」、"
+        "「小红 亲戚」、「小红 亲属 关系」）。\n"
+        "\n"
+        "字段格式：{\"sub_queries\": string[]}。"
+    )
+
+    MAX_SUB_QUERIES = 6
+
+    def __init__(
+        self,
+        complete: Callable[..., Any],
+        *,
+        model: str | None = None,
+        timeout: float = 60.0,
+    ) -> None:
+        if not callable(complete):
+            raise TypeError("complete must be callable")
+        self.complete = complete
+        self.model = model
+        self.timeout = timeout
+
+    def decompose(self, query: str) -> list[str]:
+        if not isinstance(query, str) or not query.strip():
+            return []
+        messages = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps({"query": query}, ensure_ascii=False)},
+        ]
+        try:
+            response = self.complete(
+                messages,
+                model=self.model,
+                temperature=0.0,
+                timeout=self.timeout,
+                stream=False,
+            )
+            raw = LLMKnowledgeExtractor._content(response)
+            value = LLMKnowledgeExtractor._parse_json(raw)
+        except Exception:  # noqa: BLE001 - 分解失败也不能丢原句（永不因分解失败而答不出来）
+            return [query]
+        return self._normalize(query, value)
+
+    def _normalize(self, query: str, value: dict[str, Any]) -> list[str]:
+        """原句永远第一条；去重、截断——分解失败也不能丢原句。"""
+
+        items = value.get("sub_queries") if isinstance(value, dict) else None
+        if not isinstance(items, list):
+            return [query]
+        cleaned = [
+            _clean_text(item, max_length=500)
+            for item in items
+            if isinstance(item, str) and _clean_text(item, max_length=500)
+        ]
+        return [query, *dict.fromkeys(cleaned)][: self.MAX_SUB_QUERIES]
 
 
 def _entity_similarity(left: str, right: str, aliases: list[str] | None = None) -> float:
@@ -647,6 +738,11 @@ def materialize_extraction(
             "predicate_key": predicate_key_for(subject, candidate.predicate),
             "action": candidate.action,
             "cardinality": candidate.cardinality,
+            # F4：时间/状态透传，空值由检索侧视为无界/默认。
+            "valid_from": candidate.valid_from,
+            "valid_to": candidate.valid_to,
+            "status": candidate.status or "fact",
+            "event_at": candidate.event_at,
             "active": True,
             "superseded_by": [],
             "superseded_at": "",

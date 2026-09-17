@@ -144,8 +144,10 @@ class RAGPipeline:
             self._repository = DocumentRepository(path)
         return self._repository
 
-    def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP) -> list[MemoryItem]:
+    def ingest(self, documents: Document | Iterable[Document], *, chunk_size: int = RAG_CHUNK_SIZE, overlap: int = RAG_CHUNK_OVERLAP, granularity: str = "chunk") -> list[MemoryItem]:
         values = [documents] if isinstance(documents, Document) else list(documents)
+        if granularity not in {"chunk", "sentences"}:
+            raise ValueError("granularity must be 'chunk' or 'sentences'")
         items: list[MemoryItem] = []
         report = {
             "chunks": 0,
@@ -177,7 +179,14 @@ class RAGPipeline:
                     )
                 )
             document_error: str | None = None
-            for span in self.processor.chunks_with_spans(document, chunk_size=chunk_size, overlap=overlap):
+            # F4：granularity="sentences" 逐句切块（每句一条记录）；默认仍是字符
+            # 窗口块，保持向后兼容。句级也写真值源 chunks，不新建表。
+            spans = (
+                self.processor.sentences_with_spans(document)
+                if granularity == "sentences"
+                else self.processor.chunks_with_spans(document, chunk_size=chunk_size, overlap=overlap)
+            )
+            for span in spans:
                 chunk = span.chunk
                 metadata = dict(chunk.metadata)
                 metadata.setdefault("source", source)
@@ -332,6 +341,57 @@ class RAGPipeline:
                 )
         return results
 
+    def hybrid_retrieve_multi(self, queries: list[str], *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
+        """F3：每条子查询各跑向量+关键词路，N 路 rank 列表一起丢给 RRF 融合。"""
+
+        queries = [query for query in queries if isinstance(query, str) and query.strip()]
+        if not queries:
+            return []
+        if len(queries) == 1:
+            return self.hybrid_retrieve(queries[0], limit=limit, threshold=threshold, metadata=metadata)
+        repository = self.document_repo()
+        if not _hybrid_enabled() or repository is None:
+            results: list[RetrievedChunk] = []
+            seen: set[str] = set()
+            for query in queries:
+                for chunk in self.retrieve(query, limit=limit, threshold=threshold, metadata=metadata):
+                    if chunk.memory_id in seen:
+                        continue
+                    seen.add(chunk.memory_id)
+                    results.append(chunk)
+            return results[:limit]
+        self.last_retrieval_note = ""
+        vector_rank_lists: list[list[str]] = []
+        keyword_rank_lists: list[list[str]] = []
+        vector_scores: dict[str, float] = {}
+        keyword_scores: dict[str, float] = {}
+        for query in queries:
+            vector_hits = self._vector_hits(query, limit=limit * 2, threshold=threshold, metadata=metadata)
+            keyword_hits = [
+                (chunk_id, float(score))
+                for chunk_id, score in repository.search_keywords(query, limit=limit * 2)
+            ]
+            vector_rank_lists.append([chunk_id for chunk_id, _ in vector_hits])
+            keyword_rank_lists.append([chunk_id for chunk_id, _ in keyword_hits])
+            vector_scores.update(vector_hits)
+            keyword_scores.update(keyword_hits)
+        fused = _rrf_fuse([*(vector_rank_lists), *(keyword_rank_lists)])[:limit]
+        results = []
+        for chunk_id, score in fused:
+            chunk = repository.get_chunk(chunk_id)
+            if chunk is not None:  # 真值源没有的分块不返回（孤立向量不外泄）
+                results.append(
+                    RetrievedChunk(
+                        chunk.text, score, chunk.chunk_id, _chunk_metadata(chunk),
+                        detail={
+                            "rrf_score": float(score),
+                            "vector_score": vector_scores.get(chunk_id),
+                            "keyword_score": keyword_scores.get(chunk_id),
+                        },
+                    )
+                )
+        return results
+
     def build_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, separator: str = "\n\n") -> str:
         if not isinstance(separator, str):
             raise TypeError("separator must be a string")
@@ -339,6 +399,11 @@ class RAGPipeline:
 
     def graph_retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS) -> GraphRAGResult:
         return self.graph.retrieve(query, limit=limit, hops=hops)
+
+    def graph_retrieve_multi(self, queries: list[str], *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS) -> GraphRAGResult:
+        """F3：多路图检索（分解后的子查询分别查，路径融合）。"""
+
+        return self.graph.retrieve_multi(queries, limit=limit, hops=hops)
 
     def graph_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS, max_chars: int = RAG_CONTEXT_MAX_CHARS) -> str:
         return self.graph.build_context(query, limit=limit, hops=hops, max_chars=max_chars)

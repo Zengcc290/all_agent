@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 from constants import (
+    MEMORY_EDGE_REINFORCE_ENV,
     RAG_CONTEXT_MAX_CHARS,
     RAG_GRAPH_HOPS,
     RAG_GRAPH_MAX_HOPS,
@@ -26,6 +28,10 @@ class GraphPath:
     entities: tuple[str, ...]
     confidence: float = 0.0
     evidence: tuple[dict[str, Any], ...] = ()
+    #: F1 权重感知排序分（confidence × 边权重沿路径取最小）；不影响 to_dict 负载。
+    effective: float = 0.0
+    #: 路径的真实边 ``{source, relation, target}``，供回忆强化按边递增；不进 to_dict。
+    steps: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +134,43 @@ class GraphRAGPipeline:
             max_chars=max_chars
         )
 
+    def retrieve_multi(
+        self,
+        queries: list[str],
+        *,
+        limit: int = RAG_RETRIEVE_LIMIT,
+        hops: int = RAG_GRAPH_HOPS,
+        threshold: float | None = None,
+        path_limit: int = RAG_GRAPH_PATH_LIMIT,
+    ) -> GraphRAGResult:
+        """F3：每条子查询各做 seed+expand，路径按 effective 合并去重。"""
+
+        queries = [query for query in queries if isinstance(query, str) and query.strip()]
+        if not queries:
+            raise ValueError("queries must be a non-empty list of strings")
+        if len(queries) == 1:
+            return self.retrieve(queries[0], limit=limit, hops=hops, threshold=threshold, path_limit=path_limit)
+        evidence: dict[str, MemorySearchResult] = {}
+        paths: dict[tuple[tuple[str, ...], tuple[str, ...]], GraphPath] = {}
+        seeds: list[str] = []
+        for query in queries:
+            result = self.retrieve(query, limit=limit, hops=hops, threshold=threshold, path_limit=path_limit)
+            for item in result.evidence:
+                evidence.setdefault(item.item.id, item)
+            seeds.extend(result.entities)
+            for path in result.paths:
+                key = (path.entities, path.relations)
+                existing = paths.get(key)
+                if existing is None or path.effective > existing.effective:
+                    paths[key] = path
+        merged = sorted(paths.values(), key=lambda path: (-path.effective, len(path.relations), path.target))[:path_limit]
+        return GraphRAGResult(
+            query=" | ".join(queries),
+            evidence=list(evidence.values())[:limit],
+            paths=merged,
+            entities=list(dict.fromkeys(seeds)),
+        )
+
     def _find_seed_entities(
         self, query: str, evidence: list[MemorySearchResult]
     ) -> list[str]:
@@ -165,6 +208,7 @@ class GraphRAGPipeline:
     ) -> list[GraphPath]:
         if hops == 0 or not seeds:
             return []
+        reinforce = self._reinforce_enabled()
         paths: list[GraphPath] = []
         queue: deque[
             tuple[
@@ -174,14 +218,18 @@ class GraphRAGPipeline:
                 tuple[dict[str, Any], ...],
                 int,
                 float,
+                float,
+                tuple[dict[str, Any], ...],
             ]
-        ] = deque((seed, (seed,), (), (), 0, 1.0) for seed in seeds)
+        ] = deque(
+            (seed, (seed,), (), (), 0, 1.0, 1.0, ()) for seed in seeds
+        )
         visited: set[tuple[str, tuple[str, ...]]] = set()
         while queue and len(paths) < path_limit:
-            current, entities, relations, evidence, depth, confidence = queue.popleft()
+            current, entities, relations, evidence, depth, confidence, effective, steps = queue.popleft()
             if depth >= hops:
                 continue
-            for edge in self.manager.semantic.related(current):
+            for edge in self._weighted_edges(current):
                 source = str(edge.get("source") or current)
                 target = str(edge.get("target") or current)
                 neighbor = target if source == current else source
@@ -193,7 +241,20 @@ class GraphRAGPipeline:
                 # hold the pre-retirement flag, so check the memory record too.
                 if props.get("active") is False or not self._edge_is_active(props):
                     continue
+                # F4：时间/状态过滤。时间段空值视为无界；status 默认只要
+                # fact/plan（uncertain 降权而非排除，expired 不命中）。
+                if not self._edge_in_window(props):
+                    continue
                 edge_confidence = float(props.get("confidence", 0.0) or 0.0)
+                edge_status = str(props.get("status") or "fact")
+                if edge_status == "expired":
+                    continue
+                if edge_status == "uncertain":
+                    edge_confidence *= 0.5
+                # F1：边权重让被反复回忆的边在排序中靠前；全部权重为 1.0 时
+                # effective 退化为原来的 confidence 语义。
+                edge_weight = float(props.get("weight", 1.0) or 1.0)
+                edge_effective = edge_confidence * edge_weight
                 next_entities = (*entities, neighbor)
                 next_relations = (*relations, relation)
                 marker = (neighbor, next_relations)
@@ -203,7 +264,12 @@ class GraphRAGPipeline:
                     continue
                 visited.add(marker)
                 next_confidence = min(confidence, edge_confidence or confidence)
+                next_effective = min(effective, edge_effective or effective)
                 next_evidence = (*evidence, props)
+                next_steps = (
+                    *steps,
+                    {"source": source, "relation": relation, "target": target},
+                )
                 paths.append(
                     GraphPath(
                         source=entities[0],
@@ -212,6 +278,8 @@ class GraphRAGPipeline:
                         entities=next_entities,
                         confidence=next_confidence,
                         evidence=next_evidence,
+                        effective=next_effective,
+                        steps=next_steps,
                     )
                 )
                 queue.append(
@@ -222,12 +290,52 @@ class GraphRAGPipeline:
                         next_evidence,
                         depth + 1,
                         next_confidence,
+                        next_effective,
+                        next_steps,
                     )
                 )
         paths.sort(
-            key=lambda item: (-item.confidence, len(item.relations), item.target)
+            key=lambda item: (-item.effective, len(item.relations), item.target)
         )
-        return paths[:path_limit]
+        adopted = paths[:path_limit]
+        if reinforce:
+            self._reinforce(adopted)
+        return adopted
+
+    def _weighted_edges(self, entity: str) -> list[dict[str, Any]]:
+        """Edges around ``entity`` with the strongest first (F1 权重优先遍历)."""
+
+        edges = self.manager.semantic.related(entity)
+        edges.sort(
+            key=lambda edge: float(
+                (edge.get("properties") or {}).get("weight", 1.0) or 1.0
+            ),
+            reverse=True,
+        )
+        return edges
+
+    def _reinforce_enabled(self) -> bool:
+        """F1 总开关（环境变量）；默认开启，置 0/false/off/no 还原旧行为。"""
+
+        return os.getenv(MEMORY_EDGE_REINFORCE_ENV, "").strip().casefold() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }
+
+    def _reinforce(self, paths: list[GraphPath]) -> None:
+        """"回忆即强化"：对本次真正返回的路径边各 +1 次回忆（每条边每轮一次）。"""
+
+        bumped: set[tuple[str, str, str]] = set()
+        add_relation = self.manager.semantic.graph_store.add_relation
+        for path in paths:
+            for step in path.steps:
+                key = (step["source"], step["relation"], step["target"])
+                if key in bumped:
+                    continue
+                bumped.add(key)
+                add_relation(*key, bump=True)
 
     def _edge_is_active(self, properties: dict[str, Any]) -> bool:
         """Confirm an edge against its memory record before it carries a hop."""
@@ -239,6 +347,28 @@ class GraphRAGPipeline:
         if item is None:
             return False
         return item.metadata.get("active", True) is not False
+
+    def _edge_in_window(self, properties: dict[str, Any]) -> bool:
+        """F4 时间段过滤：``valid_from <= now <= valid_to``，空值视为无界。"""
+
+        from ..base import ensure_datetime, utc_now
+
+        now = utc_now()
+        for key in ("valid_from", "valid_to"):
+            raw = str(properties.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                bound = ensure_datetime(raw)
+            except (TypeError, ValueError):
+                return True  # 畸形时间不静默丢边，交给 status/active 判断
+            if bound is None:
+                continue
+            if key == "valid_from" and now < bound:
+                return False
+            if key == "valid_to" and now > bound:
+                return False
+        return True
 
 
 __all__ = ["GraphPath", "GraphRAGPipeline", "GraphRAGResult"]

@@ -69,7 +69,7 @@ class DocumentRepository:
     connection so tests can use a scratch database.
     """
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(self, path: str | Path = ":memory:", *, connection: sqlite3.Connection | None = None) -> None:
         self.path = ":memory:" if str(path) == ":memory:" else str(Path(path).expanduser())
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,11 @@ class DocumentRepository:
         self._connection: sqlite3.Connection | None = None
         #: ``trigram`` / ``unicode61``，FTS5 不可用时为 ``None``（检索退化为纯向量）。
         self.fts_tokenizer: str | None = None
-        if self.path == ":memory:":
+        if connection is not None:
+            # F2：注入的 ``:memory:`` 连接（与 ``memories`` 同库复用），仅测试用。
+            self._connection = connection
+            self._connection.row_factory = sqlite3.Row
+        elif self.path == ":memory:":
             self._connection = sqlite3.connect(self.path, check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
         self._initialize()
@@ -134,6 +138,22 @@ class DocumentRepository:
                 """
             )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id)")
+            # F2：待确认删除提议（LLM 先提议、用户确认后才真删）。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS delete_proposals (
+                    proposal_id   TEXT PRIMARY KEY,
+                    created_at    TEXT NOT NULL,
+                    expires_at    TEXT NOT NULL,
+                    requested_by  TEXT NOT NULL,
+                    reason        TEXT NOT NULL,
+                    item_ids      TEXT NOT NULL,
+                    status        TEXT NOT NULL DEFAULT 'pending',
+                    confirmed_at  TEXT,
+                    confirm_token TEXT
+                )
+                """
+            )
             self._initialize_fts(connection)
 
     def _initialize_fts(self, connection: sqlite3.Connection) -> None:
@@ -431,12 +451,202 @@ class DocumentRepository:
         )
 
 
+#: F2 ``delete_proposals.status`` 状态机。
+DELETION_PROPOSAL_STATUSES = ("pending", "confirmed", "rejected", "expired")
+#: F2 提议默认有效期（分钟）；过期后确认被拒绝。
+DELETION_PROPOSAL_TTL_MINUTES = 15
+
+
+@dataclass
+class DeletionProposal:
+    """One pending deletion: what to remove, who asked, until when."""
+
+    proposal_id: str
+    created_at: str
+    expires_at: str
+    requested_by: str
+    reason: str
+    item_ids: list[str]
+    status: str = "pending"
+    confirmed_at: str = ""
+    confirm_token: str = ""
+
+
+class DeletionProposalStore:
+    """CRUD for ``delete_proposals`` on the shared memory SQLite file.
+
+    Mirrors :class:`DocumentRepository`'s connection/locking model. The store
+    only records proposals — it never deletes memories itself; execution goes
+    through :meth:`execute_deletion` after the user confirms.
+    """
+
+    def __init__(self, path: str | Path = ":memory:", *, connection: sqlite3.Connection | None = None) -> None:
+        self._repo = DocumentRepository(path, connection=connection)
+
+    @property
+    def path(self) -> str:
+        return self._repo.path
+
+    def create(self, *, requested_by: str, reason: str, item_ids: list[str], ttl_minutes: int = DELETION_PROPOSAL_TTL_MINUTES) -> DeletionProposal:
+        if not isinstance(requested_by, str) or not requested_by.strip():
+            raise ValueError("requested_by must be a non-empty string")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        if not item_ids or not all(isinstance(value, str) and value.strip() for value in item_ids):
+            raise ValueError("item_ids must be a non-empty list of item ids")
+        if isinstance(ttl_minutes, bool) or not isinstance(ttl_minutes, int) or ttl_minutes < 1:
+            raise ValueError("ttl_minutes must be a positive integer")
+        now = utc_now()
+        from datetime import timedelta
+        from uuid import uuid4
+
+        token = uuid4().hex[:8].upper()
+        proposal = DeletionProposal(
+            proposal_id=str(uuid4()),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=ttl_minutes)).isoformat(),
+            requested_by=requested_by,
+            reason=reason,
+            item_ids=list(dict.fromkeys(item_ids)),
+            confirm_token=token,
+        )
+        with self._repo._connection_scope() as connection:
+            connection.execute(
+                """
+                INSERT INTO delete_proposals
+                (proposal_id, created_at, expires_at, requested_by, reason, item_ids, status, confirmed_at, confirm_token)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?)
+                """,
+                (
+                    proposal.proposal_id,
+                    proposal.created_at,
+                    proposal.expires_at,
+                    proposal.requested_by,
+                    proposal.reason,
+                    json.dumps(proposal.item_ids, ensure_ascii=False),
+                    proposal.confirm_token,
+                ),
+            )
+        return proposal
+
+    def get(self, proposal_id: str) -> DeletionProposal | None:
+        """One proposal; a pending one past ``expires_at`` is marked expired."""
+
+        with self._repo._connection_scope() as connection:
+            row = connection.execute(
+                "SELECT * FROM delete_proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        proposal = self._decode(row)
+        if proposal.status == "pending" and utc_now().isoformat() > proposal.expires_at:
+            self._set_status(proposal_id, "expired")
+            proposal.status = "expired"
+        return proposal
+
+    def _set_status(self, proposal_id: str, status: str, confirmed_at: str = "") -> None:
+        with self._repo._connection_scope() as connection:
+            connection.execute(
+                "UPDATE delete_proposals SET status = ?, confirmed_at = ? WHERE proposal_id = ?",
+                (status, confirmed_at or None, proposal_id),
+            )
+
+    def confirm(self, proposal_id: str, token: str) -> DeletionProposal:
+        """Mark a pending, unexpired proposal confirmed (token must match).
+
+        Returns the confirmed proposal; raises ``ValueError`` for a missing,
+        expired, already-confirmed or wrongly-tokened proposal — fail closed.
+        """
+
+        proposal = self.get(proposal_id)
+        if proposal is None:
+            raise ValueError(f"unknown proposal: {proposal_id}")
+        if proposal.status == "expired":
+            raise ValueError("proposal has expired")
+        if proposal.status != "pending":
+            raise ValueError(f"proposal is not pending (status={proposal.status})")
+        if not token or token != proposal.confirm_token:
+            raise ValueError("confirmation token does not match")
+        confirmed_at = utc_now().isoformat()
+        self._set_status(proposal_id, "confirmed", confirmed_at)
+        proposal.status = "confirmed"
+        proposal.confirmed_at = confirmed_at
+        return proposal
+
+    @staticmethod
+    def _decode(row: sqlite3.Row) -> DeletionProposal:
+        return DeletionProposal(
+            proposal_id=row["proposal_id"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            requested_by=row["requested_by"],
+            reason=row["reason"],
+            item_ids=json.loads(row["item_ids"]),
+            status=row["status"],
+            confirmed_at=row["confirmed_at"] or "",
+            confirm_token=row["confirm_token"] or "",
+        )
+
+    def close(self) -> None:
+        self._repo.close()
+
+
+def execute_deletion(proposal_id: str, token: str, manager: Any) -> dict[str, Any]:
+    """Execute one confirmed deletion proposal against the memory manager.
+
+    The gate is the store: only a pending, unexpired proposal with a matching
+    token executes, and repeating the same proposal never deletes twice
+    (idempotent). Semantic facts are hard-deleted through
+    ``SemanticMemory.delete`` (which also removes the Neo4j edge); an episodic
+    audit record preserves who deleted what and why.
+    """
+
+    from ..manager import MemoryManager
+
+    if not isinstance(manager, MemoryManager):
+        raise TypeError("manager must be a MemoryManager")
+    # ``:memory:`` 时与 memories 同库复用同一条连接（否则提议写进去、执行端读不到）；
+    # 文件库传 None，走普通路径连接。
+    connection = getattr(manager.document_store, "connection", None)
+    store = DeletionProposalStore(manager.document_store.path, connection=connection)
+    proposal = store.get(proposal_id)
+    if proposal is None:
+        raise ValueError(f"unknown proposal: {proposal_id}")
+    if proposal.status == "confirmed":
+        # 幂等：重复确认同一 proposal 直接返回既有结果，不重复删。
+        return {"deleted": [], "already_confirmed": True, "proposal_id": proposal_id}
+    store.confirm(proposal_id, token)
+    deleted: list[str] = []
+    for item_id in proposal.item_ids:
+        item = manager.get(item_id)
+        memory_type = item.memory_type if item is not None else None
+        if manager.delete(item_id, memory_type=memory_type):
+            deleted.append(item_id)
+    manager.add(
+        f"已删除 {len(deleted)} 条记忆（提议 {proposal_id[:8]}）：{proposal.reason}",
+        memory_type="episodic",
+        metadata={
+            "kind": "deletion_audit",
+            "proposal_id": proposal_id,
+            "deleted_ids": deleted,
+            "requested_by": proposal.requested_by,
+            "reason": proposal.reason,
+        },
+    )
+    return {"deleted": deleted, "already_confirmed": False, "proposal_id": proposal_id}
+
+
 __all__ = [
     "CHUNK_VECTOR_STATUSES",
+    "DELETION_PROPOSAL_STATUSES",
+    "DELETION_PROPOSAL_TTL_MINUTES",
     "DOCUMENT_STATUSES",
     "FTS_TOKENIZERS",
     "PERMISSIONS",
     "ChunkRecord",
+    "DeletionProposal",
+    "DeletionProposalStore",
     "DocumentRecord",
     "DocumentRepository",
+    "execute_deletion",
 ]

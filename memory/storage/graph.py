@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from operator import itemgetter
 from typing import Any
+
+from constants import MEMORY_EDGE_WEIGHT_GROWTH, MEMORY_EDGE_WEIGHT_MAX
 
 
 class Neo4jGraphStore:
@@ -46,12 +49,17 @@ class Neo4jGraphStore:
         target_aliases: list[str] | None = None,
         source_importance: float = 0.5,
         target_importance: float = 0.5,
+        bump: bool = False,
     ) -> None:
         if not all(
             isinstance(value, str) and value.strip()
             for value in (source, relation, target)
         ):
             raise ValueError("source, relation and target must be non-empty strings")
+        if bump:
+            # F1 回忆强化：只动已存在边的计数/权重，不写实体、不造边。
+            self._bump_relation(source, relation, target)
+            return
         props = dict(properties or {})
         if self.driver is None:
             edges = self._local.setdefault(source, [])
@@ -68,7 +76,14 @@ class Neo4jGraphStore:
                     "source": source,
                     "relation": relation,
                     "target": target,
-                    "properties": props,
+                    "properties": {
+                        **props,
+                        # F1：计数/权重由存储层在创建时给默认值，写入方（抽取
+                        # 管道）不传它们——否则幂等重写会把计数清零。
+                        "weight": 1.0,
+                        "recall_count": 0,
+                        "last_accessed_at": "",
+                    },
                 }
                 edges.append(edge)
                 self._reverse.setdefault(target, []).append((source, edge))
@@ -78,7 +93,9 @@ class Neo4jGraphStore:
             self._merge_entity(target, target_domain, target_aliases, target_importance)
             return
         # ON MATCH 只更新别名：实体的 domain/importance 由首次创建它的那次抽取决定，
-        # 后续边写入不该把它们覆盖成空值。
+        # 后续边写入不该把它们覆盖成空值。weight/recall_count 只在 ON CREATE 给
+        # 默认值（F1）：SET r += $properties 是覆盖语义，常规写入碰它们会把
+        # 已累计的回忆计数清零。
         query = (
             "MERGE (a:MemoryEntity {name: $source}) "
             "ON CREATE SET a.domain = $source_domain, a.aliases = $source_aliases, a.importance = $source_importance "
@@ -86,7 +103,9 @@ class Neo4jGraphStore:
             "MERGE (b:MemoryEntity {name: $target}) "
             "ON CREATE SET b.domain = $target_domain, b.aliases = $target_aliases, b.importance = $target_importance "
             "ON MATCH SET b.aliases = CASE WHEN size($target_aliases) = 0 THEN b.aliases ELSE $target_aliases END "
-            "MERGE (a)-[r:RELATED {kind: $relation}]->(b) SET r += $properties"
+            "MERGE (a)-[r:RELATED {kind: $relation}]->(b) "
+            "ON CREATE SET r += $properties, r.weight = 1.0, r.recall_count = 0, r.last_accessed_at = '' "
+            "ON MATCH SET r += $properties"
         )
         with self.driver.session(database=self.database) as session:
             session.run(
@@ -118,6 +137,51 @@ class Neo4jGraphStore:
             }
         elif known:
             entity["aliases"] = known
+
+    def _bump_relation(self, source: str, relation: str, target: str) -> bool:
+        """F1 回忆强化：给已存在的边 +1 次回忆、权重×增长倍数（有上限）。
+
+        边不存在时什么都不做——强化不能凭空造边。返回是否真的强化了一条边。
+        """
+
+        from ..base import utc_now
+
+        accessed_at = utc_now().isoformat()
+        if self.driver is None:
+            for edge in self._local.get(source, []):
+                if edge["relation"] == relation and edge["target"] == target:
+                    self._apply_bump(edge["properties"], accessed_at)
+                    return True
+            return False
+        query = (
+            "MATCH (a:MemoryEntity {name: $source})-[r:RELATED {kind: $relation}]->(b:MemoryEntity {name: $target}) "
+            "SET r.recall_count = coalesce(r.recall_count, 0) + 1, "
+            "r.last_accessed_at = $accessed_at, "
+            "r.weight = CASE "
+            "WHEN coalesce(r.weight, 1.0) * $grow_factor > $weight_max THEN $weight_max "
+            "ELSE coalesce(r.weight, 1.0) * $grow_factor END "
+            "RETURN 1 AS bumped"
+        )
+        with self.driver.session(database=self.database) as session:
+            record = session.run(
+                query,
+                source=source,
+                relation=relation,
+                target=target,
+                accessed_at=accessed_at,
+                grow_factor=MEMORY_EDGE_WEIGHT_GROWTH,
+                weight_max=MEMORY_EDGE_WEIGHT_MAX,
+            ).single()
+        return record is not None
+
+    @staticmethod
+    def _apply_bump(properties: dict[str, Any], accessed_at: str) -> None:
+        """In-memory twin of the Cypher bump clauses."""
+
+        properties["recall_count"] = int(properties.get("recall_count", 0) or 0) + 1
+        properties["last_accessed_at"] = accessed_at
+        grown = float(properties.get("weight", 1.0) or 1.0) * MEMORY_EDGE_WEIGHT_GROWTH
+        properties["weight"] = min(grown, MEMORY_EDGE_WEIGHT_MAX)
 
     def entity(self, name: str) -> dict[str, Any]:
         """Entity attributes: 别名 / 领域 / 重要度。
@@ -224,8 +288,9 @@ class Neo4jGraphStore:
     ) -> list[dict[str, Any]]:
         """Simple paths between two entities, up to ``max_depth`` hops.
 
-        Each result is ``{"entities": [...], "relations": [{source, relation, target}, ...]}``;
-        the in-memory fallback mirrors what the Cypher returns.
+        Each result is ``{"entities": [...], "relations": [{source, relation, target, weight}, ...]}``;
+        the in-memory fallback mirrors what the Cypher returns. Results are
+        ordered by total path weight (F1) — reinforced paths come first.
         """
 
         if not all(
@@ -239,10 +304,13 @@ class Neo4jGraphStore:
         if self.driver is None:
             return self._local_paths(start, target, max_depth=max_depth, limit=limit)
         # 变长区间的上界不能参数化，只能拼进语句；已用 int() 收敛为整数。
+        # path_weight 用 reduce 累加边权重（F1），让 LIMIT 截断发生在权重排序之后。
         query = (
             f"MATCH p=(a:MemoryEntity {{name: $start}})-[*1..{int(max_depth)}]-(b:MemoryEntity {{name: $target}}) "
             "RETURN [n IN nodes(p) | n.name] AS entities, "
-            "[r IN relationships(p) | {source: startNode(r).name, relation: r.kind, target: endNode(r).name}] AS relations "
+            "[r IN relationships(p) | {source: startNode(r).name, relation: r.kind, target: endNode(r).name, weight: coalesce(r.weight, 1.0)}] AS relations, "
+            "reduce(w = 0.0, r IN relationships(p) | w + coalesce(r.weight, 1.0)) AS path_weight "
+            "ORDER BY path_weight DESC, length(p) ASC "
             "LIMIT $limit"
         )
         with self.driver.session(database=self.database) as session:
@@ -254,17 +322,19 @@ class Neo4jGraphStore:
                 for record in session.run(query, start=start, target=target, limit=limit)
             ]
 
-    def _neighbours(self, entity: str) -> list[tuple[str, str, bool]]:
-        """``(other_end, relation, is_outgoing)`` for every edge touching ``entity``."""
+    def _neighbours(self, entity: str) -> list[tuple[str, str, bool, float]]:
+        """``(other_end, relation, is_outgoing, weight)`` for every edge at ``entity``."""
 
         values = [
-            (edge["target"], edge["relation"], True)
+            (edge["target"], edge["relation"], True, float(edge["properties"].get("weight", 1.0) or 1.0))
             for edge in self._local.get(entity, [])
         ]
         values += [
-            (source, edge["relation"], False)
+            (source, edge["relation"], False, float(edge["properties"].get("weight", 1.0) or 1.0))
             for source, edge in self._reverse.get(entity, [])
         ]
+        # 权重优先：强边先入队，limit 截断时留下的是更强的路径（F1）。
+        values.sort(key=itemgetter(3), reverse=True)
         return values
 
     def _local_paths(
@@ -273,18 +343,19 @@ class Neo4jGraphStore:
         """BFS over simple paths; shortest paths come first because it is a queue."""
 
         paths: list[dict[str, Any]] = []
-        queue: list[tuple[str, list[str], list[dict[str, str]]]] = [(start, [start], [])]
+        queue: list[tuple[str, list[str], list[dict[str, Any]]]] = [(start, [start], [])]
         while queue and len(paths) < limit:
             node, entities, relations = queue.pop(0)
             if len(relations) >= max_depth:
                 continue
-            for other, relation, outgoing in self._neighbours(node):
+            for other, relation, outgoing, weight in self._neighbours(node):
                 if other in entities:  # 简单路径：不重复经过同一实体，天然无环
                     continue
                 step = {
                     "source": node if outgoing else other,
                     "relation": relation,
                     "target": other if outgoing else node,
+                    "weight": weight,
                 }
                 if other == target:
                     paths.append(

@@ -186,6 +186,21 @@ RAG_GRAPH_PATH_LIMIT = 20
 RAG_CONTEXT_MAX_CHARS = 12000
 
 # ---------------------------------------------------------------------------
+# F1 边强化（"回忆即强化"）
+#   所在文件：memory/storage/graph.py（边递增）、memory/rag/graph_rag.py（排序与触发）
+# ---------------------------------------------------------------------------
+
+#: 一次「回忆」把边权重乘以的倍数（weight 初始为 1.0）。
+MEMORY_EDGE_WEIGHT_GROWTH = 1.5
+
+#: 边权重上限：防止"富者越富"把热门边推到无穷大。
+MEMORY_EDGE_WEIGHT_MAX = 8.0
+
+#: F1 边强化总开关的环境变量名。默认开启；置 0/false/off/no 时检索完全不
+#: 触发递增、排序退回纯 confidence——用于还原旧行为与回归对照。
+MEMORY_EDGE_REINFORCE_ENV = "HELLOAGENTS_MEMORY_EDGE_REINFORCE"
+
+# ---------------------------------------------------------------------------
 # 知识抽取（memory/rag/knowledge.py）
 #   所在文件：memory/rag/knowledge.py
 # ---------------------------------------------------------------------------

@@ -117,6 +117,11 @@ class SemanticMemory(BaseMemory):
             "superseded_by",
             "superseded_at",
             "supersedes",
+            # F4：时间/状态分类随边落地 Neo4j（SET r += $properties 自动带上）。
+            "valid_from",
+            "valid_to",
+            "status",
+            "event_at",
         ):
             if key in metadata:
                 properties[key] = metadata[key]

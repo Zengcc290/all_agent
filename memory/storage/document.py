@@ -45,6 +45,17 @@ class SQLiteDocumentStore(BaseDocumentStore):
             self._connection.row_factory = sqlite3.Row
         self._initialize()
 
+    @property
+    def connection(self) -> sqlite3.Connection | None:
+        """The pinned ``:memory:`` connection, or ``None`` for file-backed stores.
+
+        F2 的待确认删除表与 ``memories`` 同居一个 SQLite 文件；``:memory:``
+        的情况下两个私有连接不共享数据，所以同库的第二个存储类必须复用
+        这一条连接，否则提议写进去、执行端读不到。
+        """
+
+        return self._connection
+
     def _connect(self) -> sqlite3.Connection:
         if self._connection is not None:
             return self._connection

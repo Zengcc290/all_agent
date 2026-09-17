@@ -109,6 +109,62 @@ class DocumentProcessor:
                 break
         return result
 
+    def sentences_with_spans(self, document: Document) -> list[ChunkSpan]:
+        """Split ``document`` into sentences and keep each one's character range.
+
+        F4：逐句导入用。句读号是中英文常用的 ``。！？!?.;`` 与换行；句边界
+        索引进 :meth:`normalized_text`，与 ``chunks_with_spans`` 同源，偏移
+        因此可直接用于重切与高亮。chunk_index 连续编号，句级块用
+        ``metadata["granularity"] = "sentences"`` 与字符块区分。
+        """
+
+        text = self.normalized_text(document)
+        if not text:
+            return []
+        result: list[ChunkSpan] = []
+        start = 0
+        for index, char in enumerate(text):
+            if char not in "。！？!?.;\n":
+                continue
+            chunk = text[start : index + 1].strip()
+            if chunk:
+                metadata = dict(document.metadata)
+                metadata.update(
+                    {
+                        "document_id": document.id,
+                        "chunk_index": len(result),
+                        "granularity": "sentences",
+                    }
+                )
+                end = start + len(chunk)
+                result.append(
+                    ChunkSpan(
+                        Document(chunk, id=f"{document.id}:{len(result)}", metadata=metadata),
+                        start,
+                        end,
+                    )
+                )
+            start = index + 1
+        tail = text[start:].strip()
+        if tail:  # 结尾没有句读号的残句也要落库，否则最后一句丢失
+            metadata = dict(document.metadata)
+            metadata.update(
+                {
+                    "document_id": document.id,
+                    "chunk_index": len(result),
+                    "granularity": "sentences",
+                }
+            )
+            begin = start + (len(text[start:]) - len(text[start:].lstrip()))
+            result.append(
+                ChunkSpan(
+                    Document(tail, id=f"{document.id}:{len(result)}", metadata=metadata),
+                    begin,
+                    begin + len(tail),
+                )
+            )
+        return result
+
     @staticmethod
     def _parse_bytes(raw: bytes, extension: str) -> str:
         if extension == ".jsonl":
