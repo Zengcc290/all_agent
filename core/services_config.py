@@ -64,6 +64,18 @@ class Neo4jService:
 
 
 @dataclass(frozen=True)
+class ProxyService:
+    """Local forward proxy (e.g. Clash on port 7890) cloud calls route through.
+
+    ``url`` is an ``http://host:port`` CONNECT proxy; Neo4j Aura is tunneled
+    through it because the Neo4j driver has no native proxy support, and
+    Qdrant Cloud passes it to the underlying HTTP client.
+    """
+
+    url: str | None = None
+
+
+@dataclass(frozen=True)
 class ServicesConfig:
     """Parsed view of ``config/services.toml``; missing sections are all-None."""
 
@@ -71,6 +83,7 @@ class ServicesConfig:
     search: SearchService = SearchService()
     qdrant: QdrantService = QdrantService()
     neo4j: Neo4jService = Neo4jService()
+    proxy: ProxyService = ProxyService()
 
     @property
     def configured(self) -> bool:
@@ -78,7 +91,7 @@ class ServicesConfig:
 
         return any(
             value is not None
-            for section in (self.embedding, self.search, self.qdrant, self.neo4j)
+            for section in (self.embedding, self.search, self.qdrant, self.neo4j, self.proxy)
             for value in section.__dict__.values()
         )
 
@@ -117,6 +130,7 @@ def load_services_config(path: str | Path | None = None) -> ServicesConfig:
         search=_parse_search(_table(document, "search")),
         qdrant=_parse_qdrant(_table(document, "qdrant")),
         neo4j=_parse_neo4j(_table(document, "neo4j")),
+        proxy=_parse_proxy(_table(document, "proxy")),
     )
 
 
@@ -185,6 +199,13 @@ def _parse_neo4j(table: dict[str, Any]) -> Neo4jService:
     )
 
 
+def _parse_proxy(table: dict[str, Any]) -> ProxyService:
+    url = _optional_string(table, "url")
+    if url is not None:
+        _require_scheme("proxy", "url", url, _HTTP_SCHEMES)
+    return ProxyService(url=url)
+
+
 def _resolve_secret(
     table: dict[str, Any], *, key: str = "api_key", env_key: str = "api_key_env"
 ) -> str | None:
@@ -241,6 +262,7 @@ def _require_scheme(location: str, key: str, url: str, schemes: frozenset[str]) 
 __all__ = [
     "EmbeddingService",
     "Neo4jService",
+    "ProxyService",
     "QdrantService",
     "SearchService",
     "ServicesConfig",

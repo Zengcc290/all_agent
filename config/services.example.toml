@@ -42,3 +42,11 @@
 # uri = "bolt+s://xxxx.databases.neo4j.io"
 # username = "neo4j"
 # password_env = "HELLOAGENTS_MEMORY_NEO4J_PASSWORD"
+
+[proxy]
+# 本地转发代理（如 Clash 的 http://127.0.0.1:7890）。配置后：
+#   - Qdrant Cloud 的 HTTP 请求走该代理（不走本机回环地址）；
+#   - Neo4j Aura 通过 CONNECT 隧道走该代理（neo4j 驱动无原生代理支持）。
+#     驱动仍用原始 neo4j+s:// 主机名（保留 SNI/证书校验），Aura 路由表里的
+#     成员主机（*.neo4j.io）各自开一条本地隧道，避免直连被墙或打到错误节点。
+# url = "http://127.0.0.1:7890"

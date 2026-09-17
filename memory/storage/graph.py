@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Mapping
 from operator import itemgetter
 from typing import Any
@@ -20,9 +21,13 @@ class Neo4jGraphStore:
         *,
         driver: Any = None,
         database: str | None = None,
+        proxy_url: str | None = None,
     ) -> None:
         self.database = database
         self.driver = driver
+        self.proxy_url = proxy_url
+        self._broker: Any = None
+        self._original_getaddrinfo: Any = None
         self._local: dict[str, list[dict[str, Any]]] = {}
         self._reverse: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         #: 内存回退下的实体属性（Neo4j 侧由 ON CREATE/ON MATCH 维护同样的三项）。
@@ -32,9 +37,24 @@ class Neo4jGraphStore:
                 from neo4j import GraphDatabase
             except ImportError as exc:
                 raise RuntimeError("Neo4jGraphStore requires neo4j") from exc
+
             if not username or password is None:
                 raise ValueError("username and password are required for Neo4j")
-            self.driver = GraphDatabase.driver(uri, auth=(username, password))
+            if proxy_url:
+                # Keep the original routing URI (neo4j+s) so Aura can hand out
+                # the home database and member hosts.  The driver has no native
+                # proxy support, so name resolution for *.neo4j.io is remapped
+                # onto per-host CONNECT tunnels.  SNI and certificate
+                # verification still use the real hostname.
+                from core.proxy_tunnel import ProxyBroker
+
+                broker = ProxyBroker(proxy_url)
+                self._broker = broker
+                self._original_getaddrinfo = socket.getaddrinfo
+                socket.getaddrinfo = broker.remap_getaddrinfo(self._original_getaddrinfo)
+                self.driver = GraphDatabase.driver(uri, auth=(username, password))
+            else:
+                self.driver = GraphDatabase.driver(uri, auth=(username, password))
 
     def add_relation(
         self,
@@ -403,6 +423,12 @@ class Neo4jGraphStore:
     def close(self) -> None:
         if self.driver is not None and callable(getattr(self.driver, "close", None)):
             self.driver.close()
+        if self._original_getaddrinfo is not None:
+            socket.getaddrinfo = self._original_getaddrinfo
+            self._original_getaddrinfo = None
+        if self._broker is not None:
+            self._broker.close()
+            self._broker = None
 
 
 __all__ = ["Neo4jGraphStore"]

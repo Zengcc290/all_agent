@@ -10,6 +10,7 @@
 | 联网搜索（web.search / AnySearch） | `services.toml` → `[search]`；或 `.env` 的 `SEARCH_BASE_URL` / `SEARCH_API_KEY` | `.env` → `SEARCH_API_KEY` |
 | Qdrant Cloud | `services.toml` → `[qdrant]`；或 `.env` 的 `HELLOAGENTS_MEMORY_QDRANT_URL` / `..._QDRANT_API_KEY` | `.env` → `HELLOAGENTS_MEMORY_QDRANT_API_KEY` |
 | Neo4j Aura | `services.toml` → `[neo4j]`；或 `.env` 的 `HELLOAGENTS_MEMORY_NEO4J_URI` / `_USERNAME` / `_PASSWORD` | `.env` → `HELLOAGENTS_MEMORY_NEO4J_PASSWORD` |
+| 本地转发代理（Clash 等） | `services.toml` → `[proxy].url`；Qdrant Cloud 与 Neo4j Aura 都走它 | 无密钥 |
 | 嵌入网关 SSH 隧道（部署信息，非 API） | `.env` → `EMBEDDING_TUNNEL_KEY` / `EMBEDDING_TUNNEL_HINT` / `EMBEDDING_BASE_URL` | `.env`（不进 services.toml） |
 
 ## 规则

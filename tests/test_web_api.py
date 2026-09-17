@@ -405,6 +405,27 @@ def test_chat_returns_retrieval_breakdown_for_the_provenance_panel(
     assert "sources" in payload and "paths" in payload
 
 
+def test_chat_survives_graph_retrieve_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_search_env(monkeypatch, on=False)
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: _make_fake_agent())
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("Database 53ac91cf not found")
+
+    monkeypatch.setattr(client.app.state.pipeline, "graph_retrieve", boom)
+
+    response = client.post("/api/chat", json={"message": "你好", "mode": "offline"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == "这是测试回答"
+    assert payload["paths"] == []
+    assert payload["sources"] == []
+
+
 def test_chat_tool_names_follow_mode(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

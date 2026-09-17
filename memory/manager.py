@@ -46,6 +46,7 @@ class MemoryManager:
                 collection_name=self.config.qdrant_collection,
                 api_key=self.config.qdrant_api_key,
                 dimension=self.config.embedding_dimension,
+                proxy_url=self.config.proxy_url,
             )
         else:
             self.vector_store = InMemoryVectorStore()
@@ -56,6 +57,7 @@ class MemoryManager:
                 self.config.neo4j_uri,
                 self.config.neo4j_username,
                 self.config.neo4j_password,
+                proxy_url=self.config.proxy_url,
             )
         )
         common = {

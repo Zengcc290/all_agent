@@ -118,8 +118,19 @@ class GraphRAGPipeline:
             limit=max(limit * 3, limit),
             threshold=threshold,
         )
-        seeds = self._find_seed_entities(query, evidence)
-        paths = self._expand(seeds, hops=hops, path_limit=path_limit)
+        try:
+            seeds = self._find_seed_entities(query, evidence)
+            paths = self._expand(seeds, hops=hops, path_limit=path_limit)
+        except Exception:  # noqa: BLE001 - Aura/local graph flaps must not drop vector evidence
+            # Graph backends (Aura via proxy, local Neo4j) can flap without
+            # taking the whole chat answer down.  Vector/keyword evidence still
+            # returns; the nebula just has no multi-hop paths this round.
+            return GraphRAGResult(
+                query=query,
+                evidence=evidence[:limit],
+                paths=[],
+                entities=[],
+            )
         return GraphRAGResult(
             query=query,
             evidence=evidence[:limit],

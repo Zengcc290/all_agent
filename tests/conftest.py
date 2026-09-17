@@ -37,6 +37,27 @@ def _neutralize_local_services_config(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_local_provider_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep chat/extractor construction hermetic across the test session.
+
+    A local ``config/provider.toml`` with a real key would make ``chat_ready()``
+    return True and ``build_knowledge_extractor()`` call the live LLM during
+    ingest.  Pointing the default path at the published example (placeholder
+    key) restores the fresh-checkout behaviour: chat is disabled, extraction
+    is a no-op, Agent construction still succeeds.
+    """
+
+    from agents.providers import ProviderRegistry
+
+    example = Path(__file__).resolve().parent.parent / "config" / "provider.example.toml"
+    monkeypatch.setattr(
+        ProviderRegistry,
+        "default_config_path",
+        staticmethod(lambda: example),
+    )
+
+
 class HashEmbedding(_LibraryHashEmbedding):
     """Deterministic offline embedding used only by tests (128 dimensions)."""
 

@@ -299,9 +299,14 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             body.message, answer, manager=the_manager()
         )
         invalidate_graph()
-        retrieval = app.state.pipeline.graph_retrieve(
-            body.message, limit=RAG_RETRIEVE_LIMIT, hops=RAG_GRAPH_HOPS
-        )
+        try:
+            retrieval = app.state.pipeline.graph_retrieve(
+                body.message, limit=RAG_RETRIEVE_LIMIT, hops=RAG_GRAPH_HOPS
+            )
+        except Exception:  # noqa: BLE001 - graph retrieve is post-answer; keep the chat 200
+            from memory.rag.graph_rag import GraphRAGResult
+
+            retrieval = GraphRAGResult(query=body.message)
         # U4 溯源：同一句问话再走一遍混合检索（向量 × FTS5 RRF），把每条的
         # 向量分/关键词分/融合分交给前端做「依据」面板；网关不可用时这里退化为
         # 纯关键词，正好让降级原因对用户可见，而不是只显示一个空来源列表。

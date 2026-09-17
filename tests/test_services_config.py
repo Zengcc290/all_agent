@@ -68,6 +68,7 @@ def test_loads_all_sections_with_secret_resolution(tmp_path, monkeypatch):
     assert services.neo4j.uri.startswith("bolt+s://")
     assert services.neo4j.username == "neo4j"
     assert services.neo4j.password == "plaintext-neo4j-password"
+    assert services.proxy.url is None
 
     assert services.configured
 
@@ -158,6 +159,10 @@ def test_invalid_toml_raises(tmp_path):
         ),
         (
             '[qdrant]\nurl = "not-a-url"\n',
+            "scheme",
+        ),
+        (
+            '[proxy]\nurl = "socks5://127.0.0.1:7890"\n',
             "scheme",
         ),
     ],
@@ -259,6 +264,7 @@ password_env = "TEST_NEO4J_PASSWORD"
     assert config_obj.neo4j_uri.startswith("bolt+s://")
     assert config_obj.neo4j_username == "neo4j"
     assert config_obj.neo4j_password == "neo4j-secret"
+    assert config_obj.proxy_url is None
 
 
 def test_from_env_environment_still_wins_over_services_toml(tmp_path, monkeypatch):
@@ -384,5 +390,65 @@ def test_manager_passes_qdrant_api_key_from_services_toml(tmp_path, monkeypatch)
 
         assert type(manager.vector_store) is QdrantVectorStore
         assert manager.config.qdrant_api_key == "qdrant-secret"
+    finally:
+        manager.close()
+
+
+def test_from_env_merges_proxy_url_from_services_toml(tmp_path, monkeypatch):
+    config = tmp_path / "services.toml"
+    write_and_point(config, '[proxy]\nurl = "http://127.0.0.1:7890"\n', monkeypatch)
+    clean_memory_env(monkeypatch)
+
+    config_obj = MemoryConfig.from_env()
+
+    assert config_obj.proxy_url == "http://127.0.0.1:7890"
+
+
+def test_manager_passes_proxy_url_to_qdrant_and_neo4j(tmp_path, monkeypatch):
+    from memory.manager import MemoryManager
+
+    config = tmp_path / "services.toml"
+    write_and_point(
+        config,
+        """\
+[qdrant]
+url = "https://xxxx.qdrant.tech"
+api_key = "qdrant-secret"
+
+[neo4j]
+uri = "neo4j+s://xxxx.databases.neo4j.io"
+username = "neo4j"
+password = "neo4j-secret"
+
+[proxy]
+url = "http://127.0.0.1:7890"
+""",
+        monkeypatch,
+    )
+    clean_memory_env(monkeypatch)
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "")
+
+    captured: dict[str, object] = {}
+
+    class FakeQdrant:
+        def __init__(self, **kwargs):
+            captured["qdrant"] = kwargs
+
+    class FakeNeo4j:
+        def __init__(self, *args, **kwargs):
+            captured["neo4j_args"] = args
+            captured["neo4j"] = kwargs
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("memory.manager.QdrantVectorStore", FakeQdrant)
+    monkeypatch.setattr("memory.manager.Neo4jGraphStore", FakeNeo4j)
+
+    manager = MemoryManager(MemoryConfig.from_env())
+    try:
+        assert captured["qdrant"]["proxy_url"] == "http://127.0.0.1:7890"
+        assert captured["neo4j"]["proxy_url"] == "http://127.0.0.1:7890"
     finally:
         manager.close()

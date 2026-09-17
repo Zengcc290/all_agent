@@ -158,6 +158,27 @@ def test_pipeline_auto_extracts_entities_and_graph_paths(manager: MemoryManager)
     assert "Qdrant用于语义检索" in result.build_context()
 
 
+def test_graph_retrieve_degrades_when_the_graph_store_fails(
+    manager: MemoryManager, monkeypatch: pytest.MonkeyPatch
+):
+    pipeline = RAGPipeline(manager, extractor=StaticExtractor())
+    pipeline.ingest(
+        Document("Qdrant用于语义检索。", id="doc-qdrant", metadata={"filename": "qdrant.txt"}),
+        chunk_size=100,
+        overlap=0,
+    )
+
+    def boom(self, seeds, *, hops, path_limit):
+        raise RuntimeError("Aura routing table unavailable")
+
+    monkeypatch.setattr(GraphRAGPipeline, "_expand", boom)
+    result = GraphRAGPipeline(manager).retrieve("Qdrant", limit=3, hops=1)
+
+    assert result.evidence
+    assert result.paths == []
+    assert result.entities == []
+
+
 def test_pipeline_reuses_relation_id_and_accumulates_evidence(manager: MemoryManager):
     pipeline = RAGPipeline(manager, extractor=StaticExtractor())
     for index in range(2):

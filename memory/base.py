@@ -183,6 +183,7 @@ def _merge_services_into(values: dict[str, object], services: ServicesConfig) ->
         ("neo4j_uri", services.neo4j.uri),
         ("neo4j_username", services.neo4j.username),
         ("neo4j_password", services.neo4j.password),
+        ("proxy_url", services.proxy.url),
     )
     for field_name, value in merged:
         if value is None or field_name in values:
@@ -368,6 +369,9 @@ class MemoryConfig:
     neo4j_uri: str | None = None
     neo4j_username: str | None = None
     neo4j_password: str | None = None
+    #: 本地转发代理（http://host:port，如 Clash 7890）。非空时 Qdrant Cloud
+    #: 走该代理、Neo4j Aura 经 CONNECT 隧道转发。来源：services.toml [proxy]。
+    proxy_url: str | None = None
     extra: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -409,6 +413,8 @@ class MemoryConfig:
             raise ValueError("qdrant_collection must be non-empty")
         if not isinstance(self.qdrant_api_key, (str, type(None))) or (isinstance(self.qdrant_api_key, str) and not self.qdrant_api_key.strip()):
             raise ValueError("qdrant_api_key must be a non-empty string or None")
+        if not isinstance(self.proxy_url, (str, type(None))) or (isinstance(self.proxy_url, str) and not self.proxy_url.strip()):
+            raise ValueError("proxy_url must be a non-empty string or None")
         if not isinstance(self.extra, dict):
             self.extra = dict(self.extra)
 

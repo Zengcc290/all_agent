@@ -400,6 +400,9 @@
       pointer-events: auto;
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: min(920px, calc(100vw - 56px));
       gap: 10px;
     }
     .searchwrap { position: relative; width: 320px; }
@@ -638,12 +641,15 @@
     .bubble.ai.thinking { opacity: 0.65; font-style: italic; }
     .chat-input-bar {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       padding: 12px;
       border-top: 1px solid rgba(56, 189, 248, 0.12);
+      min-width: 0;
     }
     #chat-textarea {
-      flex: 1;
+      flex: 1 1 140px;
+      min-width: 0;
       resize: none;
       height: 42px;
       padding: 10px 12px;
@@ -658,6 +664,7 @@
     }
     #chat-textarea:focus { border-color: rgba(56, 189, 248, 0.6); }
     #chat-send-btn {
+      flex: 0 0 auto;
       padding: 0 18px;
       border-radius: 12px;
       cursor: pointer;
@@ -671,7 +678,9 @@
     #chat-send-btn:hover { background: rgba(56, 189, 248, 0.3); }
     #chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     #chat-mode-select {
-      flex: 0 0 148px;
+      flex: 0 1 148px;
+      min-width: 0;
+      max-width: 100%;
       padding: 0 10px;
       border-radius: 12px;
       border: 1px solid rgba(56, 189, 248, 0.25);
@@ -754,6 +763,8 @@
       z-index: 10;
       pointer-events: none;
       display: flex;
+      flex-wrap: wrap;
+      max-width: calc(100vw - 56px);
       gap: 18px;
       font-size: 10px;
       letter-spacing: 0.5px;
@@ -966,6 +977,24 @@
       border: 0;
     }
 
+    /* 中屏：顶栏按钮换行，聊天/文档面板不再顶出视口边框 */
+    @media (max-width: 1100px) {
+      .top-actions {
+        left: 8px;
+        right: 8px;
+        transform: none;
+        max-width: none;
+      }
+      .searchwrap { width: min(320px, 100%); }
+      #chat-panel {
+        right: 12px;
+        width: min(400px, calc(100vw - 24px));
+      }
+      #documents-panel, #storage-panel {
+        max-width: calc(100vw - 40px);
+      }
+    }
+
     /* 小屏：HUD 换行铺满、抽屉改为底部整屏上滑（配合手势）、导览面板让位给星图 */
     @media (max-width: 720px) {
       .controls.hud {
@@ -982,6 +1011,8 @@
       .controls.hud .btn { min-height: 44px; flex: 1 1 45%; }
       #filter-domain { max-width: none; flex: 1 1 100%; min-height: 44px; }
       .tour-panel { display: none; }
+      header.hud { max-width: calc(100vw - 24px); }
+      .breadcrumb-nav { max-width: calc(100vw - 24px); }
       #detail-drawer {
         top: auto;
         bottom: 0;
@@ -1000,7 +1031,9 @@
         width: auto;
         max-width: none;
       }
-      .searchwrap { width: min(320px, 60vw); }
+      .searchwrap { width: min(320px, 100%); }
+      #chat-mode-select { flex: 1 1 100%; }
+      #chat-textarea { flex: 1 1 100%; }
     }
 
     /* U7 领域筛选：外观沿用 .btn，去掉原生 select 的默认样式 */

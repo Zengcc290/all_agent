@@ -19,7 +19,7 @@ class QdrantVectorStore(BaseVectorStore):
     allowing the embedding dimension to be discovered from the item.
     """
 
-    def __init__(self, url: str | None = None, collection_name: str = MEMORY_QDRANT_COLLECTION, *, api_key: str | None = None, client: Any = None, dimension: int | None = None, namespace: str = "memory") -> None:
+    def __init__(self, url: str | None = None, collection_name: str = MEMORY_QDRANT_COLLECTION, *, api_key: str | None = None, client: Any = None, dimension: int | None = None, namespace: str = "memory", proxy_url: str | None = None) -> None:
         if not isinstance(namespace, str) or not namespace.strip():
             raise ValueError("namespace must be a non-empty string")
         if client is None:
@@ -31,11 +31,15 @@ class QdrantVectorStore(BaseVectorStore):
                 # 本机回环地址绝不走系统代理：httpx 默认信任环境/注册表代理，
                 # 用户开着 Clash 等代理时 127.0.0.1 请求会被转发到代理端口，
                 # 代理对回环目标返回 502。本地端点显式关掉 trust_env。
+                # 云端端点按 [proxy] 配置显式走本地转发代理（proxy kwarg 会
+                # 透传到 httpx.Client）。
                 from urllib.parse import urlparse
 
                 parsed = urlparse(url)
                 if parsed.hostname in ("127.0.0.1", "localhost", "::1"):
                     client = QdrantClient(url=url, api_key=api_key, trust_env=False)
+                elif proxy_url:
+                    client = QdrantClient(url=url, api_key=api_key, proxy=proxy_url)
                 else:
                     client = QdrantClient(url=url, api_key=api_key)
             else:

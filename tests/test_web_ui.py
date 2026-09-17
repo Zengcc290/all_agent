@@ -187,3 +187,10 @@ def test_u8_keyboard_reachability_and_small_screen_layout() -> None:
     assert "@media (max-width: 720px)" in html
     assert "#detail-drawer.visible { transform: translateY(0); }" in html
     assert "min-height: 44px" in html
+
+    # 5) 中屏：顶栏/聊天输入换行，面板不再顶出视口边框
+    assert "@media (max-width: 1100px)" in html
+    assert "flex-wrap: wrap" in html
+    assert "max-width: min(920px, calc(100vw - 56px))" in html
+    assert "width: min(400px, calc(100vw - 24px))" in html
+    assert "flex: 1 1 140px" in html
