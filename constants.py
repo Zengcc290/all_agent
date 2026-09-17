@@ -178,6 +178,10 @@ GEMINI_EMBEDDING_HOST = "generativelanguage.googleapis.com"
 #: Gemini 的 API key 环境变量名（``MemoryConfig.embedding_api_key`` 之外的回退）。
 GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
 
+#: SiliconFlow 的 API key 环境变量名；OpenAI 兼容分支的另一个回退
+#: （其视觉语言嵌入模型 ``Qwen/Qwen3-VL-Embedding-*`` 也走 ``/v1/embeddings``）。
+SILICONFLOW_API_KEY_ENV = "SILICONFLOW_API_KEY"
+
 #: 嵌入请求超时（秒）。
 MEMORY_EMBEDDING_TIMEOUT = 30.0
 

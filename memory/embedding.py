@@ -52,6 +52,11 @@ from constants import (
 #: Gemini ``embedContent`` 用这个头传 key（不是 ``Authorization: Bearer``）。
 GEMINI_EMBEDDING_API_KEY_HEADER = "x-goog-api-key"
 
+#: 模型名里带 ``vl`` 的按视觉语言嵌入处理（``Qwen/Qwen3-VL-Embedding-*`` 等）。
+#: 这类模型仍是 OpenAI 兼容 ``/embeddings`` 端点，只是 ``input`` 额外接受
+#: ``{"text": ...}`` / ``{"image": ...}`` 内容对象与它们的混合列表。
+VL_EMBEDDING_MODEL_MARKER = "vl"
+
 
 def load_dotenv_once() -> None:
     """Load the repository's ``.env`` when python-dotenv is available.
@@ -144,6 +149,15 @@ class APIEmbedding(BaseEmbedding):
     parser additionally accepts DashScope's native ``output.embeddings``
     layout so either gateway works.
 
+    Visual-language embedding models (SiliconFlow's
+    ``Qwen/Qwen3-VL-Embedding-*``, whose model id contains ``vl``) keep the same
+    endpoint, auth header and ``data[].embedding`` response, but their ``input``
+    additionally accepts content objects - ``{"text": "..."}``,
+    ``{"image": "<url|base64>"}`` - and mixed lists of them, where one request
+    fuses the list into a single vector.  :attr:`multimodal` is derived from the
+    model name and gates the automatic routing in :meth:`embed_item`;
+    ``embed_image``/``embed_multimodal`` always work regardless of the name.
+
     ``client`` may be injected for tests: a callable ``client(payload, *)``
     returning a parsed JSON object, or an object exposing
     ``embeddings.create(input=..., model=...)``.
@@ -191,6 +205,8 @@ class APIEmbedding(BaseEmbedding):
         self.client = client
         self.api_key_env = api_key_env
         self.dimension = dimension or 0
+        #: 是否按视觉语言嵌入发送内容对象；可显式改写以支持名字里没有 vl 的多模态模型。
+        self.multimodal = VL_EMBEDDING_MODEL_MARKER in self.model.casefold()
 
     # ------------------------------------------------------------------ embed
 
@@ -210,6 +226,76 @@ class APIEmbedding(BaseEmbedding):
             result.extend(_embed_batch_once(self, values[start : start + self.batch_size]))
         return result
 
+    # -------------------------------------------------------- VL input objects
+
+    @staticmethod
+    def text_input(text: str) -> dict[str, str]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return {"text": text}
+
+    @staticmethod
+    def image_input(data: Any, *, mime_type: str | None = None) -> dict[str, str]:
+        """Build the ``{"image": ...}`` content object.
+
+        A URL or an already-encoded base64 string (raw or data URI) is passed
+        through untouched, so callers control the encoding the provider wants.
+        ``bytes`` become a ``data:<mime>;base64,...`` URI, since a bare base64
+        blob is not self-describing.
+        """
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            mime = mime_type or _image_mime_type(data)
+            encoded = base64.b64encode(bytes(data)).decode("ascii")
+            return {"image": f"data:{mime};base64,{encoded}"}
+        if isinstance(data, str) and data.strip():
+            return {"image": data.strip()}
+        raise TypeError("image data must be bytes, or a non-empty URL/base64 string")
+
+    def inputs_for(self, text: str = "", *, image: Any = None, mime_type: str | None = None) -> list[Any]:
+        """Assemble the VL ``input`` list: text object, image object, or both."""
+        items: list[Any] = []
+        if isinstance(text, str) and text.strip():
+            items.append(self.text_input(text))
+        if image is not None:
+            items.append(self.image_input(image, mime_type=mime_type))
+        if not items:
+            raise ValueError("at least one of text/image must be provided")
+        return items
+
+    def embed_inputs(self, items: list[Any]) -> list[float]:
+        """Send one VL ``input`` list, fused by the model into a single vector.
+
+        A mixed list (``[{"text": ...}, {"image": ...}]``) is one request that
+        yields exactly one vector, so it must not go through the per-item batch
+        count check.
+        """
+        if not isinstance(items, list) or not items:
+            raise ValueError("items must be a non-empty list")
+        vectors = _extract_embedding_vectors(_request(self, items))
+        if len(vectors) != 1:
+            raise RuntimeError(
+                f"embedding response count {len(vectors)} did not match the single fused vector "
+                "expected for a VL input list"
+            )
+        _learn_dimension(self, vectors)
+        return vectors[0]
+
+    def embed_image(self, data: Any, *, mime_type: str | None = None) -> list[float]:
+        """Embed one image on its own (no accompanying text)."""
+        return self.embed_inputs([self.image_input(data, mime_type=mime_type)])
+
+    def embed_multimodal(self, text: str, data: Any, *, mime_type: str | None = None) -> list[float]:
+        """Embed text and image together into one fused vector."""
+        return self.embed_inputs(self.inputs_for(text, image=data, mime_type=mime_type))
+
+    def embed_item(self, text: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
+        """Route one stored item; text-only models ignore ``payload`` as before."""
+        if payload is None or not self.multimodal:
+            return self.embed(text)
+        if isinstance(text, str) and text.strip():
+            return self.embed_multimodal(text, payload)
+        return self.embed_image(payload)
+
     # ------------------------------------------------------------------ config
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,6 +305,8 @@ class APIEmbedding(BaseEmbedding):
             "base_url": self.base_url,
             "dimension": self.dimension,
             "batch_size": self.batch_size,
+            # 便于 /api/health 直接看出当前是不是按 VL 内容对象在发请求。
+            "multimodal": self.multimodal,
         }
 
     def __repr__(self) -> str:
@@ -398,14 +486,26 @@ def _extract_embed_server_vectors(response: Any) -> list[list[float]]:
     return vectors
 
 
-def _embed_batch_once(embedding: APIEmbedding, values: list[str]) -> list[list[float]]:
-    """Send one batch and normalize the response into a list of vectors."""
+def _embed_batch_once(embedding: APIEmbedding, values: list[Any]) -> list[list[float]]:
+    """Send one batch and normalize the response into a list of vectors.
+
+    ``values`` are plain strings for text models, or VL content objects
+    (``{"text": ...}`` / ``{"image": ...}``) for visual-language models - both
+    travel in the same OpenAI-compatible ``input`` field.  One input item yields
+    one vector here; a *fused* VL list is handled by :meth:`APIEmbedding.embed_inputs`.
+    """
     response = _request(embedding, values)
     vectors = _extract_embedding_vectors(response)
     if len(vectors) != len(values):
         raise RuntimeError(
             f"embedding response count {len(vectors)} did not match input count {len(values)}"
         )
+    _learn_dimension(embedding, vectors)
+    return vectors
+
+
+def _learn_dimension(embedding: APIEmbedding, vectors: list[list[float]]) -> None:
+    """Validate vector shapes and record the dimension learned from a response."""
     dimension = len(vectors[0]) if vectors else 0
     if dimension == 0:
         raise RuntimeError("embedding response contained empty vectors")
@@ -418,10 +518,9 @@ def _embed_batch_once(embedding: APIEmbedding, values: list[str]) -> list[list[f
             f"embedding dimension {dimension} does not match expected dimension {embedding.dimension}"
         )
     embedding.dimension = dimension
-    return vectors
 
 
-def _request(embedding: APIEmbedding, values: list[str]) -> Any:
+def _request(embedding: APIEmbedding, values: list[Any]) -> Any:
     """Perform the HTTP call (or the injected test client) and parse JSON."""
     payload = {"model": embedding.model, "input": values}
     client = embedding.client

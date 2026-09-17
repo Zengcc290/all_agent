@@ -40,6 +40,7 @@ from constants import (
     MEMORY_SIMILARITY_THRESHOLD,
     MEMORY_SQLITE_DEFAULT,
     MEMORY_WORKING_CAPACITY,
+    SILICONFLOW_API_KEY_ENV,
 )
 
 from .embedding import (
@@ -142,7 +143,7 @@ def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
             timeout=config.embedding_timeout,
         )
 
-    api_key = config.embedding_api_key or os.getenv("DASHSCOPE_API_KEY")
+    api_key = config.embedding_api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv(SILICONFLOW_API_KEY_ENV)
     if not api_key or not str(api_key).strip():
         return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
     return APIEmbedding(

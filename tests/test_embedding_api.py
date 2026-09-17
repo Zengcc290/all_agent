@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from memory import DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL, APIEmbedding
@@ -169,3 +171,243 @@ def test_repr_and_to_dict_are_safe():
     assert data["type"] == "APIEmbedding"
     assert data["model"] == DEFAULT_EMBEDDING_MODEL
     assert "api_key" not in data
+
+
+# ---------------------------------------------------------------------------
+# SiliconFlow 视觉语言嵌入：同一个 /embeddings 端点，input 换成内容对象
+# （https://api-docs.siliconflow.cn/docs/api/embeddings-post 的 EmbeddingsVLRequest）
+# ---------------------------------------------------------------------------
+
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+VL_MODEL = "Qwen/Qwen3-VL-Embedding-2B"
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-png-body"
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"fake-jpeg-body"
+
+
+def _vl_embedding(calls: list[dict], **kwargs) -> APIEmbedding:
+    """假客户端按文档的两种形态返回：字符串数组 → 逐条向量；内容对象列表 → 一个融合向量。"""
+
+    def fake_client(payload, **inner):
+        calls.append(payload)
+        items = payload["input"]
+        count = len(items) if all(isinstance(item, str) for item in items) else 1
+        return {
+            "object": "list",
+            "model": payload["model"],
+            "data": [{"index": index, "embedding": [0.1 + index, 0.2]} for index in range(count)],
+            "usage": {},
+        }
+
+    return APIEmbedding(api_key="k", model=VL_MODEL, base_url=SILICONFLOW_BASE_URL, client=fake_client, **kwargs)
+
+
+def test_vl_model_is_detected_from_the_model_name():
+    assert _vl_embedding([]).multimodal is True
+    assert APIEmbedding(api_key="k").multimodal is False
+    assert APIEmbedding(api_key="k", model="Qwen/Qwen3-Embedding-8B").multimodal is False
+    assert _vl_embedding([]).to_dict()["multimodal"] is True
+
+
+def test_text_only_model_still_ignores_a_payload():
+    """关键回归：非 VL 模型带着 payload 写记忆时，行为必须与改动前完全一致。"""
+
+    calls: list[dict] = []
+    instance = APIEmbedding(api_key="k", client=lambda payload, **kw: calls.append(payload) or {"data": [{"embedding": [1.0]}]})
+
+    instance.embed_item("会议室照片", payload=PNG_BYTES, modality="image")
+
+    assert calls == [{"model": DEFAULT_EMBEDDING_MODEL, "input": ["会议室照片"]}]
+
+
+def test_vl_text_request_keeps_the_classic_string_shape():
+    """纯文本对 VL 模型仍走经典字符串 input（文档：支持单个字符串/字符串数组）。"""
+
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    assert instance.embed("Hello, world!") == [0.1, 0.2]
+    assert calls == [{"model": VL_MODEL, "input": ["Hello, world!"]}]
+
+
+def test_vl_image_bytes_become_a_data_uri_content_object():
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    instance.embed_image(PNG_BYTES)
+
+    assert calls[0]["input"] == [{"image": "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")}]
+
+
+def test_vl_image_mime_is_sniffed_for_the_data_uri():
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    instance.embed_image(JPEG_BYTES)
+    instance.embed_image(PNG_BYTES, mime_type="image/png")
+
+    assert calls[0]["input"][0]["image"].startswith("data:image/jpeg;base64,")
+    assert calls[1]["input"][0]["image"].startswith("data:image/png;base64,")
+
+
+def test_vl_url_and_base64_strings_pass_through_untouched():
+    """URL 与原样 base64 由调用方决定编码，代码不擅自加工。"""
+
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    instance.embed_image("https://example.com/image.jpg")
+    instance.embed_image("aGVsbG8=")
+    instance.embed_image("data:image/webp;base64,aGVsbG8=")
+
+    assert [call["input"][0]["image"] for call in calls] == [
+        "https://example.com/image.jpg",
+        "aGVsbG8=",
+        "data:image/webp;base64,aGVsbG8=",
+    ]
+
+
+def test_vl_mixed_request_fuses_text_and_image_in_one_call():
+    """混合列表一次请求 → 一个融合向量（不是两次请求拼起来）。"""
+
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    vector = instance.embed_multimodal("商品描述：白色运动鞋", PNG_BYTES)
+
+    assert vector == [0.1, 0.2]
+    assert len(calls) == 1
+    assert calls[0]["input"] == [
+        {"text": "商品描述：白色运动鞋"},
+        {"image": "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")},
+    ]
+
+
+def test_vl_embedding_of_multiple_items_still_batches_strings():
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    vectors = instance.embed_batch(["a", "b"])
+
+    assert calls == [{"model": VL_MODEL, "input": ["a", "b"]}]
+    assert vectors == [[0.1, 0.2], [1.1, 0.2]]
+
+
+def test_vl_fused_list_rejects_per_item_vectors():
+    """文档对「混合列表」的返回条数没有明说：若服务端按条返回 N 个向量，
+    必须报错而不是静默只取第一个（那会把图片整个丢掉，索引出来的向量是错的）。"""
+
+    instance = APIEmbedding(
+        api_key="k",
+        model=VL_MODEL,
+        client=lambda payload, **kw: {"data": [{"embedding": [1.0]}, {"embedding": [2.0]}]},
+    )
+
+    with pytest.raises(RuntimeError, match="single fused vector"):
+        instance.embed_multimodal("商品描述", PNG_BYTES)
+
+
+def test_vl_embed_item_routes_the_three_shapes():
+    calls: list[dict] = []
+    instance = _vl_embedding(calls)
+
+    instance.embed_item("只有文字")
+    instance.embed_item("", payload=PNG_BYTES, modality="image")
+    instance.embed_item("会议室照片", payload=PNG_BYTES, modality="image")
+
+    assert calls[0]["input"] == ["只有文字"]
+    assert calls[1]["input"][0]["image"].startswith("data:image/png;base64,")
+    assert calls[2]["input"][0] == {"text": "会议室照片"}
+    assert "image" in calls[2]["input"][1]
+
+
+def test_vl_rejects_empty_inputs():
+    instance = APIEmbedding(api_key="k", model=VL_MODEL)
+    with pytest.raises(ValueError, match="text/image"):
+        instance.inputs_for("   ")
+    with pytest.raises(ValueError, match="non-empty list"):
+        instance.embed_inputs([])
+    with pytest.raises(TypeError, match="bytes, or a non-empty URL"):
+        instance.image_input(12345)
+    with pytest.raises(TypeError, match="bytes, or a non-empty URL"):
+        instance.image_input("  ")
+
+
+def test_vl_memory_write_fuses_the_image_through_the_memory_layer():
+    """端到端：VL 后端下，带图片 payload 的写入真的把图片送进了嵌入请求。"""
+
+    from memory import MemoryConfig, PerceptualMemory
+
+    calls: list[dict] = []
+    memory = PerceptualMemory(
+        embedding=_vl_embedding(calls),
+        config=MemoryConfig(sqlite_path=":memory:"),
+    )
+
+    item = memory.add("会议室照片", payload=PNG_BYTES, modality="image")
+
+    assert item.embedding == [0.1, 0.2]
+    assert item.payload == PNG_BYTES
+    assert calls[0]["input"][0] == {"text": "会议室照片"}
+    assert calls[0]["input"][1]["image"].startswith("data:image/png;base64,")
+
+
+def test_vl_real_http_request_uses_the_documented_wire_format(monkeypatch: pytest.MonkeyPatch):
+    """真实出网路径：POST {base}/embeddings + Bearer 认证 + model/input 体。"""
+
+    import json as _json
+    from typing import Self
+
+    from memory import embedding as embedding_module
+
+    captured: list = []
+
+    class _Response:
+        def read(self) -> bytes:
+            return _json.dumps({"object": "list", "data": [{"index": 0, "embedding": [3.0]}]}).encode("utf-8")
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        captured.append(request)
+        return _Response()
+
+    monkeypatch.setattr(embedding_module.urllib.request, "urlopen", fake_urlopen)
+
+    vector = APIEmbedding(api_key="secret", model=VL_MODEL, base_url=SILICONFLOW_BASE_URL).embed_image(PNG_BYTES)
+
+    assert vector == [3.0]
+    request = captured[0]
+    assert request.full_url == "https://api.siliconflow.cn/v1/embeddings"
+    assert request.get_method() == "POST"
+    headers = {key.lower(): value for key, value in request.headers.items()}
+    assert headers["authorization"] == "Bearer secret"
+    body = _json.loads(request.data.decode("utf-8"))
+    assert body["model"] == VL_MODEL
+    assert body["input"][0]["image"].startswith("data:image/png;base64,")
+    # 文档标注 dimensions 仅 Qwen/Qwen3 文本系列支持，不能替 VL 模型擅自下发。
+    assert "dimensions" not in body
+
+
+def test_siliconflow_configuration_selects_the_openai_path(monkeypatch: pytest.MonkeyPatch):
+    from memory import MemoryConfig
+    from memory import base as memory_base
+
+    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
+    for name in ("DASHSCOPE_API_KEY", "GEMINI_API_KEY", "EMBEDDING_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key")
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_BASE_URL", SILICONFLOW_BASE_URL)
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_MODEL", VL_MODEL)
+
+    embedding = memory_base.make_default_embedding(MemoryConfig.from_env())
+
+    assert isinstance(embedding, APIEmbedding)
+    assert embedding.base_url == SILICONFLOW_BASE_URL
+    assert embedding.model == VL_MODEL
+    assert embedding.api_key == "sf-key"  # 未设 embedding_api_key 时回退 SILICONFLOW_API_KEY
+    assert embedding.multimodal is True
+    assert embedding.dimension == 0      # 留空 = 首次响应自动识别
