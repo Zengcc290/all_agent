@@ -32,5 +32,8 @@ config/providers.toml
 config/services.toml
 !config/services.example.toml
 
+# One-off migration backups (scripts/migrate_storage.py, scripts/migrate_to_cloud.py)
+*.bak.pre_migration
+
 # Editor metadata / attachments
 .opensquilla/

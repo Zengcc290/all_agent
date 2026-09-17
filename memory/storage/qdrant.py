@@ -66,11 +66,37 @@ class QdrantVectorStore(BaseVectorStore):
                     if configured_size is not None and int(configured_size) != dimension:
                         raise ValueError(f"Qdrant collection dimension mismatch: existing {configured_size}, got {dimension}")
             self.dimension = dimension
+            self._ensure_payload_indexes()
             self._ready = True
         except ValueError:
             raise
         except Exception as exc:
             raise RuntimeError(f"unable to initialize Qdrant collection: {exc}") from exc
+
+    def _ensure_payload_indexes(self) -> None:
+        """Create keyword payload indexes required by Qdrant Cloud filtered search.
+
+        The local server scans unindexed payloads on demand; the cloud HTTP API
+        rejects a filtered query (``namespace`` / ``memory_type``) on a field
+        without a payload index (HTTP 400).  The calls are idempotent and
+        failures are non-fatal: an index is a search requirement, not a write
+        requirement, so a collection that cannot be indexed must still accept
+        upserts.
+        """
+
+        create = getattr(self.client, "create_payload_index", None)
+        if not callable(create):
+            return
+        for field in ("namespace", "memory_type"):
+            try:
+                create(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema="keyword",
+                    wait=False,
+                )
+            except Exception:  # noqa: BLE001 - 已存在 / 集群不支持 / 权限不足都按已处理
+                continue
 
     def upsert(self, item: MemoryItem) -> None:
         if not item.embedding:
