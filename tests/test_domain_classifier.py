@@ -90,13 +90,16 @@ def test_ingested_docs_auto_classify_to_different_domains() -> None:
         doc_nodes = {
             n["title"]: n["domain"]
             for n in graph["nodes"]
-            if n["kind"] == "entity" and n["title"].startswith("文档：")
+            if n["kind"] == "chunk" and str(n.get("id", "")).startswith("doc:")
         }
-        # 三份文档落到三个不同主题恒星系
-        assert doc_nodes["文档：编程笔记.txt"] == "编程开发"
-        assert doc_nodes["文档：高数笔记.txt"] == "数学"
-        assert doc_nodes["文档：历史笔记.txt"] == "历史人文"
-        # 没有文档被扔进「文档库」
+        assert doc_nodes["编程笔记.txt"] == "编程开发"
+        assert doc_nodes["高数笔记.txt"] == "数学"
+        assert doc_nodes["历史笔记.txt"] == "历史人文"
         assert "文档库" not in {n["domain"] for n in graph["nodes"]}
+        assert all(
+            not str(n["title"]).startswith("文档：")
+            for n in graph["nodes"]
+            if n["kind"] == "entity"
+        )
     finally:
         manager.close()

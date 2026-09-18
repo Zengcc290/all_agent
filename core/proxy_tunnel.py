@@ -188,12 +188,39 @@ class ProxyBroker:
         key = (host, port)
         with self._lock:
             tunnel = self._tunnels.get(key)
+            if tunnel is not None and getattr(tunnel, "_server", None) is None:
+                try:
+                    tunnel.close()
+                except OSError:
+                    pass
+                tunnel = None
             if tunnel is None:
                 tunnel = ConnectTunnel(
                     self.proxy_url, host, port, connect_timeout=self.connect_timeout
                 ).start()
                 self._tunnels[key] = tunnel
             return tunnel
+
+    def resolve(self, address):
+        """Map Aura hosts onto CONNECT tunnels without patching DNS.
+
+        The Neo4j driver keeps the original hostname for routing/SNI.  Patching
+        ``socket.getaddrinfo`` made the driver believe it connected to
+        127.0.0.1, after which cluster routing failed with
+        ``Unable to retrieve routing information``.
+        """
+
+        host = getattr(address, "host", None)
+        port = getattr(address, "port", None)
+        if host is None:
+            host = address[0] if address else ""
+        if port is None and address is not None and len(address) > 1:
+            port = address[1]
+        if _should_proxy_host(str(host) if host else None):
+            tunnel = self.ensure(str(host), _numeric_port(port))
+            assert tunnel.local_port is not None
+            return [("127.0.0.1", tunnel.local_port)]
+        return [address]
 
     def remap_getaddrinfo(self, original):
         def remapped(host, port, family: int = 0, type: int = 0, proto: int = 0, flags: int = 0):

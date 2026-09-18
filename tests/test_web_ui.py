@@ -212,3 +212,7 @@ def test_embedding_lock_confirm_dialog_is_wired() -> None:
     assert "function retryIngestJob" in html
     assert "/api/knowledge/jobs/" in html
     assert "job-retry" in html
+    assert "GRAPH_CACHE_KEY" in html
+    assert "function restoreGraphCache" in html
+    assert "edge.relation" in html
+    assert 'n.kind === "relation"' in html

@@ -55,3 +55,18 @@ def test_broker_opens_a_distinct_tunnel_per_hostname() -> None:
         assert len(broker._tunnels) == 2
     finally:
         broker.close()
+
+def test_broker_resolver_keeps_non_aura_address() -> None:
+    broker = ProxyBroker("http://127.0.0.1:7890")
+    try:
+        skipped = broker.resolve(("example.com", 80))
+        assert skipped == [("example.com", 80)]
+        mapped = broker.resolve(("a.databases.neo4j.io", 7687))
+        assert mapped[0][0] == "127.0.0.1"
+        assert mapped[0][1] != 7687
+        again = broker.resolve(("a.databases.neo4j.io", 7687))
+        assert again == mapped
+        other = broker.resolve(("b.neo4j.io", 7687))
+        assert other[0][1] != mapped[0][1]
+    finally:
+        broker.close()

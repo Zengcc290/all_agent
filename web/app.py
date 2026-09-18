@@ -263,27 +263,25 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     def graph(since: int = -1, at: str | None = None) -> dict[str, Any]:
         """Read the real graph; ``at`` selects a historical ISO-8601 instant.
 
-        A remote Neo4j snapshot bypasses the process-local revision cache,
-        because another process can update Aura without bumping this worker's
-        counter. The in-memory fallback retains the lightweight ``since`` cache.
+        Process-local cache is keyed by revision + as-of time. Writes bump
+        GRAPH_REVISION so Neo4j Aura updates from this app still invalidate.
         """
 
         revision = graph_revision()
-        live_neo4j = getattr(the_manager().graph_store, "driver", None) is not None
+        cache_at = at or ""
         try:
-            if at or live_neo4j:
-                payload = build_graph(the_manager(), at=at)
-            else:
-                if (
-                    graph_cache["payload"] is None
-                    or graph_cache["external"] != revision
-                ):
-                    graph_cache["payload"] = build_graph(the_manager())
-                    graph_cache["external"] = revision
-                payload = graph_cache["payload"]
+            if (
+                graph_cache["payload"] is None
+                or graph_cache["external"] != revision
+                or graph_cache.get("at") != cache_at
+            ):
+                graph_cache["payload"] = build_graph(the_manager(), at=at)
+                graph_cache["external"] = revision
+                graph_cache["at"] = cache_at
+            payload = graph_cache["payload"]
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"时间参数无效：{exc}") from exc
-        if not at and not live_neo4j and since >= 0 and since == revision:
+        if not cache_at and since >= 0 and since == revision:
             return {
                 "revision": revision,
                 "unchanged": True,
@@ -488,12 +486,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         pipeline = app.state.pipeline
         from memory.rag import Document
 
+        preview = text.splitlines()[0][:40]
         items = pipeline.ingest(
             Document(
                 text,
                 metadata={
                     "source": "一句话入库",
-                    "filename": "一句话入库",
+                    "filename": preview,
                     "note": text[:400],
                     "event_at": body.event_at or "",
                     "reference_time": datetime.now(UTC).isoformat(),
@@ -1028,6 +1027,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "embedding_projection": snapshot["projection"],
             "qdrant_dimension": snapshot["qdrant_dimension"],
             "embedding_mismatch": snapshot["mismatch"],
+            "knowledge_extractor": type(getattr(app.state.pipeline, "extractor", None)).__name__,
         }
 
     # ------------------------------------------------------------------

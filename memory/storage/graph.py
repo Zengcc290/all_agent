@@ -26,6 +26,9 @@ class Neo4jGraphStore:
         self.database = database
         self.driver = driver
         self.proxy_url = proxy_url
+        self._uri = uri
+        self._username = username
+        self._password = password
         self._broker: Any = None
         self._original_getaddrinfo: Any = None
         self._local: dict[str, list[dict[str, Any]]] = {}
@@ -36,28 +39,72 @@ class Neo4jGraphStore:
         #: and therefore does not collapse same-triple events at different times.
         self._observations: dict[str, dict[str, Any]] = {}
         if self.driver is None and uri:
-            try:
-                from neo4j import GraphDatabase
-            except ImportError as exc:
-                raise RuntimeError("Neo4jGraphStore requires neo4j") from exc
+            self._open_driver()
 
-            if not username or password is None:
-                raise ValueError("username and password are required for Neo4j")
-            if proxy_url:
-                # Keep the original routing URI (neo4j+s) so Aura can hand out
-                # the home database and member hosts.  The driver has no native
-                # proxy support, so name resolution for *.neo4j.io is remapped
-                # onto per-host CONNECT tunnels.  SNI and certificate
-                # verification still use the real hostname.
-                from core.proxy_tunnel import ProxyBroker
+    def _open_driver(self) -> None:
+        """Create the Bolt driver; Aura via proxy uses the driver resolver."""
 
-                broker = ProxyBroker(proxy_url)
-                self._broker = broker
+        try:
+            from neo4j import GraphDatabase
+        except ImportError as exc:
+            raise RuntimeError("Neo4jGraphStore requires neo4j") from exc
+        if not self._username or self._password is None:
+            raise ValueError("username and password are required for Neo4j")
+        kwargs: dict[str, Any] = {
+            "auth": (self._username, self._password),
+            "connection_timeout": 15.0,
+            "max_connection_lifetime": 60.0,
+            "liveness_check_timeout": 10.0,
+        }
+        if self.proxy_url:
+            # Aura needs neo4j+s routing.  The driver has no native proxy, so
+            # *.neo4j.io is remapped onto CONNECT tunnels.  A custom resolver
+            # alone cannot complete TLS+routing here; getaddrinfo is required.
+            import socket
+
+            from core.proxy_tunnel import ProxyBroker
+
+            self._broker = ProxyBroker(self.proxy_url)
+            if self._original_getaddrinfo is None:
                 self._original_getaddrinfo = socket.getaddrinfo
-                socket.getaddrinfo = broker.remap_getaddrinfo(self._original_getaddrinfo)
-                self.driver = GraphDatabase.driver(uri, auth=(username, password))
-            else:
-                self.driver = GraphDatabase.driver(uri, auth=(username, password))
+            socket.getaddrinfo = self._broker.remap_getaddrinfo(self._original_getaddrinfo)
+        self.driver = GraphDatabase.driver(self._uri, **kwargs)
+
+    def _reopen_driver(self) -> None:
+        import socket
+
+        if self.driver is not None and callable(getattr(self.driver, "close", None)):
+            try:
+                self.driver.close()
+            except Exception:  # noqa: BLE001 - stale driver must not block reconnect
+                pass
+            self.driver = None
+        if self._original_getaddrinfo is not None:
+            socket.getaddrinfo = self._original_getaddrinfo
+        if self._broker is not None:
+            try:
+                self._broker.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._broker = None
+        self._open_driver()
+
+    def _with_session(self, runner):
+        """Run ``runner(session)`` and reconnect once on Aura routing flaps."""
+
+        if self.driver is None:
+            return None
+        try:
+            with self.driver.session(database=self.database) as session:
+                return runner(session)
+        except Exception as exc:
+            name = type(exc).__name__
+            message = str(exc)
+            if name not in {"ServiceUnavailable", "SessionExpired"} and "routing information" not in message:
+                raise
+            self._reopen_driver()
+            with self.driver.session(database=self.database) as session:
+                return runner(session)
 
     def add_relation(
         self,
@@ -130,7 +177,7 @@ class Neo4jGraphStore:
             "ON CREATE SET r += $properties, r.weight = 1.0, r.recall_count = 0, r.last_accessed_at = '' "
             "ON MATCH SET r += $properties"
         )
-        with self.driver.session(database=self.database) as session:
+        def _run(session):
             session.run(
                 query,
                 source=source,
@@ -144,6 +191,8 @@ class Neo4jGraphStore:
                 source_importance=source_importance,
                 target_importance=target_importance,
             ).consume()
+
+        self._with_session(_run)
 
     def add_observation(
         self,
@@ -218,7 +267,7 @@ class Neo4jGraphStore:
             "SET r.entity_type = participant.entity_type, r.kind = participant.role, "
             "r.weight = coalesce(r.weight, 1.0)"
         )
-        with self.driver.session(database=self.database) as session:
+        def _run(session):
             session.run(
                 query,
                 observation_id=observation_id,
@@ -226,6 +275,8 @@ class Neo4jGraphStore:
                 properties=props,
                 participants=normalized,
             ).consume()
+
+        self._with_session(_run)
 
     def _merge_entity(
         self, name: str, domain: str, aliases: list[str] | None, importance: float
@@ -385,15 +436,15 @@ class Neo4jGraphStore:
                 "RETURN a.name AS source, r.kind AS relation, b.name AS target, "
                 "properties(r) AS properties"
             )
-            with self.driver.session(database=self.database) as session:
-                entities = [
+            def _run(session):
+                fetched_entities = [
                     {
                         "name": str(record["name"]),
                         "properties": dict(record["properties"] or {}),
                     }
                     for record in session.run(entity_query)
                 ]
-                observations = [
+                fetched_observations = [
                     {
                         "id": str(record["id"]),
                         "predicate": str(record["predicate"] or "关联"),
@@ -406,7 +457,10 @@ class Neo4jGraphStore:
                     }
                     for record in session.run(observation_query)
                 ]
-                relations = [dict(record) for record in session.run(relation_query)]
+                fetched_relations = [dict(record) for record in session.run(relation_query)]
+                return fetched_entities, fetched_observations, fetched_relations
+
+            entities, observations, relations = self._with_session(_run)
         return {
             "mode": "neo4j" if self.driver is not None else "inmemory",
             "entities": entities,

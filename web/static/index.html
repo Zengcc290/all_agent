@@ -1481,6 +1481,7 @@
   const graph = { nodes: [], edges: [], byId: new Map(), stars: [], revision: 0, visible: new Set(), asOf: "" };
   const UNCLASSIFIED = "未分类";
   const GRAPH_POLL_MS = 20000;   // U6：轻量轮询；无变化时后端只回 revision
+  const GRAPH_CACHE_KEY = "nebula-graph-v1";
 
   // U7：领域筛选（纯前端，不改后端）。graph.nodes/edges 始终是后端原文，
   // 筛选只影响「进树」的节点集合，图/抽屉据此跳过被隐藏的一端。
@@ -1524,6 +1525,47 @@
     highlight.edges.clear();
   }
 
+  function serializeGraphCache() {
+    return {
+      revision: graph.revision,
+      stats: graph.stats,
+      edges: graph.edges,
+      nodes: (graph.nodes || []).map(n => ({
+        id: n.id, kind: n.kind, title: n.title, content: n.content,
+        domain: n.domain, date: n.date, importance: n.importance,
+        color: n.color, parent: n.parent, source: n.source, meta: n.meta || {},
+        wx: n.wx, wy: n.wy
+      })),
+    };
+  }
+  function saveGraphCache() {
+    try {
+      sessionStorage.setItem(GRAPH_CACHE_KEY, JSON.stringify(serializeGraphCache()));
+    } catch (_) { /* quota / private mode */ }
+  }
+  function restoreGraphCache() {
+    try {
+      const raw = sessionStorage.getItem(GRAPH_CACHE_KEY);
+      if (!raw) return false;
+      const cached = JSON.parse(raw);
+      if (!cached || !Array.isArray(cached.nodes) || !cached.nodes.length) return false;
+      graph.revision = cached.revision || 0;
+      graph.nodes = cached.nodes;
+      graph.edges = cached.edges || [];
+      graph.stats = cached.stats || {};
+      graph.byId = new Map(graph.nodes.map(n => [n.id, n]));
+      graph._layoutCache = {};
+      for (const n of graph.nodes) {
+        if (n.wx != null && n.wy != null) graph._layoutCache[n.id] = { wx: n.wx, wy: n.wy };
+      }
+      buildStarSystem();
+      renderDomainOptions();
+      renderTourPanel();
+      updateStats(graph.stats);
+      return true;
+    } catch (_) { return false; }
+  }
+
   async function loadGraph(options) {
     // U6 增量刷新：带上本地 revision，后端无变化时只回 revision，这里直接沿用现有
     // 节点与布局（省掉全量重建 + buildStarSystem 重排）。revision=0 也是有效值，
@@ -1540,12 +1582,18 @@
     graph.revision = data.revision || 0;
     if (data.unchanged) return false;
     const focusId = currentFocusNode ? currentFocusNode.id : null;   // 数据刷新后旧引用会失去物理更新
+    const prevLayout = {};
+    for (const n of graph.nodes || []) {
+      if (n.wx != null && n.wy != null) prevLayout[n.id] = { wx: n.wx, wy: n.wy };
+    }
     graph.nodes = data.nodes || [];
     graph.edges = data.edges || [];
     graph.stats = data.stats || {};
     graph.byId = new Map(graph.nodes.map(n => [n.id, n]));
     graph._adjacency = null;   // 邻接缓存随数据刷新失效
+    graph._layoutCache = prevLayout;
     buildStarSystem();
+    saveGraphCache();
     renderDomainOptions();     // U7：领域列表随数据刷新，失效的筛选自动清除
     renderTourPanel();
     updateStats(domainFilter ? filteredStats() : (data.stats || {}));
@@ -1600,15 +1648,16 @@
       if (!star) continue;  // 孤儿节点由补种兜底恒星收容
       n.parentStar = star;
       const parentEntity = graph.byId.get(n.parent);
-      n.treeParent = (n.kind === "entity" || !parentEntity || parentEntity === n) ? star : parentEntity;
-      if (n.kind === "entity") { star.children.push(n); n.level = 2; }
+      n.treeParent = (n.kind === "entity" || n.kind === "relation" || !parentEntity || parentEntity === n) ? star : parentEntity;
+      if (n.kind === "entity" || n.kind === "relation") { star.children.push(n); n.level = 2; }
       else { n.level = 3; }
       n.tierName = n.kind === "entity" ? "行星 (Planet)"
+        : n.kind === "relation" ? "行星·关系 (Relation)"
         : { fact: "卫星·事实 (Moon)", chunk: "卫星·知识块 (Moon)", note: "卫星·档案 (Moon)", event: "卫星·事件 (Moon)" }[n.kind] || "卫星 (Moon)";
     }
     // 4) 卫星挂载：parent 指向实体 → 该实体的 children；否则直接绕恒星
     for (const n of graph.nodes) {
-      if (n.kind === "domain" || n.kind === "entity") continue;
+      if (n.kind === "domain" || n.kind === "entity" || n.kind === "relation") continue;
       const parentEntity = graph.byId.get(n.parent);
       if (parentEntity && parentEntity.kind === "entity") {
         parentEntity.children.push(n);
@@ -1625,19 +1674,28 @@
         const ring = Math.floor(idx / perRing);
         const orbitR = ringBase + ring * ringStep;
         const angle = (idx % perRing) * (Math.PI * 2 / perRing) + ring * 0.7;
-        child.wx = center.wx + Math.cos(angle) * orbitR;
-        child.wy = center.wy + Math.sin(angle * GOLDEN) * orbitR;
+        const saved = (graph._layoutCache || {})[child.id];
+        if (saved && saved.wx != null && saved.wy != null) {
+          child.wx = saved.wx;
+          child.wy = saved.wy;
+        } else {
+          child.wx = center.wx + Math.cos(angle) * orbitR;
+          child.wy = center.wy + Math.sin(angle * GOLDEN) * orbitR;
+        }
         child.orbitR = orbitR;
         child.radius = kind === "entity"
           ? 8 + Math.min(6, (child.importance || 0.5) * 6)
           : 3 + (child.importance || 0.5) * 2.5;
-        child.twinklePhase = Math.random() * Math.PI * 2;
-        child.twinkleSpeed = 0.6 + Math.random() * 1.4;
+        let hash = 0;
+        const sid = String(child.id || "");
+        for (let i = 0; i < sid.length; i++) hash = (hash * 31 + sid.charCodeAt(i)) | 0;
+        child.twinklePhase = (Math.abs(hash) % 628) / 100;
+        child.twinkleSpeed = 0.6 + (Math.abs(hash >> 8) % 140) / 100;
         idx++;
       }
     };
     for (const star of graph.stars) {
-      const entities = star.children.filter(c => c.kind === "entity");
+      const entities = star.children.filter(c => c.kind === "entity" || c.kind === "relation");
       place(star, entities, 170, 130, 12, "entity");
       for (const ent of entities) {
         const moons = ent.children || [];
@@ -1869,6 +1927,16 @@
         if (isHot) { ctx.shadowColor = s.color || "#38bdf8"; ctx.shadowBlur = 14; }
       }
       ctx.stroke();
+      if (!dimmed && edge.relation && (isHot || inPath || lodLevel() >= 2)) {
+        const mx = (ps.px + pt.px) / 2;
+        const my = (ps.py + pt.py) / 2;
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = inPath || isHot ? "#e0f2fe" : "rgba(226,232,240,0.78)";
+        ctx.font = "11px -apple-system, 'Microsoft YaHei', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(String(edge.relation), mx, my - 6);
+      }
       ctx.restore();
     }
   }
@@ -2383,12 +2451,16 @@
   function renderJobRow(job) {
     const cls = ["pending", "running", "done", "failed"].includes(job.status) ? job.status : "pending";
     const time = (job.updated_at || "").replace("T", " ").slice(5, 16);
+    const report = (job.result && job.result.report) || job.result || {};
+    const extracted = job.status === "done"
+      ? ` · ${Number(report.entities || 0)} 实体 / ${Number(report.relations || 0)} 关系`
+      : "";
     const title = job.error ? ` title="${escapeHtml(job.error)}"` : "";
     const retry = (job.status === "failed" || job.retryable)
       ? `<button type="button" class="job-retry" data-retry-job="${escapeHtml(job.job_id)}">重试</button>`
       : "";
     return `<div class="job-row"${title}>`
-      + `<span class="job-badge ${cls}">${escapeHtml(job.label || job.status)}</span>`
+      + `<span class="job-badge ${cls}">${escapeHtml(job.label || job.status)}${extracted}</span>`
       + `<span class="job-text">${escapeHtml(job.text || "")}</span>`
       + retry
       + `<span class="job-time">${time}</span>`
@@ -2415,7 +2487,11 @@
         box.innerHTML = '<div class="job-empty">暂无入库记录</div>';
         return;
       }
+      const signature = res.items.map(j => j.job_id + ":" + j.status).join("|");
+      const becameDone = window.__ingestJobSig && signature !== window.__ingestJobSig && res.items.some(j => j.status === "done");
+      window.__ingestJobSig = signature;
       box.innerHTML = res.items.map(renderJobRow).join("");
+      if (becameDone) loadGraph({ since: true }).catch(() => {});
     } catch (_) { /* 队列不可用（如内存库）时静默 */ }
   }
   setInterval(() => { if (!document.hidden) refreshIngestJobs(); }, 3000);
@@ -3051,7 +3127,9 @@
   // =====================================================================
   async function boot() {
     try {
-      await loadGraph();
+      const warmed = restoreGraphCache();
+      if (warmed) $("boot-overlay").classList.add("hide");
+      await loadGraph({ since: warmed });
       await checkHealth();
       $("boot-overlay").classList.add("hide");
       const empty = !graph.nodes.length;

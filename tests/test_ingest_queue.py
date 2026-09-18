@@ -227,3 +227,21 @@ def test_multiple_jobs_complete_in_order(tmp_path):
     finally:
         queue.shutdown()
         manager.close()
+
+def test_extraction_error_marks_job_failed_and_retryable(tmp_path):
+    class BoomExtractor:
+        def extract(self, text, *, metadata=None, graph_context=""):
+            raise RuntimeError("routing boom")
+
+    manager = make_manager(tmp_path)
+    queue = IngestJobQueue(manager, BoomExtractor())
+    queue.start()
+    try:
+        job = queue.submit("小猫和小狗是亲兄弟")
+        finished = queue.wait(job.job_id, timeout=10)
+        assert finished is not None and finished.status == "failed"
+        assert "routing boom" in (finished.error or "")
+        assert job_to_dict(finished)["retryable"] is True
+    finally:
+        queue.shutdown()
+        manager.close()

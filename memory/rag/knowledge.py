@@ -87,7 +87,7 @@ def is_prefix_match(left_key: str, right_key: str) -> bool:
 
 
 class EntityCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     name: str = Field(min_length=1, max_length=ENTITY_NAME_MAX_LENGTH)
     entity_type: str = Field(default=ENTITY_DEFAULT_TYPE, max_length=80)
@@ -104,7 +104,7 @@ class EntityCandidate(BaseModel):
 class RelationRole(BaseModel):
     """One additional participant in an n-ary observation."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     role: str = Field(min_length=1, max_length=100)
     value: str = Field(min_length=1, max_length=200)
@@ -117,7 +117,7 @@ class RelationRole(BaseModel):
 
 
 class RelationCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     subject: str = Field(min_length=1, max_length=200)
     predicate: str = Field(min_length=1, max_length=100)
@@ -150,7 +150,7 @@ class RelationCandidate(BaseModel):
 
 
 class ExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     domain: str = Field(default=DEFAULT_DOMAIN, min_length=1, max_length=100)
     topics: list[str] = Field(default_factory=list, max_length=20)
@@ -240,6 +240,7 @@ class LLMKnowledgeExtractor:
         "3. 每条关系必须给出 evidence，且 evidence 必须是原文片段。\n"
         "4. 单次最多 50 个实体、80 条关系；宁少勿滥。\n"
         "\n"
+        "5. 简单句也必须抽取。例如「小猫和小狗是亲兄弟」应输出 entities:[{name:小猫},{name:小狗}] 与 relations:[{subject:小猫,predicate:亲兄弟,object:小狗,action:assert,cardinality:multi,evidence:小猫和小狗是亲兄弟}]\n"
         "字段格式：domain:string, topics:string[], "
         "entities:[{name,entity_type,description,confidence,aliases}], "
         "relations:[{subject,predicate,object,action,cardinality,roles:[{role,value,entity_type}],"

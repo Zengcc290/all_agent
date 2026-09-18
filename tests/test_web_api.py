@@ -101,7 +101,7 @@ def test_graph_empty_then_seeded(client: TestClient) -> None:
 
     graph = client.get("/api/graph").json()
     kinds = {node["kind"] for node in graph["nodes"]}
-    assert {"domain", "entity", "fact", "note"} <= kinds
+    assert {"domain", "entity", "relation", "note"} <= kinds
     assert graph["stats"]["edges"] >= 10
     # 幂等：再种一次不再增长
     again = client.post("/api/seed").json()
@@ -755,6 +755,7 @@ def test_health_reports_store_modes_and_degraded(file_client) -> None:
         "embedding_hint": health["degraded"]["embedding_hint"],  # 配置指引（非空）
     }
     assert "[embedding]" in health["degraded"]["embedding_hint"]
+    assert health["knowledge_extractor"]
 
 
 def test_health_and_ingest_409_when_qdrant_dimension_differs(tmp_path: Path) -> None:
@@ -857,6 +858,22 @@ def test_revectorize_rebuilds_every_chunk(file_client) -> None:
 # ---------------------------------------------------------------------------
 # Phase 7 U6: 增量图 ?since=<revision>
 # ---------------------------------------------------------------------------
+
+
+
+def test_graph_cache_hits_even_with_neo4j_driver(file_client) -> None:
+    """Live Neo4j used to bypass the process cache and rebuild on every open."""
+
+    client, _ = file_client
+    client.app.state.manager.graph_store.driver = object()
+    first = client.get("/api/graph").json()
+    second = client.get("/api/graph").json()
+    assert first["unchanged"] is False
+    assert second["nodes"] == first["nodes"]
+    assert second["edges"] == first["edges"]
+    delta = client.get("/api/graph", params={"since": first["revision"]}).json()
+    assert delta["unchanged"] is True
+    assert delta["nodes"] == []
 
 
 def test_graph_since_returns_only_revision_when_nothing_changed(file_client) -> None:

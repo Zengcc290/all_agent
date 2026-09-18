@@ -169,12 +169,13 @@ class IngestJobQueue:
         try:
             # 每任务独立 pipeline：串行执行时 last_ingest_report 也不会串味。
             pipeline = RAGPipeline(self._manager, extractor=self._extractor)
+            preview = job.text.strip().splitlines()[0][:40] if job.text.strip() else "一句话入库"
             items = pipeline.ingest(
                 Document(
                     job.text,
                     metadata={
                         "source": "一句话入库",
-                        "filename": "一句话入库",
+                        "filename": preview,
                         "note": job.text[:400],
                         "event_at": job.event_at,
                         "reference_time": datetime.now(UTC).isoformat(),
@@ -182,15 +183,21 @@ class IngestJobQueue:
                     },
                 )
             )
-            report = pipeline.last_ingest_report
-            self._manager.episodic.record(
-                f"添加了一条知识：{job.text[:80]}",
-                metadata={"title": "一句话入库", "source": "一句话入库", "ingest_job_id": job_id},
-            )
+            report = pipeline.last_ingest_report or {}
             summary = json.dumps(
                 {"chunks": len(items), "report": report}, ensure_ascii=False
             )
-            repo.set_ingest_job_status(job_id, "done", result=summary)
+            errors = report.get("errors") or []
+            if errors:
+                repo.set_ingest_job_status(
+                    job_id, "failed", error=str(errors[0]), result=summary
+                )
+            else:
+                self._manager.episodic.record(
+                    f"添加了一条知识：{job.text[:80]}",
+                    metadata={"title": "一句话入库", "source": "一句话入库", "ingest_job_id": job_id},
+                )
+                repo.set_ingest_job_status(job_id, "done", result=summary)
         except Exception as exc:
             LOGGER.exception("入库任务 %s 失败", job_id)
             repo.set_ingest_job_status(job_id, "failed", error=f"{type(exc).__name__}: {exc}")

@@ -235,12 +235,21 @@ class LLM:
                 f"Configuration Error: {', '.join(missing)} is not configured."
             )
         try:
+            import httpx
             from openai import OpenAI
 
+            from core.services_config import load_services_config
+
+            proxy = load_services_config().proxy.url
+            http_client = httpx.Client(
+                proxy=proxy or None,
+                trust_env=False,
+            )
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
+                http_client=http_client,
             )
         except ImportError as exc:
             raise RuntimeError("The 'openai' package is required to use LLM.") from exc

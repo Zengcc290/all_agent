@@ -234,3 +234,41 @@ def test_graph_payload_carries_entity_aliases(manager: MemoryManager):
     assert aliased[0]["domain"] == "人工智能"
     # 没有别名的实体不该被塞一个空 meta 键
     assert all("aliases" not in node["meta"] for node in payload["nodes"] if node not in aliased)
+
+
+def test_document_is_unique_satellite_of_related_entity(manager: MemoryManager):
+    """One source document hangs next to its entities once; no cloned 文档 planets."""
+
+    pipeline = RAGPipeline(manager, extractor=GraphExtractor())
+    pipeline.ingest(Document("Qdrant用于语义检索。", id="doc-sat", metadata={"filename": "note.txt"}))
+    pipeline.ingest(Document("Qdrant用于语义检索。", id="doc-sat-2", metadata={"filename": "note.txt"}))
+
+    payload = build_graph(manager)
+    doc_nodes = [node for node in payload["nodes"] if str(node["id"]).startswith("doc:")]
+    assert len(doc_nodes) == 1
+    assert all(node["kind"] == "chunk" for node in doc_nodes)
+    assert all(not str(node["title"]).startswith("文档：") for node in payload["nodes"] if node["kind"] == "entity")
+    qdrant = next(node for node in payload["nodes"] if node["kind"] == "entity" and node["title"] == "Qdrant")
+    parents = {node["parent"] for node in doc_nodes}
+    assert qdrant["id"] in parents
+    hub = next(node for node in payload["nodes"] if node["kind"] == "relation" and node["title"] == "用于")
+    assert any(edge["target"] == hub["id"] and edge["source"] == qdrant["id"] for edge in payload["edges"])
+    assert any(edge["relation"] == "用于" for edge in payload["edges"])
+
+
+def test_same_predicate_reuses_one_relation_node(manager: MemoryManager):
+    """小猫-小狗 与 小兔-小羊 共用同一个「亲兄弟」关系行星。"""
+
+    manager.semantic.add_fact("小猫", "亲兄弟", "小狗", confidence=0.9)
+    manager.semantic.add_fact("小兔", "亲兄弟", "小羊", confidence=0.9)
+    payload = build_graph(manager)
+    hubs = [node for node in payload["nodes"] if node["kind"] == "relation" and node["title"] == "亲兄弟"]
+    assert len(hubs) == 1
+    hub_id = hubs[0]["id"]
+    titles = {node["id"]: node["title"] for node in payload["nodes"]}
+    connected = {
+        titles.get(edge["source"])
+        for edge in payload["edges"]
+        if edge["target"] == hub_id
+    }
+    assert connected >= {"小猫", "小狗", "小兔", "小羊"}

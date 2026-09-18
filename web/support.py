@@ -71,6 +71,7 @@ def build_knowledge_extractor():
         profile = registry.get(registry.active_profile)
         api_key = registry.resolve_api_key(profile.name)
         if not api_key or api_key.startswith("replace-with"):
+            LOGGER.warning("knowledge extractor disabled: provider api_key missing")
             return NullKnowledgeExtractor()
         client = LLM(
             api_key=api_key,
@@ -84,7 +85,8 @@ def build_knowledge_extractor():
             model=profile.default_model,
             vision_model=vision_model or profile.default_model,
         )
-    except Exception:  # noqa: BLE001 - 任何配置问题都退回无抽取器的可用状态
+    except Exception:
+        LOGGER.exception("knowledge extractor unavailable; using NullKnowledgeExtractor")
         return NullKnowledgeExtractor()
 
 
@@ -412,8 +414,9 @@ def chat_ready() -> tuple[bool, str]:
     （占位 key），因此这里必须显式区分：只有真实的 provider.toml 且 key
     非 placeholder 时才放行。
     """
-    from agents.providers import ProviderRegistry
+    from agents.providers import ProviderRegistry, load_project_dotenv
 
+    load_project_dotenv()
     path = ProviderRegistry.default_config_path()
     if path.name != "provider.toml" or not path.is_file():
         return False, (

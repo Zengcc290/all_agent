@@ -262,6 +262,8 @@ class RAGPipeline:
                 else:
                     repository.set_status(document.id, "failed", error=document_error)
         report["domains"] = list(dict.fromkeys(report["domains"]))
+        report["extractor"] = type(self.extractor).__name__
+        report["extraction_skipped"] = isinstance(self.extractor, NullKnowledgeExtractor)
         self.last_ingest_report = report
         return items
 
