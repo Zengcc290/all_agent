@@ -2,17 +2,17 @@
 
 ``config/services.toml`` (gitignored; the publishable template is
 ``config/services.example.toml``) is the single place that describes the
-endpoints, models and credential references for the external services the
-project calls: embedding, vision extraction, web search, Qdrant Cloud and
-Neo4j Aura.
+endpoints, models and credentials for the external services the project calls:
+embedding, vision extraction, web search, Qdrant Cloud and Neo4j Aura.
 
 Secrets follow the ``provider.toml`` convention: a section either carries the
 plaintext value (the file is gitignored) or names an environment variable via
 ``*_env``, resolved at load time.
 
-Precedence is deliberately **explicit argument > environment > services.toml**:
-existing ``.env`` deployments keep working unchanged, and the TOML only fills
-in fields that neither the caller nor the environment configured.
+Precedence is deliberately **explicit argument > services.toml** (only these
+two layers; the historical ``.env`` / ``HELLOAGENTS_MEMORY_*`` environment
+priority layer has been removed — configuration lives in ``config/`` and
+``constants.py``).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 #: a separate file with its own validation.
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _NEO4J_SCHEMES = frozenset({"bolt", "bolt+s", "neo4j", "neo4j+s", "http", "https"})
-_EMBEDDING_PROVIDERS = frozenset({"auto", "gateway", "gemini", "openai", "hash"})
+_EMBEDDING_PROVIDERS = frozenset({"auto", "openai", "hash"})
 
 
 @dataclass(frozen=True)

@@ -6,63 +6,66 @@ import base64
 
 import pytest
 
-from memory import DEFAULT_EMBEDDING_BASE_URL, DEFAULT_EMBEDDING_MODEL, APIEmbedding
+from memory import DEFAULT_EMBEDDING_MODEL, APIEmbedding
+
+#: 测试注入假 client（不出网）；base_url 只需是一个语法合法的端点。
+TEST_BASE_URL = "https://api.example.com/v1"
 
 
 @pytest.fixture()
 def embedding() -> APIEmbedding:
-    return APIEmbedding(api_key="test-key")
+    return APIEmbedding(api_key="test-key", base_url=TEST_BASE_URL)
 
 
 def test_requires_api_key():
-    # Use an env name that no .env file can provide, so the assertion holds even
-    # when the developer's real .env contains DASHSCOPE_API_KEY.
-    missing_env = "DASHSCOPE_API_KEY_MISSING_FOR_TEST"
+    # 密钥只来自 config/services.toml [embedding].api_key（经 make_default_embedding
+    # 传入）；环境变量不再是来源，None/空白都必须直接报错。
     with pytest.raises(RuntimeError, match="API key"):
-        APIEmbedding(api_key=None, api_key_env=missing_env)
+        APIEmbedding(api_key=None, base_url=TEST_BASE_URL)
     with pytest.raises(RuntimeError, match="API key"):
-        APIEmbedding(api_key="  ", api_key_env=missing_env)
+        APIEmbedding(api_key="  ", base_url=TEST_BASE_URL)
 
 
-def test_accepts_api_key_from_environment(monkeypatch: pytest.MonkeyPatch):
+def test_ignores_api_key_environment(monkeypatch: pytest.MonkeyPatch):
+    """配置只认 services.toml：设了 DASHSCOPE_API_KEY 也不能凭空构造。"""
+
     monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
-    instance = APIEmbedding()
-    assert instance.api_key == "env-key"
+    with pytest.raises(RuntimeError, match="API key"):
+        APIEmbedding(base_url=TEST_BASE_URL)
 
 
 def test_validation_rejects_bad_arguments():
     with pytest.raises(ValueError, match="model"):
-        APIEmbedding(api_key="k", model="  ")
+        APIEmbedding(api_key="k", base_url=TEST_BASE_URL, model="  ")
     with pytest.raises(ValueError, match="base_url"):
         APIEmbedding(api_key="k", base_url="")
     with pytest.raises(ValueError, match="dimension"):
-        APIEmbedding(api_key="k", dimension=0)
+        APIEmbedding(api_key="k", base_url=TEST_BASE_URL, dimension=0)
     with pytest.raises(ValueError, match="timeout"):
-        APIEmbedding(api_key="k", timeout=-1)
+        APIEmbedding(api_key="k", base_url=TEST_BASE_URL, timeout=-1)
     with pytest.raises(ValueError, match="batch_size"):
-        APIEmbedding(api_key="k", batch_size=0)
+        APIEmbedding(api_key="k", base_url=TEST_BASE_URL, batch_size=0)
 
 
-def test_defaults_point_at_qwen3_embedding():
-    instance = APIEmbedding(api_key="k")
+def test_default_model_and_learned_dimension():
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL)
     assert instance.model == DEFAULT_EMBEDDING_MODEL == "qwen3-embedding-0.6b"
-    assert instance.base_url == DEFAULT_EMBEDDING_BASE_URL
     assert instance.dimension == 0  # learned from the first response
 
 
-def test_default_endpoint_is_the_local_gateway_not_a_public_cloud():
-    """方案 §0.1/§11.7：默认出网点是本机隧道网关。
+def test_no_factory_endpoint_cloud_must_be_configured():
+    """云端端点没有出厂值：base_url 只能来自 services.toml [embedding]。
 
-    缺 .env 时若默认指向公网厂商，会静默换成另一套向量空间（§12 明列的风险），
-    而指向本机隧道时隧道不通只会明确降级为关键词检索并提示隧道命令。
+    历史 DEFAULT_EMBEDDING_BASE_URL 指向本机隧道网关（10800），随网关实现一并
+    删除；缺配置时 make_default_embedding 回落离线 HashEmbedding，而不是猜一个
+    端点静默切换向量空间。
     """
 
     from memory import MemoryConfig
 
-    assert DEFAULT_EMBEDDING_BASE_URL.startswith("http://127.0.0.1:")
-    assert "dashscope" not in DEFAULT_EMBEDDING_BASE_URL
-    # MemoryConfig 的默认值也必须是同一个本机端点（两者不一致会导致换端点换空间）
-    assert MemoryConfig().embedding_base_url == DEFAULT_EMBEDDING_BASE_URL
+    assert MemoryConfig().embedding_base_url == ""
+    with pytest.raises(ValueError, match="base_url"):
+        APIEmbedding(api_key="k")
 
 
 def test_embed_batch_uses_openai_shape_and_learns_dimension():
@@ -77,7 +80,7 @@ def test_embed_batch_uses_openai_shape_and_learns_dimension():
             ]
         }
 
-    instance = APIEmbedding(api_key="k", client=fake_client)
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=fake_client)
     vectors = instance.embed_batch(["hello", "world"])
 
     assert calls == [{"model": "qwen3-embedding-0.6b", "input": ["hello", "world"]}]
@@ -86,13 +89,14 @@ def test_embed_batch_uses_openai_shape_and_learns_dimension():
 
 
 def test_embed_single_text():
-    instance = APIEmbedding(api_key="k", client=lambda payload, **kw: {"data": [{"embedding": [1.0, 2.0]}]})
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=lambda payload, **kw: {"data": [{"embedding": [1.0, 2.0]}]})
     assert instance.embed("solo") == [1.0, 2.0]
 
 
 def test_dashscope_native_output_layout_is_accepted():
     instance = APIEmbedding(
         api_key="k",
+        base_url=TEST_BASE_URL,
         client=lambda payload, **kw: {"output": {"embeddings": [{"embedding": [7.0], "text_index": 0}]}},
     )
     assert instance.embed("x") == [7.0]
@@ -108,7 +112,7 @@ def test_batch_splits_by_batch_size():
         counter["n"] += len(payload["input"])
         return {"data": [{"embedding": [float(start + i)]} for i in range(len(payload["input"]))]}
 
-    instance = APIEmbedding(api_key="k", client=fake_client, batch_size=2)
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=fake_client, batch_size=2)
     vectors = instance.embed_batch(["a", "b", "c", "d", "e"])
 
     assert received == [["a", "b"], ["c", "d"], ["e"]]
@@ -118,6 +122,7 @@ def test_batch_splits_by_batch_size():
 def test_index_out_of_order_is_reordered():
     instance = APIEmbedding(
         api_key="k",
+        base_url=TEST_BASE_URL,
         client=lambda payload, **kw: {
             "data": [
                 {"index": 1, "embedding": [2.0]},
@@ -132,6 +137,7 @@ def test_incomplete_indices_raise():
     # Two vectors both labelled index 0 -> positions [0, 0] can't cover [0, 1].
     instance = APIEmbedding(
         api_key="k",
+        base_url=TEST_BASE_URL,
         client=lambda payload, **kw: {"data": [{"index": 0, "embedding": [1.0]}, {"index": 0, "embedding": [2.0]}]},
     )
     with pytest.raises(RuntimeError, match="indices"):
@@ -139,25 +145,25 @@ def test_incomplete_indices_raise():
 
 
 def test_count_mismatch_raises():
-    instance = APIEmbedding(api_key="k", client=lambda payload, **kw: {"data": [{"embedding": [1.0]}]})
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=lambda payload, **kw: {"data": [{"embedding": [1.0]}]})
     with pytest.raises(RuntimeError, match="count"):
         instance.embed_batch(["a", "b"])
 
 
 def test_dimension_mismatch_raises():
-    instance = APIEmbedding(api_key="k", dimension=4, client=lambda payload, **kw: {"data": [{"embedding": [1.0, 2.0, 3.0]}]})
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, dimension=4, client=lambda payload, **kw: {"data": [{"embedding": [1.0, 2.0, 3.0]}]})
     with pytest.raises(RuntimeError, match="dimension"):
         instance.embed("text")
 
 
 def test_invalid_vector_values_raise():
-    instance = APIEmbedding(api_key="k", client=lambda payload, **kw: {"data": [{"embedding": [float("nan")]}]})
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=lambda payload, **kw: {"data": [{"embedding": [float("nan")]}]})
     with pytest.raises(RuntimeError, match="non-finite"):
         instance.embed("text")
 
 
 def test_rejects_non_string_input():
-    instance = APIEmbedding(api_key="k", client=lambda payload, **kw: {"data": []})
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=lambda payload, **kw: {"data": []})
     with pytest.raises(TypeError, match="string"):
         instance.embed(123)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="string"):
@@ -165,7 +171,7 @@ def test_rejects_non_string_input():
 
 
 def test_repr_and_to_dict_are_safe():
-    instance = APIEmbedding(api_key="k")
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL)
     assert instance.model in repr(instance)
     data = instance.to_dict()
     assert data["type"] == "APIEmbedding"
@@ -203,8 +209,8 @@ def _vl_embedding(calls: list[dict], **kwargs) -> APIEmbedding:
 
 def test_vl_model_is_detected_from_the_model_name():
     assert _vl_embedding([]).multimodal is True
-    assert APIEmbedding(api_key="k").multimodal is False
-    assert APIEmbedding(api_key="k", model="Qwen/Qwen3-Embedding-8B").multimodal is False
+    assert APIEmbedding(api_key="k", base_url=TEST_BASE_URL).multimodal is False
+    assert APIEmbedding(api_key="k", base_url=TEST_BASE_URL, model="Qwen/Qwen3-Embedding-8B").multimodal is False
     assert _vl_embedding([]).to_dict()["multimodal"] is True
 
 
@@ -212,7 +218,7 @@ def test_text_only_model_still_ignores_a_payload():
     """关键回归：非 VL 模型带着 payload 写记忆时，行为必须与改动前完全一致。"""
 
     calls: list[dict] = []
-    instance = APIEmbedding(api_key="k", client=lambda payload, **kw: calls.append(payload) or {"data": [{"embedding": [1.0]}]})
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, client=lambda payload, **kw: calls.append(payload) or {"data": [{"embedding": [1.0]}]})
 
     instance.embed_item("会议室照片", payload=PNG_BYTES, modality="image")
 
@@ -298,6 +304,7 @@ def test_vl_fused_list_rejects_per_item_vectors():
 
     instance = APIEmbedding(
         api_key="k",
+        base_url=TEST_BASE_URL,
         model=VL_MODEL,
         client=lambda payload, **kw: {"data": [{"embedding": [1.0]}, {"embedding": [2.0]}]},
     )
@@ -321,7 +328,7 @@ def test_vl_embed_item_routes_the_three_shapes():
 
 
 def test_vl_rejects_empty_inputs():
-    instance = APIEmbedding(api_key="k", model=VL_MODEL)
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL, model=VL_MODEL)
     with pytest.raises(ValueError, match="text/image"):
         instance.inputs_for("   ")
     with pytest.raises(ValueError, match="non-empty list"):
@@ -392,22 +399,27 @@ def test_vl_real_http_request_uses_the_documented_wire_format(monkeypatch: pytes
     assert "dimensions" not in body
 
 
-def test_siliconflow_configuration_selects_the_openai_path(monkeypatch: pytest.MonkeyPatch):
+def test_services_toml_configuration_selects_the_openai_path(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """[embedding] 配齐端点+密钥+模型 -> 云端 APIEmbedding（含 VL 自动识别）。"""
+
+    from core import services_config
     from memory import MemoryConfig
     from memory import base as memory_base
 
-    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
-    for name in ("DASHSCOPE_API_KEY", "GEMINI_API_KEY", "EMBEDDING_BASE_URL"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("SILICONFLOW_API_KEY", "sf-key")
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_BASE_URL", SILICONFLOW_BASE_URL)
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_MODEL", VL_MODEL)
+    monkeypatch.setattr(services_config, "default_config_path", lambda: tmp_path / "services.toml")
+    (tmp_path / "services.toml").write_text(
+        "[embedding]\n"
+        f'base_url = "{SILICONFLOW_BASE_URL}"\n'
+        f'model = "{VL_MODEL}"\n'
+        'api_key = "sf-key"\n',
+        encoding="utf-8",
+    )
 
-    embedding = memory_base.make_default_embedding(MemoryConfig.from_env())
+    embedding = memory_base.make_default_embedding(MemoryConfig.from_config())
 
     assert isinstance(embedding, APIEmbedding)
     assert embedding.base_url == SILICONFLOW_BASE_URL
     assert embedding.model == VL_MODEL
-    assert embedding.api_key == "sf-key"  # 未设 embedding_api_key 时回退 SILICONFLOW_API_KEY
+    assert embedding.api_key == "sf-key"
     assert embedding.multimodal is True
     assert embedding.dimension == 0      # 留空 = 首次响应自动识别

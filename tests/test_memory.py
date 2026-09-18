@@ -85,21 +85,15 @@ def test_memory_item_default_id_is_a_uuid():
     assert MemoryItem("hello").id != item.id
 
 
-def test_memory_manager_without_api_key_falls_back_to_offline_embedding(monkeypatch):
-    """回归：没有任何 API key 时 MemoryManager() 必须可用（离线哈希降级）。
+def test_memory_manager_without_cloud_config_falls_back_to_offline_embedding():
+    """回归：没有云端配置时 MemoryManager() 必须可用（离线哈希降级）。
 
-    历史缺陷：``make_default_embedding`` 无条件构造 ``APIEmbedding``，没有 key
+    历史缺陷：``make_default_embedding`` 无条件构造 ``APIEmbedding``，没有配置
     时构造 MemoryManager 直接抛 RuntimeError，导致离线环境下 memory 包、
     memory.* 工具与 web 应用全部不可用。
     """
 
     from memory import HashEmbedding as LibraryHashEmbedding
-    from memory import base as memory_base
-
-    for name in ("DASHSCOPE_API_KEY", "HELLOAGENTS_MEMORY_EMBEDDING_API_KEY", "EMBEDDING_BASE_URL"):
-        monkeypatch.delenv(name, raising=False)
-    # .env 里可能存有真实 key，测试必须隔离它才能确定性验证降级路径。
-    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
 
     manager = MemoryManager(MemoryConfig(sqlite_path=":memory:"))
     try:
@@ -110,53 +104,62 @@ def test_memory_manager_without_api_key_falls_back_to_offline_embedding(monkeypa
         manager.close()
 
 
-def test_explicit_embedding_api_key_still_selects_api_embedding(monkeypatch):
-    """降级只发生在确实没有 key 时；显式 key 仍走 APIEmbedding。"""
+def test_explicit_cloud_config_selects_api_embedding():
+    """降级只发生在云端配置不齐时；端点+密钥配齐就走 APIEmbedding。"""
 
     from memory import APIEmbedding
     from memory import base as memory_base
-
-    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
-    for name in ("DASHSCOPE_API_KEY", "EMBEDDING_BASE_URL"):
-        monkeypatch.delenv(name, raising=False)
 
     embedding = memory_base.make_default_embedding(
-        MemoryConfig(sqlite_path=":memory:", embedding_api_key="explicit-key")
+        MemoryConfig(
+            sqlite_path=":memory:",
+            embedding_base_url="https://api.example.com/v1",
+            embedding_api_key="explicit-key",
+        )
     )
     assert isinstance(embedding, APIEmbedding)
+    assert embedding.base_url == "https://api.example.com/v1"
 
 
-def test_environment_api_key_still_selects_api_embedding(monkeypatch):
-    """仅设置 DASHSCOPE_API_KEY 时仍自动升级到真实嵌入（既有行为保持）。"""
+def test_environment_api_key_alone_is_not_enough(monkeypatch):
+    """环境变量不再是配置来源：只设 DASHSCOPE_API_KEY 不配端点 -> 离线兜底。"""
 
-    from memory import APIEmbedding
+    from memory import HashEmbedding as LibraryHashEmbedding
     from memory import base as memory_base
 
-    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
-    monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
 
     embedding = memory_base.make_default_embedding(MemoryConfig(sqlite_path=":memory:"))
-    assert isinstance(embedding, APIEmbedding)
+    assert isinstance(embedding, LibraryHashEmbedding)
 
 
-def test_embedding_base_url_overrides_dashscope_key(monkeypatch):
-    """端口转发网关（EMBEDDING_BASE_URL）优先级最高，即使也给了 DashScope key。
+def test_provider_hash_forces_offline_even_with_cloud_config():
+    """provider = "hash" 强制离线（测试/审计场景的显式开关）。"""
 
-    Web 与 Agent 工具路径共用同一个 ``make_default_embedding``，保证两边嵌入一致。
-    """
-
-    from memory import EmbedServerEmbedding
+    from memory import HashEmbedding as LibraryHashEmbedding
     from memory import base as memory_base
 
-    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
-    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://127.0.0.1:10800")
+    embedding = memory_base.make_default_embedding(
+        MemoryConfig(
+            sqlite_path=":memory:",
+            embedding_provider="hash",
+            embedding_base_url="https://api.example.com/v1",
+            embedding_api_key="key",
+        )
+    )
+    assert isinstance(embedding, LibraryHashEmbedding)
 
-    embedding = memory_base.make_default_embedding(MemoryConfig(sqlite_path=":memory:"))
-    assert isinstance(embedding, EmbedServerEmbedding)
-    assert embedding.base_url == "http://127.0.0.1:10800"
-    assert embedding.dimension == 1024
+
+def test_provider_openai_without_config_falls_back_to_hash():
+    """provider = "openai" 但配置不齐：回落离线（/api/health 会如实显示 hash）。"""
+
+    from memory import HashEmbedding as LibraryHashEmbedding
+    from memory import base as memory_base
+
+    embedding = memory_base.make_default_embedding(
+        MemoryConfig(sqlite_path=":memory:", embedding_provider="openai")
+    )
+    assert isinstance(embedding, LibraryHashEmbedding)
 
 
 def test_only_in_memory_vector_store_is_rebuilt_at_startup(tmp_path):
@@ -203,23 +206,19 @@ def test_only_in_memory_vector_store_is_rebuilt_at_startup(tmp_path):
     assert local.search("persisted item", limit=3), "本地内存索引必须从 SQLite 恢复"
 
 
-def test_from_env_treats_blank_values_as_unset(monkeypatch):
-    """回归：.env 里写 ``DASHSCOPE_API_KEY=`` / ``VAR=`` 不能让 from_env 崩掉。
+def test_from_config_ignores_environment_entirely(monkeypatch):
+    """配置只认 services.toml：环境变量（含空值占位）不再参与优先级。"""
 
-    Phase 0 把 from_env 接进 get_manager/build_default_manager 后暴露的既有 bug：
-    空字符串被当成「配了空 key」，在 __post_init__ 校验处抛 ValueError，
-    导致 Qdrant/Neo4j 开关的装配路径整体不可用。
-    """
     monkeypatch.setenv("DASHSCOPE_API_KEY", "")
     monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_API_KEY", "")
     monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_MODEL", "")
     monkeypatch.setenv("HELLOAGENTS_MEMORY_QDRANT_URL", "")
 
-    config = MemoryConfig.from_env()
+    config = MemoryConfig.from_config()
 
     assert config.embedding_api_key is None
     assert config.embedding_model  # 回落到类默认值，而不是空串
-    assert config.qdrant_url in (None, "")  # 空 URL 表示「不启用 Qdrant」
+    assert config.qdrant_url is None
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +228,19 @@ def test_from_env_treats_blank_values_as_unset(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_manager_from_env_selects_qdrant_when_url_set(tmp_path, monkeypatch):
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_QDRANT_URL", "http://127.0.0.1:6333")
-    monkeypatch.setenv("EMBEDDING_BASE_URL", "")   # 空即未配置（P0 约定），嵌入回落 Hash
+def test_manager_from_config_selects_qdrant_when_url_set(tmp_path, monkeypatch):
+    from core import services_config
 
-    manager = MemoryManager(MemoryConfig.from_env())
+    monkeypatch.setattr(
+        services_config, "default_config_path", lambda: tmp_path / "services.toml"
+    )
+    (tmp_path / "services.toml").write_text(
+        "[qdrant]\nurl = \"http://127.0.0.1:6333\"\n", encoding="utf-8"
+    )
+
+    config = MemoryConfig.from_config()
+    config.sqlite_path = str(tmp_path / "memory.sqlite3")
+    manager = MemoryManager(config)
 
     try:
         from memory.storage.qdrant import QdrantVectorStore
@@ -246,13 +252,20 @@ def test_manager_from_env_selects_qdrant_when_url_set(tmp_path, monkeypatch):
         manager.close()
 
 
-def test_manager_from_env_selects_neo4j_when_uri_set(tmp_path, monkeypatch):
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_NEO4J_URI", "bolt://127.0.0.1:7687")
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_NEO4J_USERNAME", "neo4j")
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_NEO4J_PASSWORD", "pw")
+def test_manager_from_config_selects_neo4j_when_uri_set(tmp_path, monkeypatch):
+    from core import services_config
 
-    manager = MemoryManager(MemoryConfig.from_env())
+    monkeypatch.setattr(
+        services_config, "default_config_path", lambda: tmp_path / "services.toml"
+    )
+    (tmp_path / "services.toml").write_text(
+        "[neo4j]\nuri = \"bolt://127.0.0.1:7687\"\nusername = \"neo4j\"\npassword = \"pw\"\n",
+        encoding="utf-8",
+    )
+
+    config = MemoryConfig.from_config()
+    config.sqlite_path = str(tmp_path / "memory.sqlite3")
+    manager = MemoryManager(config)
 
     try:
         assert manager.graph_store.driver is not None   # 不再是内存回退（driver 为 None）

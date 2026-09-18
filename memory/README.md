@@ -99,13 +99,11 @@ embedding = APIEmbedding(
 manager = MemoryManager(MemoryConfig(sqlite_path="memory.sqlite3"), embedding=embedding)
 ```
 
-`MemoryConfig` 也支持全环境变量配置（见 `.env.example`）：
-`HELLOAGENTS_MEMORY_EMBEDDING_API_KEY`、`..._EMBEDDING_MODEL`、
-`..._EMBEDDING_BASE_URL`、`..._EMBEDDING_DIMENSION`、`..._EMBEDDING_TIMEOUT`、
-`..._EMBEDDING_BATCH_SIZE`。项目根目录的 `.env` 文件会被自动加载
-（`memory.embedding.load_dotenv_once`，需 `python-dotenv`，已列入依赖），
-因此最简单的方式就是在 `.env` 里写 `DASHSCOPE_API_KEY=sk-...`。若既没有
-显式配置也没有 `DASHSCOPE_API_KEY`，构造管理器时会抛出清晰的错误提示。
+云端嵌入的端点/密钥/模型统一在 `config/services.toml` 的 `[embedding]` 段配置
+（模板见 `config/services.example.toml`）：配齐 `base_url` + `api_key` 后
+`make_default_embedding(MemoryConfig.from_config())` 自动选择云端
+`APIEmbedding`；没有任何云端配置时确定性地回落离线 `HashEmbedding`
+（向量空间与云端互不兼容，仅测试/离线兜底用）。项目不再读取 `.env`。
 
 验证接入与中文检索效果：运行
 `pytest tests/test_embedding_api.py tests/test_embedding_http.py`（前者需 key，后者只验配置）。

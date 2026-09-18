@@ -9,7 +9,6 @@ requires-python = ">=3.12"
 dependencies = [
     "openai>=1.0",
     "pydantic>=2.0",
-    "python-dotenv>=1.0",
     "qdrant-client>=1.12",
     "neo4j>=5.0",
     "fastapi>=0.115",

@@ -2,25 +2,28 @@
 #
 # 用法：复制本文件为 config/services.toml 再填写真实值（services.toml 已被
 # .gitignore 排除，不会提交）。密钥两种写法任选其一：
-#   api_key = "明文"         # 文件不入库，可以直接写（与 provider.toml 同款约定）
-#   api_key_env = "环境变量名" # 推荐：密钥放 .env，这里只写指向（同 provider.toml）
+#   api_key = "明文"         # 推荐：文件不入库，直接写（与 provider.toml 同款约定）
+#   api_key_env = "环境变量名" # 兼容写法：密钥留在系统环境变量里，这里只写指向
 #
-# 优先级：显式构造参数 > 环境变量 > 本文件。.env 里已有的值照旧生效，
-# 本文件只在"调用方和环境变量都没设置"时才补上。模型选择（嵌入模型、识图
-# 抽取模型）统一在本文件配置，.env 只放密钥与部署参数。
+# 优先级：显式构造参数 > 本文件（仅此两层；历史 .env / HELLOAGENTS_MEMORY_*
+# 环境变量优先层已删除）。模型选择（嵌入模型、识图抽取模型）统一在本文件配置。
 #
 # LLM 聊天模型不在这里——它是 provider.toml 的专属职责（config/provider.toml）。
-# 嵌入 SSH 隧道参数（EMBEDDING_TUNNEL_KEY/HINT 等部署信息）也不在这里，仍在 .env。
 
 [embedding]
-# 嵌入服务：端点、模型与凭据。provider 取值：auto | gateway | gemini | openai | hash。
-# 注意：provider = "auto" 时网关自动识别仍只看环境变量 EMBEDDING_BASE_URL；
-# 用本文件配网关端点请显式写 provider = "gateway"。
-# provider = "auto"
-# base_url = "http://127.0.0.1:10800"
-# model = "qwen3-embedding-0.6b"
-# api_key_env = "DASHSCOPE_API_KEY"   # 或 GEMINI_API_KEY / SILICONFLOW_API_KEY
-# dimension = 1024                    # 留空 = 首次响应自动识别
+# 云端嵌入服务（OpenAI 兼容 /embeddings，支持文本与图文 VL 输入）。
+# 端点、模型与凭据只在这里配置；provider 取值：auto | openai | hash。
+#   auto   = 配齐 base_url + api_key 就走云端，否则离线兜底（默认）
+#   openai = 强制云端（缺配置时回落离线并在 /api/health 显示 hash）
+#   hash   = 强制离线（测试用）
+# 维度唯一开关是 model：换模型（如 1024 维 -> 4096 维）后需
+#   python scripts/migrate_to_cloud.py --recreate-collection
+#   python scripts/reindex_embeddings.py
+# 重建投影；dimension 只作校验护栏，留空 = 首次响应自动识别。
+# base_url = "https://api.siliconflow.cn/v1"
+# model = "Qwen/Qwen3-Embedding-0.6B"
+# api_key = "sk-..."
+# dimension = 1024
 # batch_size = 10
 # timeout = 30.0
 
@@ -32,24 +35,25 @@
 # model = "Qwen/Qwen2.5-VL-72B-Instruct"
 
 [search]
-# 联网搜索（AnySearch / OpenAI 兼容网关）。
+# 联网搜索（AnySearch / OpenAI 兼容网关）。唯一配置来源（历史 SEARCH_* /
+# ANYSEARCH_* 环境变量入口已删除）。
 # base_url = "https://your-anysearch-endpoint/v1"
-# api_key_env = "SEARCH_API_KEY"
+# api_key = "sk-..."
 # timeout = 5.0
 
 [qdrant]
 # Qdrant Cloud：https://cloud.qdrant.io 创建的集群。url 用公网 HTTPS 地址，
 # api_key 在集群页面复制。留空则维持"不连接、走内存回退"。
 # url = "https://xxxx-xxxx.us-east-1-0.aws.cloud.qdrant.io:6333"
-# api_key_env = "HELLOAGENTS_MEMORY_QDRANT_API_KEY"
+# api_key = "..."
 # collection = "helloagents_memory"
 
 [neo4j]
 # Neo4j Aura：https://console.neo4j.io 的实例。uri 是 bolt+s:// 地址，
-# username/password 在实例连接详情里；密码也支持 password_env 指向 .env。
+# username/password 在实例连接详情里；密码也支持 password_env 指向环境变量。
 # uri = "bolt+s://xxxx.databases.neo4j.io"
 # username = "neo4j"
-# password_env = "HELLOAGENTS_MEMORY_NEO4J_PASSWORD"
+# password = "..."
 
 [proxy]
 # 本地转发代理（如 Clash 的 http://127.0.0.1:7890）。配置后：
@@ -57,4 +61,5 @@
 #   - Neo4j Aura 通过 CONNECT 隧道走该代理（neo4j 驱动无原生代理支持）。
 #     驱动仍用原始 neo4j+s:// 主机名（保留 SNI/证书校验），Aura 路由表里的
 #     成员主机（*.neo4j.io）各自开一条本地隧道，避免直连被墙或打到错误节点。
+# 不配置时不读系统环境代理（畸形 NO_PROXY 会让 httpx 构造期直接抛错）。
 # url = "http://127.0.0.1:7890"

@@ -48,9 +48,9 @@ def metadata_dict(entries: list[MemoryMetadata] | None) -> dict[str, str]:
 def build_default_manager() -> MemoryManager:
     """Open the shared on-disk memory store used when no manager is injected."""
 
-    # 与 web.support.get_manager 同一口径：HELLOAGENTS_MEMORY_* 控制 Qdrant/Neo4j，
-    # SQLite 路径仍由 MEMORY_DB_PATH 优先。
-    config = MemoryConfig.from_env()
+    # 与 web.support.get_manager 同一口径：services.toml 控制 Qdrant/Neo4j，
+    # SQLite 路径由 default_sqlite_path() 单点决定（MEMORY_DB_PATH 唯一覆盖入口）。
+    config = MemoryConfig.from_config()
     config.sqlite_path = default_sqlite_path()
     return MemoryManager(config)
 

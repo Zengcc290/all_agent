@@ -19,6 +19,36 @@ from memory import MemoryConfig, MemoryManager
 
 
 @pytest.fixture(autouse=True)
+def _strip_ambient_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让测试对本机代理环境变量免疫。
+
+    开着 Clash 等代理软件时，``NO_PROXY``/``ALL_PROXY`` 常带畸形值（如
+    ``[::1]`` 的括号写法），httpx 构造客户端解析 URLPattern 直接抛
+    ``InvalidURL``——与被测代码无关，却在任何真实客户端构造处炸。测试
+    会话统一剥离代理变量；生产端代理只认 config/services.toml [proxy]。
+    """
+
+    for name in (
+        "ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+        "all_proxy", "http_proxy", "https_proxy", "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _web_autoseed_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Web 启动播种默认关闭（原 WEB_AUTOSEED 环境变量已收拢为 constants 常量）。
+
+    测试用注入的内存库显式控制数据；需要播种的用例自行调用 /api/seed 或
+    把 ``web.app.WEB_AUTOSEED`` monkeypatch 回 True。
+    """
+
+    import web.app as web_app
+
+    monkeypatch.setattr(web_app, "WEB_AUTOSEED", False)
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_local_services_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep ``MemoryConfig.from_env()`` hermetic across the test session.
 

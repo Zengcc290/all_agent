@@ -21,14 +21,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from constants import (
-    DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_GEMINI_EMBEDDING_BASE_URL,
-    DEFAULT_GEMINI_EMBEDDING_MODEL,
     DEFAULT_MEMORY_DB_FILENAME,
-    GEMINI_API_KEY_ENV,
-    GEMINI_EMBEDDING_HOST,
     MEMORY_DEFAULT_TTL_SECONDS,
     MEMORY_EMBEDDING_DIMENSION,
     MEMORY_EMBEDDING_DIMENSION_REMOTE,
@@ -40,20 +35,16 @@ from constants import (
     MEMORY_SIMILARITY_THRESHOLD,
     MEMORY_SQLITE_DEFAULT,
     MEMORY_WORKING_CAPACITY,
-    SILICONFLOW_API_KEY_ENV,
 )
 
 # config/services.toml 是"所有外部 API 调用"的集中配置（嵌入/搜索/Qdrant/Neo4j）。
-# core 不依赖 memory，此处导入无循环；只用于 from_env 的未设置字段兜底。
+# core 不依赖 memory，此处导入无循环；只用于 from_config 的未设置字段兜底。
 from core.services_config import ServicesConfig, load_services_config
 
 from .embedding import (
     APIEmbedding,
     BaseEmbedding,
-    EmbedServerEmbedding,
-    GeminiEmbedding,
     HashEmbedding,
-    load_dotenv_once,
 )
 
 if TYPE_CHECKING:
@@ -71,101 +62,56 @@ def default_sqlite_path() -> str:
     """Default persistent SQLite path for the agent-facing memory tools.
 
     The ``MEMORY_DB_PATH`` environment variable overrides the project-relative
-    ``memory.sqlite3`` default.  Callers that inject their own manager are not
-    affected.
+    ``memory.sqlite3`` default (这是唯一保留的路径覆盖入口，单点收拢).
+    Callers that inject their own manager are not affected.
     """
-    return os.getenv("MEMORY_DB_PATH") or DEFAULT_MEMORY_DB_FILENAME
+    return os.getenv("MEMORY_DB_PATH") or str(Path(__file__).resolve().parent.parent / DEFAULT_MEMORY_DB_FILENAME)
 
 
 def make_default_embedding(config: MemoryConfig | None = None) -> BaseEmbedding:
     """Build the default embedding service from a (possibly implicit) config.
 
-    Uses ``MemoryConfig.from_env()`` when no config is supplied.  Selection:
+    Uses ``MemoryConfig.from_config()`` when no config is supplied.  Selection:
 
-    1. ``embedding_provider`` forces a backend when it is not ``"auto"``;
-    2. otherwise a local embed gateway configured via ``EMBEDDING_BASE_URL`` (a
-       forwarded-port service speaking the custom ``/embed`` protocol) wins;
-    3. otherwise a key (``embedding_api_key`` / ``GEMINI_API_KEY`` /
-       ``DASHSCOPE_API_KEY``) activates a remote API - Gemini's ``:embedContent``
-       when the endpoint host or model says Gemini, the OpenAI-compatible
-       ``/embeddings`` shape otherwise;
-    4. without any key the deterministic offline
-       :class:`~memory.embedding.HashEmbedding` is used instead of raising, so the
-       memory layer, the agent tools and the web app stay usable offline.
+    1. ``embedding_provider == "hash"`` forces the offline fallback;
+    2. otherwise a configured cloud endpoint (``[embedding].base_url`` +
+       ``api_key`` in config/services.toml) activates the OpenAI-compatible
+       :class:`~memory.embedding.APIEmbedding` (text and image/text VL input);
+    3. without a complete cloud configuration the deterministic offline
+       :class:`~memory.embedding.HashEmbedding` is used instead of raising, so
+       the memory layer, the agent tools and the web app stay usable offline.
 
-    These vector spaces are not interchangeable; changing the provider requires
-    re-indexing stored items (``scripts/reindex_embeddings.py``).
+    Cloud vector spaces are not interchangeable; changing the model requires
+    rebuilding the projections (维度唯一开关是 ``[embedding].model``，见
+    ``QdrantVectorStore`` 的维度守卫与 ``scripts/migrate_to_cloud.py``).
     """
-    config = config if config is not None else MemoryConfig.from_env()
-    load_dotenv_once()
+    config = config if config is not None else MemoryConfig.from_config()
     provider = (config.embedding_provider or MEMORY_EMBEDDING_PROVIDER_DEFAULT).strip().casefold()
 
     if provider == "hash":
         return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
 
-    # 转发网关与离线兜底沿用 1024 维默认值：网关那头是固定的 qwen-embed 模型。
-    if provider == "gateway":
-        return EmbedServerEmbedding(
-            base_url=config.embedding_base_url,
-            dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION,
-            timeout=config.embedding_timeout,
-            batch_size=config.embedding_batch_size,
-        )
-    server_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip()
-    if provider == "auto" and server_url:
-        return EmbedServerEmbedding(
-            base_url=server_url,
-            dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION,
-            timeout=config.embedding_timeout,
-            batch_size=config.embedding_batch_size,
-        )
-
-    use_gemini = provider == "gemini" or (
-        provider == "auto"
-        and (
-            GEMINI_EMBEDDING_HOST in config.embedding_base_url
-            or config.embedding_model.startswith("gemini-")
-        )
-    )
-    if use_gemini:
-        api_key = config.embedding_api_key or os.getenv(GEMINI_API_KEY_ENV)
-        if not api_key or not str(api_key).strip():
-            return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
-        # 留下的类默认值（qwen 的模型名与本机网关地址）说明调用方没填，
-        # 这里补成 Gemini 的值，省得只配一个 key 还要把端点抄一遍。
-        model = config.embedding_model
-        if model == DEFAULT_EMBEDDING_MODEL:
-            model = DEFAULT_GEMINI_EMBEDDING_MODEL
-        base_url = config.embedding_base_url
-        if base_url == DEFAULT_EMBEDDING_BASE_URL:
-            base_url = DEFAULT_GEMINI_EMBEDDING_BASE_URL
-        return GeminiEmbedding(
+    base_url = (config.embedding_base_url or "").strip()
+    api_key = str(config.embedding_api_key or "").strip()
+    if base_url and api_key:
+        return APIEmbedding(
             api_key=api_key,
-            model=model,
+            model=config.embedding_model,
             base_url=base_url,
             dimension=config.embedding_dimension,
             timeout=config.embedding_timeout,
+            batch_size=config.embedding_batch_size,
         )
-
-    api_key = config.embedding_api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv(SILICONFLOW_API_KEY_ENV)
-    if not api_key or not str(api_key).strip():
-        return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
-    return APIEmbedding(
-        api_key=api_key,
-        model=config.embedding_model,
-        base_url=config.embedding_base_url,
-        dimension=config.embedding_dimension,
-        timeout=config.embedding_timeout,
-        batch_size=config.embedding_batch_size,
-    )
+    # provider=openai 显式要求云端却没配全：按约定退回离线兜底并让
+    # /api/health 的 embedding_mode 如实显示 hash，而不是启动失败。
+    return HashEmbedding(dimension=config.embedding_dimension or MEMORY_EMBEDDING_DIMENSION)
 
 
 def _merge_services_into(values: dict[str, object], services: ServicesConfig) -> None:
-    """Fill ``values`` with fields the environment left unset, from services.toml.
+    """Fill ``values`` with fields left unset, from services.toml.
 
-    ``from_env`` builds ``values`` from ``HELLOAGENTS_MEMORY_*`` first; this
-    helper only adds a field when it is absent, so environment and explicit
-    constructor arguments always win over the shared services file.
+    ``from_config`` 由此构建 ``values``；这个 helper 只在字段缺席时补值，
+    所以显式构造参数永远优先于共享的 services 配置文件。
     """
 
     embedding = services.embedding
@@ -343,25 +289,25 @@ class MemoryConfig:
     working_memory_capacity: int = MEMORY_WORKING_CAPACITY
     search_limit: int = MEMORY_SEARCH_LIMIT
     similarity_threshold: float = MEMORY_SIMILARITY_THRESHOLD
-    # 远端嵌入的期望维度。留空（None）= 不预设，首次响应里自动识别；转发网关与
-    # 离线兜底不受影响，仍用 MEMORY_EMBEDDING_DIMENSION（1024）。
+    # 远端嵌入的期望维度。留空（None）= 不预设，首次响应里自动识别；离线
+    # 兜底不受影响，仍用 MEMORY_EMBEDDING_DIMENSION（1024）。
     embedding_dimension: int | None = MEMORY_EMBEDDING_DIMENSION_REMOTE
-    # 嵌入提供方；auto = 按 EMBEDDING_BASE_URL / 端点主机 / 模型名自动判定。
+    # 嵌入提供方；auto = 配置了 [embedding] 端点+密钥就走云端，否则离线兜底。
     embedding_provider: str = MEMORY_EMBEDDING_PROVIDER_DEFAULT
-    # Embedding provider settings; an API key may also come from the
-    # ``DASHSCOPE_API_KEY`` / ``GEMINI_API_KEY`` environment variables.
+    # 云端嵌入（OpenAI 兼容 /embeddings，支持文本与图文 VL 输入）。
+    # 端点/密钥/模型统一来自 config/services.toml 的 [embedding] 段；
+    # 留空 = 未配置云端，make_default_embedding 退回离线 HashEmbedding。
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
-    embedding_base_url: str = DEFAULT_EMBEDDING_BASE_URL
+    embedding_base_url: str = ""
     embedding_api_key: str | None = None
     embedding_timeout: float = MEMORY_EMBEDDING_TIMEOUT
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     # ---- 连接开关：出厂 None = **不连接**，走内存回退（Qdrant/Neo4j 都不起也能跑）----
     # 端点/端口的单一事实来源是 constants.py 的「连接与端点」小节
     # （DEFAULT_QDRANT_URL / DEFAULT_NEO4J_URI / DEFAULT_*_PORT）。
-    # 要连真服务就在 .env 里设（前缀由 from_env 的 prefix 决定）：
-    #   HELLOAGENTS_MEMORY_QDRANT_URL=https://xxxx.qdrant.tech   （+_QDRANT_API_KEY）
-    #   HELLOAGENTS_MEMORY_NEO4J_URI=bolt+s://xxxx.databases.neo4j.io  （+_USERNAME/_PASSWORD）
-    # 也可以在 config/services.toml 的 [qdrant] / [neo4j] 段集中配置（env 优先）。
+    # 要连真服务就在 config/services.toml 集中配置：
+    #   [qdrant]  url = "https://xxxx.qdrant.tech"（+ api_key / collection）
+    #   [neo4j]   uri = "bolt+s://xxxx.databases.neo4j.io"（+ username/password）
     # 选型发生在 memory/manager.py：qdrant_url 非空才建 QdrantVectorStore。
     qdrant_url: str | None = None
     qdrant_collection: str = MEMORY_QDRANT_COLLECTION
@@ -392,10 +338,11 @@ class MemoryConfig:
         if not isinstance(self.embedding_provider, str) or self.embedding_provider.strip().casefold() not in MEMORY_EMBEDDING_PROVIDERS:
             raise ValueError(f"embedding_provider must be one of {', '.join(MEMORY_EMBEDDING_PROVIDERS)}")
         self.embedding_provider = self.embedding_provider.strip().casefold()
-        for name in ("embedding_model", "embedding_base_url"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} must be a non-empty string")
+        # embedding_base_url 允许空串 = 未配置云端（离线兜底）；model 必填。
+        if not isinstance(self.embedding_model, str) or not self.embedding_model.strip():
+            raise ValueError("embedding_model must be a non-empty string")
+        if not isinstance(self.embedding_base_url, str):
+            raise TypeError("embedding_base_url must be a string (empty = cloud not configured)")
         if not isinstance(self.embedding_api_key, (str, type(None))) or (isinstance(self.embedding_api_key, str) and not self.embedding_api_key.strip()):
             raise ValueError("embedding_api_key must be a non-empty string or None")
         for name in ("embedding_timeout", "embedding_batch_size"):
@@ -419,45 +366,17 @@ class MemoryConfig:
             self.extra = dict(self.extra)
 
     @classmethod
-    def from_env(cls, prefix: str = "HELLOAGENTS_MEMORY_") -> MemoryConfig:
-        """Build configuration from environment variables.
+    def from_config(cls) -> MemoryConfig:
+        """Build configuration from ``config/services.toml``.
 
-        Supported names mirror the dataclass fields, e.g.
-        ``HELLOAGENTS_MEMORY_SQLITE_PATH`` and ``..._QDRANT_URL``.  Numeric
-        fields are coerced appropriately; ``embedding_api_key`` also falls
-        back to the common ``DASHSCOPE_API_KEY`` variable.
+        只有两层优先级：**显式构造参数 > services.toml**。历史上的
+        ``HELLOAGENTS_MEMORY_*`` 环境变量层与 ``.env`` 装载已删除（配置只认
+        config/ 与 constants.py）。services.toml 是"所有外部 API 调用"的集中
+        配置，见 core/services_config.py；补进来的值同样要过 ``__post_init__``
+        校验。
         """
         values: dict[str, object] = {}
-        load_dotenv_once()
-        for field_name in cls.__dataclass_fields__:
-            key = f"{prefix}{field_name.upper()}"
-            raw = os.getenv(key)
-            if raw is None or not raw.strip():
-                # 空值等同于未设置：``VAR=`` 是 .env 里最常见的占位写法，
-                # 直接透传会让 embedding_api_key / embedding_model /
-                # embedding_base_url 这类「非空字符串」字段在 __post_init__
-                # 里抛 ValueError，使整个 from_env 不可用。
-                continue
-            if field_name == "embedding_dimension":
-                # auto / none / 0 = 不预设：维度由首次响应决定（换远端平台不用改这里）。
-                values[field_name] = None if raw.casefold() in {"auto", "none", "0"} else int(raw)
-            elif field_name in {"working_memory_capacity", "search_limit", "embedding_batch_size"}:
-                values[field_name] = int(raw)
-            elif field_name in {"default_ttl_seconds", "similarity_threshold", "embedding_timeout"}:
-                values[field_name] = None if raw.casefold() == "none" else float(raw)
-            elif field_name == "extra":
-                continue
-            else:
-                values[field_name] = raw
-        # 环境变量没设置的字段，从 config/services.toml 补（env 优先：
-        # services.toml 是"所有外部 API 调用"的集中配置，见 core/services_config.py；
-        # 补进来的值同样要过下面的 __post_init__ 校验）。
         _merge_services_into(values, load_services_config())
-        if not values.get("embedding_api_key"):
-            # 同理：空的 DASHSCOPE_API_KEY 表示「没配 key」，而不是「配了空 key」。
-            # 这一步放在 services.toml 合并之后：显式配置（含 services.toml）优先
-            # 于这个隐式旧环境变量回退。
-            values["embedding_api_key"] = (os.getenv("DASHSCOPE_API_KEY") or "").strip() or None
         return cls(**values)
 
     def to_dict(self) -> dict[str, object]:
@@ -490,9 +409,10 @@ class BaseMemory:
     def _embed_item(self, content: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
         """Embed one write, letting multimodal backends fold in ``payload``.
 
-        ``BaseEmbedding.embed_item`` is text-only; ``GeminiEmbedding`` overrides it
-        to embed images and fused image+text.  Injected embeddings that are not
-        ``BaseEmbedding`` subclasses fall back to plain ``embed``.
+        ``BaseEmbedding.embed_item`` is text-only; cloud VL models
+        (``APIEmbedding``，模型名带 ``vl``) override it to embed images and
+        fused image+text.  Injected embeddings that are not ``BaseEmbedding``
+        subclasses fall back to plain ``embed``.
         """
         embed_item = getattr(self.embedding, "embed_item", None)
         if callable(embed_item):

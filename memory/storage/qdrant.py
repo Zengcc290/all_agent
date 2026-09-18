@@ -11,6 +11,19 @@ from ..base import MemoryItem, MemoryType
 from .vector import BaseVectorStore
 
 
+def _dimension_mismatch_message(collection: str, existing: int, actual: int) -> str:
+    """维度冲突的修复指引：维度只有一个开关——[embedding].model。"""
+
+    return (
+        f"Qdrant collection dimension mismatch: 集合 {collection!r} 是 {existing} 维，"
+        f"但当前 embedding 模型输出 {actual} 维。维度不能单独改集合或配置："
+        "要么把 config/services.toml 的 [embedding].model 换回原模型；"
+        "要么按新模型重建向量投影（SQLite 是真值，可全量重灌）——先运行 "
+        "python scripts/migrate_to_cloud.py --recreate-collection（重建集合并重灌 chunks），"
+        "再运行 python scripts/reindex_embeddings.py（重灌记忆条目向量）。"
+    )
+
+
 class QdrantVectorStore(BaseVectorStore):
     """Qdrant vector database adapter.
 
@@ -41,7 +54,10 @@ class QdrantVectorStore(BaseVectorStore):
                 elif proxy_url:
                     client = QdrantClient(url=url, api_key=api_key, proxy=proxy_url)
                 else:
-                    client = QdrantClient(url=url, api_key=api_key)
+                    # 无 [proxy] 配置时也不读系统环境代理：畸形 NO_PROXY
+                    # （如带方括号的 [::1]）会让 httpx 在构造期直接抛
+                    # InvalidURL；要代理就在 services.toml [proxy] 显式配。
+                    client = QdrantClient(url=url, api_key=api_key, trust_env=False)
             else:
                 client = QdrantClient(path=":memory:")
         if not isinstance(collection_name, str) or not collection_name.strip():
@@ -60,7 +76,7 @@ class QdrantVectorStore(BaseVectorStore):
             if not exists:
                 self.client.create_collection(collection_name=self.collection_name, vectors_config=VectorParams(size=dimension, distance=Distance.COSINE))
             elif self.dimension is not None and self.dimension != dimension:
-                raise ValueError(f"Qdrant collection dimension mismatch: expected {self.dimension}, got {dimension}")
+                raise ValueError(_dimension_mismatch_message(self.collection_name, self.dimension, dimension))
             else:
                 get_collection = getattr(self.client, "get_collection", None)
                 if callable(get_collection):
@@ -68,7 +84,7 @@ class QdrantVectorStore(BaseVectorStore):
                     configured = getattr(getattr(info, "config", None), "params", None)
                     configured_size = getattr(configured, "size", None)
                     if configured_size is not None and int(configured_size) != dimension:
-                        raise ValueError(f"Qdrant collection dimension mismatch: existing {configured_size}, got {dimension}")
+                        raise ValueError(_dimension_mismatch_message(self.collection_name, int(configured_size), dimension))
             self.dimension = dimension
             self._ensure_payload_indexes()
             self._ready = True
@@ -101,6 +117,33 @@ class QdrantVectorStore(BaseVectorStore):
                 )
             except Exception:  # noqa: BLE001 - 已存在 / 集群不支持 / 权限不足都按已处理
                 continue
+
+    def recreate_collection(self, dimension: int) -> None:
+        """Drop and recreate the collection at ``dimension``（换嵌入模型后重建投影）。
+
+        向量只是 SQLite 真值的投影：删除集合只丢投影不丢数据，随后用
+        ``migrate_to_cloud.py``（chunks）与 ``reindex_embeddings.py``（记忆条目）
+        按新模型全量重灌即可恢复。
+        """
+
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+            raise ValueError("dimension must be a positive integer")
+        try:
+            from qdrant_client.models import Distance, VectorParams
+
+            if self.client.collection_exists(collection_name=self.collection_name):
+                self.client.delete_collection(collection_name=self.collection_name)
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=dimension, distance=Distance.COSINE),
+            )
+            self.dimension = dimension
+            self._ensure_payload_indexes()
+            self._ready = True
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"unable to recreate Qdrant collection: {exc}") from exc
 
     def upsert(self, item: MemoryItem) -> None:
         if not item.embedding:

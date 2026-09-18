@@ -57,6 +57,6 @@ memory.rag_search / memory.rag                  （恒星=领域 行星=实体 �
 - `app.py` —— FastAPI 路由与应用工厂（`create_app(manager=None)` 可注入测试内存库）
 - `graph_builder.py` —— 记忆项 → 星云 nodes/edges 的映射规则
 - `support.py` —— 单例、聊天可用性与嵌入装配（离线降级实现由 `memory.embedding.HashEmbedding` 提供）
-- `seed.py` —— Aetheria 种子数据播种（幂等，可用 `WEB_AUTOSEED=0` 关闭自动播种）
+- `seed.py` —— Aetheria 种子数据播种（幂等；自动播种开关在 `constants.WEB_AUTOSEED`，默认开）
 - `static/index.html` —— 星云图前端（改造自 Aetheria 单文件 HTML）
 - `seed_data.json` —— 种子数据（从原 HTML 的 celestialTree 提取）

@@ -7,8 +7,8 @@ agent tools (``memory.query``/``memory.add``/``memory.manage`` and
 Package layout:
 
 - ``base``      data structures (``MemoryItem``, ``MemoryConfig``) and ``BaseMemory``
-- ``embedding`` API embedding (qwen3-embedding-0.6b via an OpenAI-compatible
-                endpoint) plus the deterministic offline ``HashEmbedding``
+- ``embedding`` cloud API embedding (OpenAI-compatible ``/embeddings``，支持
+                文本与图文 VL 输入) plus the deterministic offline ``HashEmbedding``
 - ``ids``       stable entity/fact id derivation shared by the RAG writers
 - ``types``     working, episodic, semantic and perceptual memories
 - ``storage``   SQLite documents, local/Qdrant vector indexes, Neo4j graph
@@ -28,16 +28,10 @@ from .base import (
     utc_now,
 )
 from .embedding import (
-    DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_GEMINI_EMBEDDING_BASE_URL,
-    DEFAULT_GEMINI_EMBEDDING_MODEL,
     APIEmbedding,
     BaseEmbedding,
-    EmbedServerEmbedding,
-    GeminiEmbedding,
     HashEmbedding,
-    load_dotenv_once,
 )
 from .manager import MemoryManager
 from .rag import Document, DocumentProcessor, RAGPipeline, RetrievedChunk
@@ -53,10 +47,7 @@ from .storage import (
 from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
 
 __all__ = [
-    "DEFAULT_EMBEDDING_BASE_URL",
     "DEFAULT_EMBEDDING_MODEL",
-    "DEFAULT_GEMINI_EMBEDDING_BASE_URL",
-    "DEFAULT_GEMINI_EMBEDDING_MODEL",
     "APIEmbedding",
     "BaseDocumentStore",
     "BaseEmbedding",
@@ -64,9 +55,7 @@ __all__ = [
     "BaseVectorStore",
     "Document",
     "DocumentProcessor",
-    "EmbedServerEmbedding",
     "EpisodicMemory",
-    "GeminiEmbedding",
     "HashEmbedding",
     "InMemoryVectorStore",
     "MemoryConfig",
@@ -85,7 +74,6 @@ __all__ = [
     "cosine_similarity",
     "default_sqlite_path",
     "ensure_datetime",
-    "load_dotenv_once",
     "make_default_embedding",
     "utc_now",
 ]

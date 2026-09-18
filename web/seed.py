@@ -3,7 +3,7 @@
 幂等：以 ``metadata.seed == SEED_MARK`` 作为标记，重复调用不会重复导入。
 支持三种运行方式：
 - ``python -m web.seed``            命令行手动播种
-- 应用启动时自动播种（manager 为空时，可用 WEB_AUTOSEED=0 关闭）
+- 应用启动时自动播种（开关在 ``constants.WEB_AUTOSEED``，默认开）
 - ``POST /api/seed``               强制重新检查播种
 """
 

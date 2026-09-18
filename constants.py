@@ -8,8 +8,8 @@
 每个常量都以注释标注它"所在/来自"的源文件，便于溯源。
 
 下文「连接与端点」一节是**「服务连哪里」的唯一事实来源**（本机回环端口、
-Qdrant/Neo4j 端点、嵌入网关与隧道端口）；部署机密的覆盖入口是 ``.env``
-（不入库）。
+Qdrant/Neo4j 端点）；云端服务与部署密钥的覆盖入口是 ``config/services.toml``
+与 ``config/provider.toml``（均不入库）。
 
 刻意**不**收进来的（各有归属，集中反而割裂，列出出处便于查找）：
   - ``tool/*.py`` 的 ``TOOL_ENABLED``：工具发现协议要求的每模块开关（见上）。
@@ -74,18 +74,17 @@ DEFAULT_UPDATE_LOG_FILENAME = "update_log.sqlite3"
 DEFAULT_MEMORY_DB_FILENAME = "memory.sqlite3"
 
 # ---------------------------------------------------------------------------
-# 连接与端点（本机回环 / SSH 隧道）——「服务连哪里」的唯一事实来源
+# 连接与端点（本机回环）——「服务连哪里」的唯一事实来源
 #   所在文件：constants.py（本段定义）→ 直接 import 方：
-#     memory/base.py（MemoryConfig 连接字段的默认值与说明）、
-#     memory/embedding.py（EmbedServerEmbedding 默认 base_url、gateway_reachable）、
 #     memory/storage/qdrant.py（默认 collection）、web/app.py（服务监听 host/port）
 #   间接消费方（不 import，由 MemoryConfig 传值决定选型）：
 #     memory/manager.py（qdrant_url/neo4j_uri 非空才建真存储，否则内存回退）、
 #     memory/storage/graph.py（URI 由 MemoryConfig 传参）
-#   部署覆盖入口：.env（不入库；模板见仓库外，键名见下方各常量注释）
+#   外部服务（云端嵌入 / Qdrant Cloud / Neo4j Aura / 联网搜索 / 代理）的
+#   端点与密钥统一配置在 config/services.toml（不入库；模板 services.example.toml）。
 #   重要：下面的 QDRANT / NEO4J 端点是「本机文档化默认值」，**不是默认启用**。
 #   MemoryConfig.qdrant_url / neo4j_uri 出厂仍为 None（= 不连接、走内存回退），
-#   只有显式配置（.env 或构造参数）才连真服务；理由见方案 §12 与 F3。
+#   只有显式配置（services.toml 或构造参数）才连真服务；理由见方案 §12 与 F3。
 # ---------------------------------------------------------------------------
 
 #: 本机服务统一绑定的回环地址。用字面 IP 而不是 "localhost"：后者在
@@ -93,45 +92,32 @@ DEFAULT_MEMORY_DB_FILENAME = "memory.sqlite3"
 LOCALHOST = "127.0.0.1"
 
 #: 本机回环端口分配表（改端口只改这里）：
-#:   10800 = SSH 隧道入口，即 EMBEDDING_BASE_URL 的端口；
 #:    6333 = 本地 Qdrant HTTP；
 #:    7687 = 本地 Neo4j bolt；
-#:    8765 = 本地 Web 服务（环境变量 NEBULA_PORT 可覆盖）。
-DEFAULT_EMBEDDING_GATEWAY_PORT = 10800
+#:    8765 = 本地 Web 服务。
 DEFAULT_QDRANT_PORT = 6333
 DEFAULT_NEO4J_BOLT_PORT = 7687
 DEFAULT_WEB_PORT = 8765
 
-#: 隧道另一端的 qwen-embed 网关端口由 .env 的 EMBEDDING_TUNNEL_HINT 或部署
-#: 文档提供（主机名与 SSH 端口属部署信息，**不写进仓库**）。
-
-#: 本地 Qdrant 端点。启用方式（.env，不入库）：
-#:   HELLOAGENTS_MEMORY_QDRANT_URL=http://127.0.0.1:6333
+#: 本地 Qdrant 端点。启用方式（config/services.toml [qdrant]）：
+#:   url = "http://127.0.0.1:6333"
 DEFAULT_QDRANT_URL = f"http://{LOCALHOST}:{DEFAULT_QDRANT_PORT}"
 
-#: 本地 Neo4j 端点。启用方式（.env，不入库）：
-#:   HELLOAGENTS_MEMORY_NEO4J_URI=bolt://127.0.0.1:7687
-#:   HELLOAGENTS_MEMORY_NEO4J_USERNAME=neo4j
-#:   HELLOAGENTS_MEMORY_NEO4J_PASSWORD=<你的密码>
-#: 账号密码没有出厂默认值：MemoryConfig 的这两个字段默认为 None（不连接），
-#: 真实值只放 .env。
+#: 本地 Neo4j 端点。启用方式（config/services.toml [neo4j]）：
+#:   uri = "bolt://127.0.0.1:7687"（username/password 同段配置）
 DEFAULT_NEO4J_URI = f"bolt://{LOCALHOST}:{DEFAULT_NEO4J_BOLT_PORT}"
 
 # ---------------------------------------------------------------------------
 # 嵌入服务（memory/embedding.py）
 #   所在文件：memory/embedding.py（APIEmbedding 默认参数）、memory/base.py（MemoryConfig）
+#   端点/密钥/模型统一来自 config/services.toml [embedding]；维度唯一开关是
+#   [embedding].model（维度由模型输出决定，集合不匹配时 Qdrant 守卫会拦下）。
 # ---------------------------------------------------------------------------
 
-#: 默认端点与模型（qwen3-embedding-0.6b，1024 维）。
-#: 端点默认指向**本机隧道**（方案 §0.1/D8：网关是唯一嵌入来源；端口取自
-#: 上面的 DEFAULT_EMBEDDING_GATEWAY_PORT，.env 里的 EMBEDDING_TUNNEL_HINT
-#: 给出建隧道的命令）。不要改回公网厂商端点：
-#: 那样在缺 .env 时会静默改用另一套向量空间（§12「向量空间不可互换」），
-#: 而指向本机隧道时隧道不通会明确降级为关键词检索并提示隧道命令。
-DEFAULT_EMBEDDING_BASE_URL = f"http://{LOCALHOST}:{DEFAULT_EMBEDDING_GATEWAY_PORT}"
+#: 默认模型名（仅当 [embedding].model 未配置时的兜底；建议显式配置）。
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding-0.6b"
 
-#: DashScope 风格批处理上限；其他厂商可在构造时降低/提高 batch_size。
+#: DashScope 风格批处理上限；其他厂商可在 [embedding].batch_size 调整。
 DEFAULT_EMBEDDING_BATCH_SIZE = 10
 
 # ---------------------------------------------------------------------------
@@ -151,36 +137,19 @@ MEMORY_SEARCH_LIMIT = 10
 #: 语义检索默认相似度阈值（0 表示不过滤）。
 MEMORY_SIMILARITY_THRESHOLD = 0.0
 
-#: qwen3-embedding-0.6b 的向量维度；也是离线 ``HashEmbedding`` 与转发网关的默认维度。
+#: 离线 ``HashEmbedding`` 的默认维度（仅测试与无云端配置的兜底场景）。
 MEMORY_EMBEDDING_DIMENSION = 1024
 
 #: 远端嵌入的期望向量维度。**出厂留空（None）= 不预设**：首次调用时从响应里
-#: 自动识别维度（``APIEmbedding`` / ``GeminiEmbedding`` 都把 0 当作「尚未知」），
-#: 因此接任意平台都不必先查文档。要固定维度就把整数填在这里。
+#: 自动识别维度（``APIEmbedding`` 把 0 当作「尚未知」），因此接任意平台都不必
+#: 先查文档。要固定维度就把整数填在 [embedding].dimension。
 MEMORY_EMBEDDING_DIMENSION_REMOTE: int | None = None
 
-#: 嵌入提供方。``auto`` 按既有优先级自动判定（转发网关 → 远端 API → 离线兜底），
-#: 其余值强制指定：``gateway`` 本机转发网关（自定义 ``/embed``）、``gemini``
-#: Gemini ``:embedContent``、``openai`` OpenAI 兼容 ``/embeddings``、``hash`` 离线。
+#: 嵌入提供方。``auto``（默认）= 配置了 [embedding] 端点+密钥就走云端
+#: APIEmbedding，否则离线兜底；``openai`` 强制云端（缺配置时报错回退）；
+#: ``hash`` 强制离线。
 MEMORY_EMBEDDING_PROVIDER_DEFAULT = "auto"
-MEMORY_EMBEDDING_PROVIDERS = ("auto", "gateway", "gemini", "openai", "hash")
-
-#: Gemini ``:embedContent`` 端点与默认模型（Google AI Studio）。
-#: 协议与 OpenAI 兼容端点不同：认证头 ``x-goog-api-key``、请求体
-#: ``{"content": {"parts": [...]}}``、响应 ``embedding.values``、可选
-#: ``config.outputDimensionality`` 降维（默认 3072，可降到 1536/768/128）。
-DEFAULT_GEMINI_EMBEDDING_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2"
-
-#: ``provider=auto`` 时据主机名判定走 Gemini 协议的标记。
-GEMINI_EMBEDDING_HOST = "generativelanguage.googleapis.com"
-
-#: Gemini 的 API key 环境变量名（``MemoryConfig.embedding_api_key`` 之外的回退）。
-GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
-
-#: SiliconFlow 的 API key 环境变量名；OpenAI 兼容分支的另一个回退
-#: （其视觉语言嵌入模型 ``Qwen/Qwen3-VL-Embedding-*`` 也走 ``/v1/embeddings``）。
-SILICONFLOW_API_KEY_ENV = "SILICONFLOW_API_KEY"
+MEMORY_EMBEDDING_PROVIDERS = ("auto", "openai", "hash")
 
 #: 嵌入请求超时（秒）。
 MEMORY_EMBEDDING_TIMEOUT = 30.0
@@ -224,9 +193,20 @@ MEMORY_EDGE_WEIGHT_GROWTH = 1.5
 #: 边权重上限：防止"富者越富"把热门边推到无穷大。
 MEMORY_EDGE_WEIGHT_MAX = 8.0
 
-#: F1 边强化总开关的环境变量名。默认开启；置 0/false/off/no 时检索完全不
-#: 触发递增、排序退回纯 confidence——用于还原旧行为与回归对照。
-MEMORY_EDGE_REINFORCE_ENV = "HELLOAGENTS_MEMORY_EDGE_REINFORCE"
+#: F1 边强化总开关。默认开启；置 False 时检索完全不触发递增、排序退回纯
+#: confidence——用于还原旧行为与回归对照（测试里 monkeypatch 本常量）。
+MEMORY_EDGE_REINFORCE = True
+
+# ---------------------------------------------------------------------------
+# 检索与入库的运行开关（原散落的环境变量收拢于此；测试可 monkeypatch）
+#   所在文件：memory/rag/pipeline.py、memory/rag/graph_rag.py、web/ingest_queue.py
+# ---------------------------------------------------------------------------
+
+#: RAG 混合检索（FTS5 关键词 × 向量 RRF 融合）总开关；False = 纯向量。
+MEMORY_HYBRID = True
+
+#: 一句话后台入库队列的并发 worker 数（I/O 为主，2-3 即可吃满 LLM 延迟）。
+KNOWLEDGE_INGEST_WORKERS = 2
 
 # ---------------------------------------------------------------------------
 # 知识抽取（memory/rag/knowledge.py）
@@ -293,6 +273,15 @@ WEB_INGEST_CHUNK_SIZE = 800
 
 #: 问答抽取的切块块长。问答通常很短，不需要按文档大小切。
 QA_EXTRACT_CHUNK_SIZE = 2000
+
+#: Web 启动时是否自动播种演示数据（首次启动让星图有内容）；测试 monkeypatch。
+WEB_AUTOSEED = True
+
+#: 问答后自动抽取图事实（后台线程）总开关；测试 monkeypatch 关闭以隔离。
+WEB_QA_EXTRACT = True
+
+#: 抽取线程是否改为同步执行（仅调试/测试用，避免后台线程竞争）。
+WEB_QA_EXTRACT_SYNC = False
 
 # ---------------------------------------------------------------------------
 # 星图构建（web/graph_builder.py）

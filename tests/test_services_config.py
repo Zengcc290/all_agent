@@ -1,6 +1,5 @@
 """config/services.toml 集中配置加载器与各消费方接线测试。"""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -16,11 +15,11 @@ def write_services(path: Path, body: str) -> None:
 
 FULL_SERVICES = """\
 [embedding]
-provider = "gemini"
-base_url = "https://generativelanguage.googleapis.com/v1beta"
-model = "gemini-embedding-2"
-api_key_env = "TEST_GEMINI_KEY"
-dimension = 768
+provider = "openai"
+base_url = "https://api.siliconflow.cn/v1"
+model = "Qwen/Qwen3-VL-Embedding-0.6B"
+api_key_env = "TEST_EMBED_KEY"
+dimension = 1024
 batch_size = 8
 timeout = 15.0
 
@@ -47,16 +46,16 @@ password = "plaintext-neo4j-password"
 def test_loads_all_sections_with_secret_resolution(tmp_path, monkeypatch):
     config = tmp_path / "services.toml"
     write_services(config, FULL_SERVICES)
-    monkeypatch.setenv("TEST_GEMINI_KEY", "gemini-secret")
+    monkeypatch.setenv("TEST_EMBED_KEY", "embed-secret")
     monkeypatch.setenv("TEST_QDRANT_KEY", "qdrant-secret")
 
     services = load_services_config(config)
 
-    assert services.embedding.provider == "gemini"
-    assert services.embedding.base_url == "https://generativelanguage.googleapis.com/v1beta"
-    assert services.embedding.model == "gemini-embedding-2"
-    assert services.embedding.api_key == "gemini-secret"
-    assert services.embedding.dimension == 768
+    assert services.embedding.provider == "openai"
+    assert services.embedding.base_url == "https://api.siliconflow.cn/v1"
+    assert services.embedding.model == "Qwen/Qwen3-VL-Embedding-0.6B"
+    assert services.embedding.api_key == "embed-secret"
+    assert services.embedding.dimension == 1024
     assert services.embedding.batch_size == 8
     assert services.embedding.timeout == 15.0
 
@@ -198,7 +197,7 @@ def test_neo4j_accepts_bolt_scheme_but_rejects_others(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 消费方接线：MemoryConfig.from_env / SearchTool / web.search_available
+# 消费方接线：MemoryConfig.from_config / SearchTool / web.search_available
 # ---------------------------------------------------------------------------
 
 
@@ -208,30 +207,7 @@ def write_and_point(path: Path, body: str, monkeypatch: pytest.MonkeyPatch) -> P
     return path
 
 
-def clean_memory_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """隔离真实 .env：禁掉 from_env 内部的 dotenv 重载 + 清掉相关环境变量。
-
-    from_env 里的 load_dotenv_once() 用 override=False 会把 .env 重新灌回
-    环境（包括 HELLOAGENTS_MEMORY_QDRANT_URL 这类真实机器值），必须一起禁用，
-    否则测试结果会依赖这台机器上的 .env。
-    """
-
-    import memory.base as memory_base
-
-    monkeypatch.setattr(memory_base, "load_dotenv_once", lambda: None)
-    for name in (
-        "DASHSCOPE_API_KEY",
-        "GEMINI_API_KEY",
-        "SILICONFLOW_API_KEY",
-        "EMBEDDING_BASE_URL",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    for name in list(os.environ):
-        if name.startswith("HELLOAGENTS_MEMORY_"):
-            monkeypatch.delenv(name, raising=False)
-
-
-def test_from_env_merges_services_toml_for_unset_fields(tmp_path, monkeypatch):
+def test_from_config_merges_services_toml(tmp_path, monkeypatch):
     config = tmp_path / "services.toml"
     write_and_point(
         config,
@@ -255,12 +231,11 @@ password_env = "TEST_NEO4J_PASSWORD"
 """,
         monkeypatch,
     )
-    clean_memory_env(monkeypatch)
     monkeypatch.setenv("TEST_EMBED_KEY", "embed-secret")
     monkeypatch.setenv("TEST_QDRANT_KEY", "qdrant-secret")
     monkeypatch.setenv("TEST_NEO4J_PASSWORD", "neo4j-secret")
 
-    config_obj = MemoryConfig.from_env()
+    config_obj = MemoryConfig.from_config()
 
     assert config_obj.embedding_provider == "openai"
     assert config_obj.embedding_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -276,45 +251,30 @@ password_env = "TEST_NEO4J_PASSWORD"
     assert config_obj.proxy_url is None
 
 
-def test_from_env_environment_still_wins_over_services_toml(tmp_path, monkeypatch):
+def test_from_config_ignores_environment_entirely(tmp_path, monkeypatch):
+    """环境变量不再是配置层：即使设了 HELLOAGENTS_MEMORY_*，services.toml 说了算。"""
+
     config = tmp_path / "services.toml"
     write_and_point(
         config,
         """\
 [embedding]
-provider = "gemini"
-model = "gemini-embedding-2"
+provider = "openai"
+model = "Qwen/Qwen3-Embedding-0.6B"
 
 [qdrant]
 url = "https://toml.example.test"
 """,
         monkeypatch,
     )
-    clean_memory_env(monkeypatch)
     monkeypatch.setenv("HELLOAGENTS_MEMORY_EMBEDDING_MODEL", "env-model")
     monkeypatch.setenv("HELLOAGENTS_MEMORY_QDRANT_URL", "http://127.0.0.1:6333")
 
-    config_obj = MemoryConfig.from_env()
+    config_obj = MemoryConfig.from_config()
 
-    assert config_obj.embedding_model == "env-model"
-    assert config_obj.embedding_provider == "gemini"  # env 没设的字段才由 toml 补
-    assert config_obj.qdrant_url == "http://127.0.0.1:6333"
-
-
-def test_from_env_dashscope_fallback_applies_when_toml_has_no_key(tmp_path, monkeypatch):
-    config = tmp_path / "services.toml"
-    write_and_point(
-        config,
-        '[embedding]\nbase_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"\n',
-        monkeypatch,
-    )
-    clean_memory_env(monkeypatch)
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret")
-
-    config_obj = MemoryConfig.from_env()
-
-    assert config_obj.embedding_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    assert config_obj.embedding_api_key == "dashscope-secret"
+    assert config_obj.embedding_model == "Qwen/Qwen3-Embedding-0.6B"
+    assert config_obj.embedding_provider == "openai"
+    assert config_obj.qdrant_url == "https://toml.example.test"
 
 
 def test_search_tool_falls_back_to_services_toml(tmp_path, monkeypatch):
@@ -342,7 +302,9 @@ timeout = 2.5
     assert tool.timeout == 2.5
 
 
-def test_search_tool_environment_wins_over_services_toml(tmp_path, monkeypatch):
+def test_search_tool_ignores_environment_sources(tmp_path, monkeypatch):
+    """SEARCH_*/ANYSEARCH_* 环境变量入口已删除：services.toml 是唯一来源。"""
+
     from tool.search import SearchTool
 
     config = tmp_path / "services.toml"
@@ -352,13 +314,10 @@ def test_search_tool_environment_wins_over_services_toml(tmp_path, monkeypatch):
         monkeypatch,
     )
     monkeypatch.setenv("SEARCH_BASE_URL", "https://env.example.test/v1")
-    monkeypatch.delenv("SEARCH_API", raising=False)
-    monkeypatch.delenv("SEARCH_API_KEY", raising=False)
-    monkeypatch.delenv("ANYSEARCH_API_KEY", raising=False)
 
     tool = SearchTool()
 
-    assert tool.base_url == "https://env.example.test/v1"
+    assert tool.base_url == "https://toml.example.test/v1"
     assert tool.api_key == "toml-key"
 
 
@@ -387,12 +346,11 @@ def test_manager_passes_qdrant_api_key_from_services_toml(tmp_path, monkeypatch)
         '[qdrant]\nurl = "https://xxxx.qdrant.tech"\napi_key_env = "TEST_QDRANT_KEY"\n',
         monkeypatch,
     )
-    clean_memory_env(monkeypatch)
     monkeypatch.setenv("TEST_QDRANT_KEY", "qdrant-secret")
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
-    monkeypatch.setenv("EMBEDDING_BASE_URL", "")
 
-    manager = MemoryManager(MemoryConfig.from_env())
+    config_obj = MemoryConfig.from_config()
+    config_obj.sqlite_path = str(tmp_path / "memory.sqlite3")
+    manager = MemoryManager(config_obj)
 
     try:
         from memory.storage.qdrant import QdrantVectorStore
@@ -403,12 +361,11 @@ def test_manager_passes_qdrant_api_key_from_services_toml(tmp_path, monkeypatch)
         manager.close()
 
 
-def test_from_env_merges_proxy_url_from_services_toml(tmp_path, monkeypatch):
+def test_from_config_merges_proxy_url_from_services_toml(tmp_path, monkeypatch):
     config = tmp_path / "services.toml"
     write_and_point(config, '[proxy]\nurl = "http://127.0.0.1:7890"\n', monkeypatch)
-    clean_memory_env(monkeypatch)
 
-    config_obj = MemoryConfig.from_env()
+    config_obj = MemoryConfig.from_config()
 
     assert config_obj.proxy_url == "http://127.0.0.1:7890"
 
@@ -434,9 +391,6 @@ url = "http://127.0.0.1:7890"
 """,
         monkeypatch,
     )
-    clean_memory_env(monkeypatch)
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
-    monkeypatch.setenv("EMBEDDING_BASE_URL", "")
 
     captured: dict[str, object] = {}
 
@@ -455,7 +409,9 @@ url = "http://127.0.0.1:7890"
     monkeypatch.setattr("memory.manager.QdrantVectorStore", FakeQdrant)
     monkeypatch.setattr("memory.manager.Neo4jGraphStore", FakeNeo4j)
 
-    manager = MemoryManager(MemoryConfig.from_env())
+    config_obj = MemoryConfig.from_config()
+    config_obj.sqlite_path = str(tmp_path / "memory.sqlite3")
+    manager = MemoryManager(config_obj)
     try:
         assert captured["qdrant"]["proxy_url"] == "http://127.0.0.1:7890"
         assert captured["neo4j"]["proxy_url"] == "http://127.0.0.1:7890"
@@ -464,7 +420,7 @@ url = "http://127.0.0.1:7890"
 
 
 # ---------------------------------------------------------------------------
-# 消费方接线：识图抽取模型统一从 services.toml [vision] 读取（.env 不再承载模型名）
+# 消费方接线：识图抽取模型统一从 services.toml [vision] 读取
 # ---------------------------------------------------------------------------
 
 PROVIDER_TOML = """\
@@ -526,9 +482,7 @@ def test_memory_tool_pipeline_uses_services_toml_vision_model(tmp_path, monkeypa
     write_and_point(
         services, '[vision]\nmodel = "Qwen/Qwen2.5-VL-72B-Instruct"\n', monkeypatch
     )
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
-    clean_memory_env(monkeypatch)
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.sqlite3"))
 
     pipeline = memory_tool_module.build_default_pipeline()
 

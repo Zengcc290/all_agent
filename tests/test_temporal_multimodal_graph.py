@@ -208,7 +208,6 @@ def test_visual_ingest_persists_payload_and_calls_visual_extractor():
 
 
 def test_image_knowledge_endpoint_stores_camera_payload(monkeypatch):
-    monkeypatch.setenv("WEB_AUTOSEED", "0")
     store = manager()
     seen = []
 

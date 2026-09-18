@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import inspect
-import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from constants import (
+    MEMORY_HYBRID,
     RAG_CHUNK_OVERLAP,
     RAG_CHUNK_SIZE,
     RAG_CONTEXT_MAX_CHARS,
@@ -18,7 +18,6 @@ from constants import (
 )
 
 from ..base import MemoryItem, MemorySearchResult, MemoryType
-from ..embedding import gateway_reachable
 from ..manager import MemoryManager
 from ..storage.document_repo import (
     PERMISSIONS,
@@ -89,9 +88,9 @@ def _document_permission(metadata: Mapping[str, Any]) -> str:
 
 
 def _hybrid_enabled() -> bool:
-    """混合检索开关（``HELLOAGENTS_MEMORY_HYBRID``，默认开；关闭即回到纯向量）。"""
+    """混合检索开关（constants.MEMORY_HYBRID，默认开；关闭即回到纯向量）。"""
 
-    return os.getenv("HELLOAGENTS_MEMORY_HYBRID", "").strip().lower() not in {"0", "false", "off", "no"}
+    return MEMORY_HYBRID
 
 
 def _rrf_fuse(rank_lists: list[list[str]], *, k: int = 60) -> list[tuple[str, float]]:
@@ -190,64 +189,71 @@ class RAGPipeline:
                 if granularity == "sentences"
                 else self.processor.chunks_with_spans(document, chunk_size=chunk_size, overlap=overlap)
             )
-            for span in spans:
-                chunk = span.chunk
-                metadata = dict(chunk.metadata)
-                metadata.setdefault("source", source)
-                # 先写真值源（原文与分块边界）再写向量：反过来的话，向量写成功而
-                # 真值行失败就会留下无法解释的孤立向量。
+            try:
+                for span in spans:
+                    chunk = span.chunk
+                    metadata = dict(chunk.metadata)
+                    metadata.setdefault("source", source)
+                    # 先写真值源（原文与分块边界）再写向量：反过来的话，向量写成功而
+                    # 真值行失败就会留下无法解释的孤立向量。
+                    if repository is not None:
+                        repository.upsert_chunk(
+                            ChunkRecord(
+                                chunk_id=chunk.id,
+                                document_id=document.id,
+                                chunk_index=int(chunk.metadata["chunk_index"]),
+                                char_start=span.char_start,
+                                char_end=span.char_end,
+                                text=chunk.content,
+                            )
+                        )
+                    item = self.manager.add(chunk.content, memory_type=MemoryType.SEMANTIC, metadata=metadata, item_id=chunk.id)
+                    items.append(item)
+                    report["chunks"] += 1
+                    if repository is not None:
+                        repository.set_chunk_vector_status(chunk.id, "indexed")
+                    if not self.auto_extract:
+                        continue
+                    try:
+                        # Feed the relevant subgraph to the extractor first, so the
+                        # model reuses canonical entity names and retire the right
+                        # old value instead of inventing a second entity.
+                        graph_context = build_graph_context(
+                            self.manager, chunk.content, resolver=resolver
+                        )
+                        if accepts_context:
+                            extraction = self.extractor.extract(
+                                chunk.content,
+                                metadata=metadata,
+                                graph_context=graph_context,
+                            )
+                        else:
+                            extraction = self.extractor.extract(
+                                chunk.content, metadata=metadata
+                            )
+                        materialized = materialize_extraction(
+                            self.manager,
+                            extraction,
+                            source_item=item,
+                            source_metadata=metadata,
+                            resolver=resolver,
+                        )
+                        report["domains"].append(materialized["domain"])
+                        report["entities"] += materialized["entities"]
+                        report["relations"] += materialized["relations"]
+                        report["superseded"] += materialized["superseded"]
+                        report["retracted"] += materialized["retracted"]
+                        report["skipped_relations"] += materialized["skipped_relations"]
+                    except Exception as exc:  # noqa: BLE001 - extraction failure must not lose source text
+                        message = f"{type(exc).__name__}: {exc}"
+                        report["errors"].append(message)
+                        document_error = document_error or message
+            except Exception:
+                # 嵌入/真值写入失败（如云端端点不可达）不能留下半吊子记录：
+                # 回滚该文档的真值行后原样抛出，由调用方转成明确的错误响应。
                 if repository is not None:
-                    repository.upsert_chunk(
-                        ChunkRecord(
-                            chunk_id=chunk.id,
-                            document_id=document.id,
-                            chunk_index=int(chunk.metadata["chunk_index"]),
-                            char_start=span.char_start,
-                            char_end=span.char_end,
-                            text=chunk.content,
-                        )
-                    )
-                item = self.manager.add(chunk.content, memory_type=MemoryType.SEMANTIC, metadata=metadata, item_id=chunk.id)
-                items.append(item)
-                report["chunks"] += 1
-                if repository is not None:
-                    repository.set_chunk_vector_status(chunk.id, "indexed")
-                if not self.auto_extract:
-                    continue
-                try:
-                    # Feed the relevant subgraph to the extractor first, so the
-                    # model reuses canonical entity names and retire the right
-                    # old value instead of inventing a second entity.
-                    graph_context = build_graph_context(
-                        self.manager, chunk.content, resolver=resolver
-                    )
-                    if accepts_context:
-                        extraction = self.extractor.extract(
-                            chunk.content,
-                            metadata=metadata,
-                            graph_context=graph_context,
-                        )
-                    else:
-                        extraction = self.extractor.extract(
-                            chunk.content, metadata=metadata
-                        )
-                    materialized = materialize_extraction(
-                        self.manager,
-                        extraction,
-                        source_item=item,
-                        source_metadata=metadata,
-                        resolver=resolver,
-                    )
-                    report["domains"].append(materialized["domain"])
-                    report["entities"] += materialized["entities"]
-                    report["relations"] += materialized["relations"]
-                    report["superseded"] += materialized["superseded"]
-                    report["retracted"] += materialized["retracted"]
-                    report["skipped_relations"] += materialized["skipped_relations"]
-                except Exception as exc:  # noqa: BLE001 - extraction failure must not lose source text
-                    message = f"{type(exc).__name__}: {exc}"
-                    report["errors"].append(message)
-                    document_error = document_error or message
+                    repository.delete_document(document.id)
+                raise
             if repository is not None:
                 if document_error is None:
                     repository.set_status(document.id, "extracted" if self.auto_extract else "vectorized")
@@ -374,12 +380,12 @@ class RAGPipeline:
         return results
 
     def _vector_hits(self, query: str, *, limit: int, threshold: float | None, metadata: Mapping[str, Any] | None) -> list[tuple[str, float]]:
-        """向量路 ``(chunk_id, 相似度)``；不可用时返回空表（并写下降级原因）。"""
+        """向量路 ``(chunk_id, 相似度)``；不可用时返回空表（并写下降级原因）。
 
-        base_url = getattr(self.manager.embedding, "base_url", None)
-        if base_url and not gateway_reachable(base_url):
-            self.last_retrieval_note = f"嵌入网关不可达（{base_url}），本次检索降级为纯关键词（FTS5）。"
-            return []
+        不再做请求前的 TCP 可达性探测（历史隧道网关的产物）：云端端点一次
+        urlopen 的代价与探测相同，失败时异常本身就是降级信号。
+        """
+
         try:
             results = self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata)
         except (ConnectionError, OSError, RuntimeError) as exc:

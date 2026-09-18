@@ -23,7 +23,6 @@ INDEX = Path(__file__).resolve().parent.parent / "web" / "static" / "index.html"
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setenv("WEB_AUTOSEED", "0")
     manager = MemoryManager(
         MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
         embedding=HashEmbedding(),

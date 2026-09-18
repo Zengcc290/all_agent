@@ -27,7 +27,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from memory.base import MemoryConfig, MemoryItem, MemoryType  # noqa: E402
-from memory.embedding import gateway_reachable, load_dotenv_once  # noqa: E402
 from memory.manager import MemoryManager  # noqa: E402
 from memory.storage.document_repo import ChunkRecord, DocumentRecord, DocumentRepository  # noqa: E402
 
@@ -154,10 +153,7 @@ def reindex(manager: MemoryManager, *, dry_run: bool = False) -> dict[str, int]:
 
     base_url = getattr(manager.embedding, "base_url", None)
     if not base_url:
-        return {"reindexed": 0, "blanked": 0, "skipped": "no_gateway"}
-    if not gateway_reachable(base_url):
-        return {"reindexed": 0, "blanked": 0, "skipped": "gateway_unreachable"}
-
+        return {"reindexed": 0, "blanked": 0, "skipped": "no_cloud_embedding"}
     items = manager.document_store.list(include_expired=True)
     if dry_run:
         return {"reindexed": len(items), "blanked": len(items), "skipped": ""}
@@ -199,7 +195,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-reindex", action="store_true", help="不做向量重嵌入与 memories.embedding 清空")
     args = parser.parse_args(argv)
 
-    load_dotenv_once()
     db = Path(args.db or (Path(__file__).resolve().parent.parent / "memory.sqlite3")).expanduser()
     if not db.exists():
         print(f"数据库不存在：{db}")
@@ -207,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and not args.no_backup:
         print(f"已备份：{backup_database(db)}")
 
-    config = MemoryConfig.from_env()
+    config = MemoryConfig.from_config()
     config.sqlite_path = str(db)
     manager = MemoryManager(config)
     try:

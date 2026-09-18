@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 from constants import (
-    MEMORY_EDGE_REINFORCE_ENV,
+    MEMORY_EDGE_REINFORCE,
     RAG_CONTEXT_MAX_CHARS,
     RAG_GRAPH_HOPS,
     RAG_GRAPH_MAX_HOPS,
@@ -329,14 +328,9 @@ class GraphRAGPipeline:
         return edges
 
     def _reinforce_enabled(self) -> bool:
-        """F1 总开关（环境变量）；默认开启，置 0/false/off/no 还原旧行为。"""
+        """F1 总开关（constants.MEMORY_EDGE_REINFORCE，默认开）。"""
 
-        return os.getenv(MEMORY_EDGE_REINFORCE_ENV, "").strip().casefold() not in {
-            "0",
-            "false",
-            "off",
-            "no",
-        }
+        return MEMORY_EDGE_REINFORCE
 
     def _reinforce(self, paths: list[GraphPath]) -> None:
         """"回忆即强化"：对本次真正返回的路径边各 +1 次回忆（每条边每轮一次）。"""

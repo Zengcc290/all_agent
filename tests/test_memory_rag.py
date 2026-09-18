@@ -300,12 +300,18 @@ def test_pipeline_answer_requires_callable_generator(pipeline: RAGPipeline):
 
 
 def test_tool_default_sqlite_path_prefers_env(monkeypatch: pytest.MonkeyPatch):
+    from pathlib import Path as _Path
+
     from memory import default_sqlite_path
 
     monkeypatch.setenv("MEMORY_DB_PATH", "custom/memory.sqlite3")
     assert default_sqlite_path() == "custom/memory.sqlite3"
     monkeypatch.delenv("MEMORY_DB_PATH")
-    assert default_sqlite_path() == "memory.sqlite3"
+    # 未设环境变量：回落到仓库根目录的 memory.sqlite3（绝对路径，单点收拢）
+    fallback = default_sqlite_path()
+    assert _Path(fallback).is_absolute()
+    assert _Path(fallback).name == "memory.sqlite3"
+    assert _Path(fallback).parent == _Path(__file__).resolve().parent.parent
 
 
 def test_memory_tool_persists_across_instances(

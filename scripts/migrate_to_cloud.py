@@ -27,8 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from memory import HashEmbedding, MemoryConfig, MemoryManager, make_default_embedding  # noqa: E402
-from memory.embedding import load_dotenv_once  # noqa: E402
 from memory.storage.document_repo import DocumentRecord, DocumentRepository  # noqa: E402
+from memory.storage.qdrant import QdrantVectorStore  # noqa: E402
 
 BACKUP_SUFFIX = ".bak.pre_migration"
 
@@ -44,9 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="chunks 重新向量化并入库云端 Qdrant")
     parser.add_argument("--db", default=None, help="SQLite 路径，默认仓库根目录 memory.sqlite3")
     parser.add_argument("--no-backup", action="store_true", help="跳过迁移前备份（不推荐）")
+    parser.add_argument(
+        "--recreate-collection",
+        action="store_true",
+        help="嵌入模型维度变更时：先删除云端集合并按新维度重建（向量是 SQLite 真值的投影，随后全量重灌即可恢复）",
+    )
     args = parser.parse_args(argv)
 
-    load_dotenv_once()
     db = Path(args.db or (ROOT / "memory.sqlite3")).expanduser()
     if not db.exists():
         print(f"数据库不存在：{db}")
@@ -55,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         backup = backup_database(db)
         print(f"已备份：{backup}")
 
-    config = MemoryConfig.from_env()
+    config = MemoryConfig.from_config()
     config.sqlite_path = str(db)
     embedding = make_default_embedding(config)
     if isinstance(embedding, HashEmbedding):
@@ -85,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError(f"嵌入数量不匹配：{len(vectors)} != {len(chunks)}")
         dims = {len(v) for v in vectors}
         print(f"嵌入完成：{len(vectors)} 条，维度 {dims}，耗时 {t_embed:.3f}s")
+
+        # ---- 可选：维度变更时先重建集合（阶段 2 之前，否则旧集合按新维度 upsert 会报维度不一致）----
+        if args.recreate_collection:
+            if isinstance(manager.vector_store, QdrantVectorStore):
+                manager.vector_store.recreate_collection(len(vectors[0]))
+                print(f"已按新维度 {len(vectors[0])} 重建集合 {config.qdrant_collection}（旧投影已丢弃）")
+            else:
+                print("未配置 Qdrant（内存回退），无需重建集合。")
 
         # ---- 阶段 2：上传云端 Qdrant（按 chunk_id 幂等 upsert）----
         t1 = time.perf_counter()

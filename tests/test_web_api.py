@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import socket
 from pathlib import Path
 
 import pytest
@@ -20,7 +19,6 @@ from web import create_app, support  # noqa: E402
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setenv("WEB_AUTOSEED", "0")  # 测试显式控制播种
     manager = MemoryManager(
         MemoryConfig(sqlite_path=":memory:"),
         embedding=HashEmbedding(),  # 离线确定性嵌入，测试无需任何 API key
@@ -59,8 +57,6 @@ class DriftVectorStore(InMemoryVectorStore):
 def file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """文件库客户端：documents/chunks 真值源只在文件型 SQLite 上存在。"""
 
-    monkeypatch.setenv("WEB_AUTOSEED", "0")
-    monkeypatch.setenv("EMBEDDING_TUNNEL_HINT", "")   # 断言固定，不受本机 .env 影响
     store = DriftVectorStore()
     manager = MemoryManager(
         MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
@@ -299,16 +295,20 @@ def test_chat_rejects_unknown_mode(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def _force_search_env(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
-    names = [
-        "SEARCH_BASE_URL", "ANYSEARCH_BASE_URL",
-        "SEARCH_API", "SEARCH_API_KEY", "ANYSEARCH_API_KEY",
-    ]
-    for name in names:
-        monkeypatch.delenv(name, raising=False)
+def _search_services(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    """services.toml [search] 是唯一配置来源：写入/清空来控制联网搜索可用性。"""
+
+    from core import services_config
+
+    path = tmp_path / "services.toml"
     if on:
-        monkeypatch.setenv("SEARCH_BASE_URL", "https://example.com/v1")
-        monkeypatch.setenv("SEARCH_API", "test-search-key")
+        path.write_text(
+            '[search]\nbase_url = "https://example.com/v1"\napi_key = "test-search-key"\n',
+            encoding="utf-8",
+        )
+    else:
+        path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(services_config, "default_config_path", lambda: path)
 
 
 def _make_fake_agent():
@@ -342,9 +342,9 @@ def _make_fake_agent():
 
 
 def test_chat_records_qa_into_episodic_memory(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_search_env(monkeypatch, on=False)
+    _search_services(tmp_path, monkeypatch, on=False)
     agent = _make_fake_agent()
     monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
     monkeypatch.setattr("web.app.get_agent", lambda: agent)
@@ -376,12 +376,12 @@ def test_chat_records_qa_into_episodic_memory(
 
 
 def test_chat_returns_retrieval_breakdown_for_the_provenance_panel(
-    file_client, monkeypatch: pytest.MonkeyPatch
+    file_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """U4：回答要带每条命中的向量分/关键词分/RRF 分，气泡下的「依据」才有东西可展开。"""
 
     client, _ = file_client
-    _force_search_env(monkeypatch, on=False)
+    _search_services(tmp_path, monkeypatch, on=False)
     monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
     monkeypatch.setattr("web.app.get_agent", lambda: _make_fake_agent())
     _ingest_documents(client, ["设备编号 abc-123 的溯源面板文档，讲的是混合检索。" * 4])
@@ -406,9 +406,9 @@ def test_chat_returns_retrieval_breakdown_for_the_provenance_panel(
 
 
 def test_chat_survives_graph_retrieve_failure(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _force_search_env(monkeypatch, on=False)
+    _search_services(tmp_path, monkeypatch, on=False)
     monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
     monkeypatch.setattr("web.app.get_agent", lambda: _make_fake_agent())
 
@@ -427,25 +427,25 @@ def test_chat_survives_graph_retrieve_failure(
 
 
 def test_chat_tool_names_follow_mode(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agent = _make_fake_agent()
     monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
     monkeypatch.setattr("web.app.get_agent", lambda: agent)
 
     # 非联网：工具清单里不得有 web.search
-    _force_search_env(monkeypatch, on=False)
+    _search_services(tmp_path, monkeypatch, on=False)
     client.post("/api/chat", json={"message": "q1", "mode": "offline"})
     assert agent.last_tool_names is not None
     assert "web.search" not in agent.last_tool_names
 
     # 已配置搜索且选择联网：tool_names 为 None（全部工具，含 web.search）
-    _force_search_env(monkeypatch, on=True)
+    _search_services(tmp_path, monkeypatch, on=True)
     client.post("/api/chat", json={"message": "q2", "mode": "online"})
     assert agent.last_tool_names is None
 
     # 未配置搜索却选择联网：回退为非联网
-    _force_search_env(monkeypatch, on=False)
+    _search_services(tmp_path, monkeypatch, on=False)
     response = client.post("/api/chat", json={"message": "q3", "mode": "online"})
     assert response.json()["mode"] == "offline"
     assert agent.last_tool_names is not None
@@ -453,14 +453,14 @@ def test_chat_tool_names_follow_mode(
 
 
 def test_chat_confirms_only_additive_memory_write(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """聊天回合只为 memory.add 预置写确认。
 
     只读工具本就不需要确认（A1 拆分后）；delete/clear/ingest 属于破坏性或外部
     写入，聊天层不得代用户授权，因此确认集合里必须只有 memory.add。
     """
-    _force_search_env(monkeypatch, on=False)
+    _search_services(tmp_path, monkeypatch, on=False)
     agent = _make_fake_agent()
     monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
     monkeypatch.setattr("web.app.get_agent", lambda: agent)
@@ -740,9 +740,10 @@ def test_health_reports_store_modes_and_degraded(file_client) -> None:
         "embedding": "hash",
         "embedding_endpoint": "",
         "chat_ready": health["chat_ready"],
-        "keyword_fallback": False,
-        "embedding_hint": "",
+        "keyword_fallback": True,          # 未配置云端：检索只剩关键词路
+        "embedding_hint": health["degraded"]["embedding_hint"],  # 配置指引（非空）
     }
+    assert "[embedding]" in health["degraded"]["embedding_hint"]
 
 
 def test_revectorize_rebuilds_every_chunk(file_client) -> None:
@@ -829,12 +830,12 @@ def test_graph_since_zero_is_a_valid_cursor_not_a_missing_parameter(
     assert delta["stats"] == full["stats"]
 
 
-def test_gateway_down_keeps_read_paths_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """方案 §11.6：隧道断开时 /api/graph、/api/documents、FTS5 关键词检索仍然正常。"""
+def test_cloud_down_keeps_read_paths_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """方案 §11.6：云端嵌入故障时 /api/graph、/api/documents、FTS5 关键词检索仍然正常。"""
 
-    app, manager = _dead_gateway_client(tmp_path, monkeypatch)
+    app, manager = _dead_cloud_client(tmp_path, monkeypatch)
     with TestClient(app) as client:
-        # 直接写真值源（不经嵌入网关），模拟「隧道断之前入库、断之后仍要能读」。
+        # 直接写真值源（不经嵌入），模拟「云端断之前入库、断之后仍要能读」。
         repository = app.state.pipeline.document_repo()
         assert repository is not None
         repository.upsert_document(
@@ -885,64 +886,48 @@ def test_static_smoke_home_page_and_renderable_graph(file_client) -> None:
         assert {"source", "target", "relation"} <= set(edge)
 
 
-class DeadGatewayEmbedding(HashEmbedding):
-    """已配置网关但连不上：用真实会被拒连的端口，逼出降级分支。"""
+class DeadCloudEmbedding(HashEmbedding):
+    """已配置云端但端点故障：任何嵌入调用都抛 RuntimeError（等价云端掉线）。"""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.base_url = f"http://127.0.0.1:{port}"
+        self.base_url = "https://dead.example.test/v1"
+
+    def embed(self, text: str) -> list[float]:
+        raise RuntimeError("embedding API request failed: dead endpoint")
 
 
-def closed_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
-def _dead_gateway_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("WEB_AUTOSEED", "0")
-    monkeypatch.setenv("EMBEDDING_TUNNEL_HINT", "ssh -N -L 10800:127.0.0.1:18000 root@example -p 10034")
+def _dead_cloud_client(tmp_path, monkeypatch):
     manager = MemoryManager(
         MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
-        embedding=DeadGatewayEmbedding(closed_port()),
+        embedding=DeadCloudEmbedding(),
     )
     return create_app(manager=manager), manager
 
 
-def test_ingest_fails_fast_with_the_tunnel_command_when_gateway_is_down(
+def test_ingest_fails_fast_when_cloud_embedding_is_down(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """方案 §11.6：隧道断开时入库必须明确报错（含隧道命令），且不留下垃圾记录。"""
+    """云端嵌入故障时入库必须明确报错，且不留下半吊子文档记录。"""
 
-    app, manager = _dead_gateway_client(tmp_path, monkeypatch)
+    app, manager = _dead_cloud_client(tmp_path, monkeypatch)
     with TestClient(app) as client:
         response = client.post(
             "/api/ingest",
-            files=_make_ingest_payload("降级.txt", "隧道没通时不应该写库。" * 10),
+            files=_make_ingest_payload("降级.txt", "云端没通时不应该写库。" * 10),
         )
-        assert response.status_code == 503
-        detail = response.json()["detail"]
-        assert "嵌入网关不可达" in detail
-        assert "ssh -N -L 10800:127.0.0.1:18000 root@example -p 10034" in detail
-        # 快速失败：真值源里不应出现半吊子文档
+        assert response.status_code == 422
+        assert "embedding API request failed" in response.json()["detail"]
+        # 快速失败：真值源里不应出现半吊子文档（ingest 回滚了 document 行）
         assert client.get("/api/documents").json()["total"] == 0
         assert manager.document_store.list(include_expired=True) == []
-        # health 把同一条命令下发给前端（前端不再硬编码）
-        assert client.get("/api/health").json()["degraded"] == {
-            "embedding": "unreachable",
-            "embedding_endpoint": manager.embedding.base_url,
-            "chat_ready": False,
-            "keyword_fallback": True,
-            "embedding_hint": "ssh -N -L 10800:127.0.0.1:18000 root@example -p 10034",
-        }
     manager.close()
 
 
-def test_revectorize_reports_the_tunnel_command_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """先有文档再断隧道：重嵌入要 503 且带修复命令，而不是静默失败。"""
+def test_revectorize_reports_the_failure_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """先有文档再遇云端故障：重嵌入要 502 且带失败原因，而不是静默失败。"""
 
-    app, manager = _dead_gateway_client(tmp_path, monkeypatch)
-    monkeypatch.delenv("EMBEDDING_TUNNEL_HINT", raising=False)
+    app, manager = _dead_cloud_client(tmp_path, monkeypatch)
     with TestClient(app) as client:
         repository = DocumentRepository(manager.config.sqlite_path)
         try:
@@ -954,8 +939,7 @@ def test_revectorize_reports_the_tunnel_command_too(tmp_path: Path, monkeypatch:
         finally:
             repository.close()
         response = client.post("/api/documents/doc-1/revectorize")
-        assert response.status_code == 503
-        assert "重嵌入已中止" in response.json()["detail"]
-        # 没有配 EMBEDDING_TUNNEL_HINT 时给通用指引，而不是编造命令
-        assert "见本地部署说明" in response.json()["detail"]
+        assert response.status_code == 502
+        assert "重嵌入失败" in response.json()["detail"]
+        assert "embedding API request failed" in response.json()["detail"]
     manager.close()

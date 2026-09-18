@@ -82,7 +82,9 @@ def test_idempotent_ingest_does_not_reset_counters(manager: MemoryManager):
 def test_reinforcement_can_be_disabled(manager: MemoryManager, monkeypatch):
     """总开关关闭：检索零副作用、排序退回纯 confidence（回归基线）。"""
 
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_EDGE_REINFORCE", "0")
+    from memory.rag import graph_rag
+
+    monkeypatch.setattr(graph_rag, "MEMORY_EDGE_REINFORCE", False)
     manager.semantic.add_fact("A", "knows", "B", confidence=0.9)
     GraphRAGPipeline(manager).retrieve("A", limit=5, hops=1)
 

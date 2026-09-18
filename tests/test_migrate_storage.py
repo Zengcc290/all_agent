@@ -98,15 +98,15 @@ def test_dry_run_writes_nothing(manager: MemoryManager):
         repo.close()
 
 
-def test_reindex_skips_without_gateway_and_keeps_embeddings(manager: MemoryManager):
-    """没有网关时既不能重嵌入，也就绝不能清空 memories.embedding（否则向量尽失）。"""
+def test_reindex_skips_without_cloud_embedding_and_keeps_embeddings(manager: MemoryManager):
+    """没有云端嵌入时既不能重嵌入，也就绝不能清空 memories.embedding（否则向量尽失）。"""
 
     seed_legacy(manager)
     migrate_storage.migrate(manager)
 
     outcome = migrate_storage.reindex(manager)
 
-    assert outcome == {"reindexed": 0, "blanked": 0, "skipped": "no_gateway"}
+    assert outcome == {"reindexed": 0, "blanked": 0, "skipped": "no_cloud_embedding"}
     items = manager.document_store.list(include_expired=True)
     assert all(item.embedding for item in items)
 

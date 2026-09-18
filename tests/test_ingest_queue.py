@@ -101,7 +101,6 @@ def test_retry_cap_marks_job_failed(tmp_path):
 
 
 def test_knowledge_endpoint_async_flow_and_history(tmp_path, monkeypatch):
-    monkeypatch.setenv("WEB_AUTOSEED", "0")
     manager = make_manager(tmp_path)
     app = create_app(manager)
     with TestClient(app) as client:

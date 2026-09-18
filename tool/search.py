@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from dataclasses import replace
 from typing import Annotated, Any, Literal
 from urllib.error import HTTPError
@@ -216,23 +215,17 @@ class SearchTool(BaseTool):
     ) -> None:
         # Loading happens in the constructor (rather than module import) so
         # discovery remains free of configuration and I/O side effects.
-        if base_url is None or api_key is None or timeout is None:
-            _load_dotenv()
         services = (
             _services_search()
             if base_url is None or api_key is None or timeout is None
             else None
         )
         if base_url is None:
-            # config/services.toml 是外部 API 的集中配置；env 优先，toml 兜底。
-            base_url = (
-                _first_env("SEARCH_BASE_URL", "ANYSEARCH_BASE_URL") or services.base_url
-            )
+            # config/services.toml 的 [search] 段是唯一配置来源
+            # （历史 SEARCH_* / ANYSEARCH_* 环境变量入口已删除）。
+            base_url = services.base_url if services is not None else None
         if api_key is None:
-            api_key = (
-                _first_env("SEARCH_API", "SEARCH_API_KEY", "ANYSEARCH_API_KEY")
-                or services.api_key
-            )
+            api_key = services.api_key if services is not None else None
         if timeout is None:
             timeout = (
                 services.timeout if services is not None and services.timeout is not None else 30.0
@@ -264,9 +257,9 @@ class SearchTool(BaseTool):
         if not isinstance(arguments, SearchInput):
             raise TypeError("arguments must be a SearchInput instance")
         if not self.base_url:
-            raise RuntimeError("SEARCH_BASE_URL is not configured")
+            raise RuntimeError("search base_url is not configured (config/services.toml [search])")
         if not self.api_key:
-            raise RuntimeError("SEARCH_API is not configured")
+            raise RuntimeError("search api_key is not configured (config/services.toml [search])")
 
         endpoint = _search_endpoint(self.base_url)
         request_body: dict[str, Any] = {
@@ -329,30 +322,10 @@ class SearchTool(BaseTool):
         return _normalize_response(payload, arguments.max_results)
 
 
-def _load_dotenv() -> None:
-    """Load the repository's .env when python-dotenv is available."""
-
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        # Environment variables are still usable when the optional loader is
-        # unavailable; the project declares python-dotenv as a dependency.
-        return
-    load_dotenv(override=False)
-
-
 def _services_search() -> SearchService:
     """Search settings from config/services.toml; a blank/missing file yields all-None."""
 
     return load_services_config().search
-
-
-def _first_env(*names: str) -> str | None:
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and value.strip():
-            return value
-    return None
 
 
 def _normalize_nullable_text(value: Any) -> Any:
@@ -367,7 +340,7 @@ def _normalize_nullable_text(value: Any) -> Any:
 def _search_endpoint(base_url: str) -> str:
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("SEARCH_BASE_URL must be an absolute HTTP(S) URL")
+        raise ValueError("search base_url must be an absolute HTTP(S) URL")
     path = parsed.path.rstrip("/")
     if not path:
         path = "/v1/search"

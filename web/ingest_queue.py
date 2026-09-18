@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
+from constants import KNOWLEDGE_INGEST_WORKERS
 from memory.rag import Document, RAGPipeline
 from memory.storage.document_repo import DocumentRepository, IngestJobRecord
 
@@ -74,11 +74,9 @@ class IngestJobQueue:
         usable = bool(path) and str(path) != ":memory:"
         # 文件库走 DocumentRepository（每次调用独立连接，线程安全）。
         self._repo = DocumentRepository(path) if usable else None
-        try:
-            workers = max(1, int(os.getenv("KNOWLEDGE_INGEST_WORKERS", "2") or 2))
-        except ValueError:
-            workers = 2
-        self._workers = workers
+        # 并发 worker 数唯一来源：constants.KNOWLEDGE_INGEST_WORKERS（I/O 为主，
+        # 2-3 即可吃满 LLM 延迟；历史 KNOWLEDGE_INGEST_WORKERS 环境变量已删）。
+        self._workers = max(1, KNOWLEDGE_INGEST_WORKERS)
         self._executor: ThreadPoolExecutor | None = None
 
     @property

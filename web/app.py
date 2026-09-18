@@ -36,7 +36,6 @@ from pydantic import BaseModel, Field
 
 from constants import (
     DEFAULT_DOMAIN,
-    DEFAULT_WEB_PORT,
     LOCALHOST,
     MAX_UPLOAD_BYTES,
     RAG_CHUNK_OVERLAP,
@@ -44,6 +43,7 @@ from constants import (
     RAG_GRAPH_HOPS,
     RAG_GRAPH_MAX_HOPS,
     RAG_RETRIEVE_LIMIT,
+    WEB_AUTOSEED,
     WEB_CHAT_MAX_CHARS,
     WEB_FACT_DOMAIN_MAX,
     WEB_FACT_NOTE_MAX,
@@ -58,7 +58,6 @@ from constants import (
 )
 from core import ExecutionContext
 from memory import MemoryManager, MemoryType
-from memory.embedding import EmbedServerEmbedding, gateway_reachable
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
 
@@ -73,7 +72,6 @@ from .support import (
     chat_ready,
     chat_tool_names,
     close_manager,
-    ensure_embedding_tunnel,
     get_agent,
     get_manager,
     graph_revision,
@@ -96,22 +94,21 @@ def _is_fact_item(item: Any) -> bool:
     return all(metadata.get(key) for key in ("subject", "predicate", "object"))
 
 
-def embedding_tunnel_hint() -> str:
-    """隧道命令由部署方通过环境变量下发，避免把服务器地址写进仓库。"""
+def embedding_config_hint(manager: MemoryManager) -> str:
+    """云端嵌入未配置时的配置指引（已配置返回空串）。
 
-    return os.getenv("EMBEDDING_TUNNEL_HINT", "").strip()
-
-
-def embedding_unavailable_detail(manager: MemoryManager) -> str:
-    """网关已配置但连不上时给出可执行的说明（方案 §11.6）；可用时返回空串。"""
+    历史版本这里是「网关不可达 → 503 门禁」（隧道时代的预检）；云端时代
+    端点失败在请求时自然报错，预检与门禁已删，这个提示只用于 /api/health
+    的 degraded.embedding_hint，告诉用户为什么检索退化成了关键词。
+    """
 
     base_url = getattr(getattr(manager, "embedding", None), "base_url", None)
-    if not base_url or gateway_reachable(base_url):
+    if base_url:
         return ""
-    hint = embedding_tunnel_hint()
     return (
-        f"嵌入网关不可达（{base_url}），向量检索与入库已停用（不会切换到别的向量空间）。"
-        + (f"请先建立隧道：{hint}" if hint else "请先恢复嵌入网关，命令见本地部署说明。")
+        "云端嵌入未配置，向量检索退化为关键词（离线兜底向量与云端不兼容，"
+        "不会静默混用）。请在 config/services.toml 的 [embedding] 段填写 "
+        "base_url / api_key / model，然后重启服务。"
     )
 
 
@@ -186,9 +183,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         owns_manager = manager is None
-        # 按需自动建立嵌入隧道（配置了 EMBEDDING_BASE_URL 且 10800 不可达时）；
-        # 失败只降级不阻塞（D8：绝不因隧道问题换向量空间）。
-        ensure_embedding_tunnel()
         app.state.manager = manager if manager is not None else get_manager()
         app.state.pipeline = RAGPipeline(
             app.state.manager,
@@ -207,8 +201,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         # 互相覆盖历史。这里串行化聊天请求（单人本地应用，排队是可接受的代价）。
         # 在 lifespan 内创建以保证锁绑定到当前事件循环。
         app.state.chat_lock = asyncio.Lock()
-        if os.getenv("WEB_AUTOSEED", "1") != "0":
-            # 首次启动自动播种，让星云图一打开就有内容。
+        if WEB_AUTOSEED:
+            # 首次启动自动播种，让星云图一打开就有内容（开关在 constants.py）。
             seed(app.state.manager)
         yield
         app.state.ingest_queue.shutdown()
@@ -378,11 +372,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @app.post("/api/ingest")
     async def ingest(file: UploadFile) -> dict[str, Any]:
         filename = file.filename or "untitled"
-        # 降级验收（方案 §11.6）：嵌入网关不可达时明确报错并给出隧道命令，
-        # 而不是写出一条注定失败的文档记录或返回空结果。
-        embedding_hint = embedding_unavailable_detail(the_manager())
-        if embedding_hint:
-            raise HTTPException(status_code=503, detail=embedding_hint)
         tmp_path = await _save_upload(file, prefix="nebula-ingest-")
         try:
             items = app.state.pipeline.ingest_source(
@@ -520,9 +509,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             raise HTTPException(status_code=415, detail="只接受图片文件")
         if len(text) > WEB_KNOWLEDGE_MAX_CHARS:
             raise HTTPException(status_code=422, detail="图片说明过长")
-        embedding_hint = embedding_unavailable_detail(the_manager())
-        if embedding_hint:
-            raise HTTPException(status_code=503, detail=embedding_hint)
         tmp_path = await _save_upload(file, prefix="nebula-image-")
         try:
             image = tmp_path.read_bytes()
@@ -774,9 +760,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         if "missing_vector" in requested and entries.get("missing_vector"):
             ids = entries["missing_vector"]
             chunks = [chunk for chunk in (repository.get_chunk(chunk_id) for chunk_id in ids) if chunk is not None]
-            unavailable = embedding_unavailable_detail(manager)
-            if unavailable:
-                raise HTTPException(status_code=503, detail=f"补向量已中止：{unavailable}")
             if chunks:
                 vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
                 for chunk, vector in zip(chunks, vectors, strict=True):
@@ -880,9 +863,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         if not chunks:
             raise HTTPException(status_code=422, detail="该文档没有分块，无法重嵌入")
         manager = the_manager()
-        unavailable = embedding_unavailable_detail(manager)
-        if unavailable:
-            raise HTTPException(status_code=503, detail=f"重嵌入已中止：{unavailable}")
         try:
             vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
             for chunk, vector in zip(chunks, vectors, strict=True):
@@ -925,30 +905,18 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         ready, _ = chat_ready()
-        # 报告实际生效的嵌入实现，而不是猜某个环境变量：MemoryConfig 还支持
-        # HELLOAGENTS_MEMORY_EMBEDDING_API_KEY，且调用方可注入自定义 embedding。
+        # 报告实际生效的嵌入实现，而不是猜配置：调用方可注入自定义 embedding，
+        # 所以看实例属性（云端实现带 base_url，离线 HashEmbedding 没有）。
         embedding = getattr(the_manager(), "embedding", None)
-        # APIEmbedding 与 EmbedServerEmbedding 都带 base_url，都是远端向量实现；
-        # HashEmbedding 离线兜底没有 base_url。用属性而非类名判断，避免重复导入。
         base_url = getattr(embedding, "base_url", None)
         embedding_mode = "api" if base_url else "local-hash"
-        # 只上报隧道可达性，供 UI/调用方判断是否已降级为关键词检索（D8）；
-        # 绝不因为不可达就换向量空间。
-        embedding_reachable = gateway_reachable(base_url) if base_url else True
+        embedding_state = "api" if base_url else "hash"
         manager = the_manager()
-        if not base_url:
-            embedding_state = "hash"
-        elif isinstance(embedding, EmbedServerEmbedding):
-            embedding_state = "gateway"
-        else:
-            embedding_state = "api"
-        if base_url and not embedding_reachable:
-            embedding_state = "unreachable"
         return {
             "ok": True,
             "chat_ready": ready,
             "embedding_mode": embedding_mode,
-            "embedding_reachable": embedding_reachable,
+            "embedding_reachable": bool(base_url),
             "embedding": getattr(embedding, "to_dict", dict)(),
             "vision_model": getattr(getattr(app.state, "pipeline", None), "extractor", None)
             and getattr(app.state.pipeline.extractor, "vision_model", None),
@@ -959,14 +927,14 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 "vector": type(manager.vector_store).__name__,
                 "graph": "neo4j" if getattr(manager.graph_store, "driver", None) is not None else "inmemory",
             },
-            # 两个出网点的实时状态（D8/D9）：嵌入不可达时检索只能走 FTS5，UI 必须如实提示。
+            # 出网点的实时状态（D8/D9）：云端嵌入未配置时检索只能走 FTS5，
+            # UI 必须如实提示（指引文案由 embedding_config_hint 生成）。
             "degraded": {
                 "embedding": embedding_state,
                 "embedding_endpoint": base_url or "",
                 "chat_ready": ready,
-                "keyword_fallback": bool(base_url) and not embedding_reachable,
-                # 隧道命令由部署方通过 EMBEDDING_TUNNEL_HINT 下发，前端只负责显示。
-                "embedding_hint": embedding_tunnel_hint(),
+                "keyword_fallback": not bool(base_url),
+                "embedding_hint": embedding_config_hint(manager),
             },
         }
 
@@ -985,4 +953,7 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=LOCALHOST, port=int(os.getenv("NEBULA_PORT", str(DEFAULT_WEB_PORT))))
+    # 监听端口唯一来源：constants.DEFAULT_WEB_PORT（历史 NEBULA_PORT 环境变量已删）。
+    from constants import DEFAULT_WEB_PORT
+
+    uvicorn.run(app, host=LOCALHOST, port=DEFAULT_WEB_PORT)

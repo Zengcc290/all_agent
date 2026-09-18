@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import socket
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +28,7 @@ class FakeQdrantClient:
         self.points: list = []
         self.vectors_config = None
         self.searches: list[dict] = []
+        self.deleted_collections: list[str] = []
 
     def collection_exists(self, *, collection_name: str) -> bool:
         return self.exists
@@ -36,6 +36,10 @@ class FakeQdrantClient:
     def create_collection(self, *, collection_name: str, vectors_config) -> None:
         self.exists = True
         self.vectors_config = vectors_config
+
+    def delete_collection(self, *, collection_name: str) -> None:
+        self.exists = False
+        self.deleted_collections.append(collection_name)
 
     def get_collection(self, *, collection_name: str):
         return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(size=self.existing_size)))
@@ -104,6 +108,36 @@ def test_dimension_mismatch_still_raises():
 
     with pytest.raises(ValueError, match="dimension mismatch"):
         store.upsert(MemoryItem(content="x", memory_type=MemoryType.SEMANTIC, embedding=[0.1] * 4))
+
+
+def test_dimension_mismatch_message_points_to_single_knob_and_rebuild():
+    """1024/4096 冲突时：报错必须点名集合、说明唯一开关并给出重建命令。"""
+
+    client = FakeQdrantClient(exists=True, existing_size=1024)
+    store = QdrantVectorStore(client=client, namespace="tests")
+
+    with pytest.raises(ValueError, match="dimension mismatch") as excinfo:
+        store.upsert_chunk("d1:0", [0.1] * 4096)
+
+    message = str(excinfo.value)
+    assert "1024" in message and "4096" in message
+    assert "[embedding].model" in message  # 唯一可改的开关
+    assert "migrate_to_cloud.py --recreate-collection" in message
+    assert "reindex_embeddings.py" in message
+
+
+def test_recreate_collection_rebuilds_projection_at_new_dimension():
+    client = FakeQdrantClient(exists=True, existing_size=1024)
+    store = QdrantVectorStore(client=client, namespace="tests")
+
+    store.recreate_collection(4096)
+
+    assert client.deleted_collections == [store.collection_name]  # 旧投影被丢弃
+    assert client.vectors_config.size == 4096  # 新集合按新维度建立
+    assert store.dimension == 4096
+    # 重建后同维度 upsert 不再报维度不一致。
+    store.upsert_chunk("d1:0", [0.1] * 4096)
+    assert len(client.points) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -189,18 +223,18 @@ def test_rrf_fuse_prefers_common_hits():
     assert _rrf_fuse([[], []]) == []
 
 
-class DeadGatewayEmbedding(HashEmbedding):
-    """Vector-capable, but with a gateway address nobody listens on (tunnel down)."""
+def _break_vector_search(pipeline: RAGPipeline, monkeypatch) -> None:
+    """让向量路在查询时抛 RuntimeError（云端端点故障的等价模拟）。
 
-    def __init__(self, base_url: str) -> None:
-        super().__init__()
-        self.base_url = base_url
+    历史版本用「本机没人监听的端口 + TCP 预检」模拟网关掉线；预检删除后，
+    降级信号就是 ``manager.search`` 在嵌入查询时抛出的异常本身。
+    入库仍用哈希嵌入（对应「云端在线时已入库」的存量数据）。
+    """
 
+    def broken_search(*args, **kwargs):
+        raise RuntimeError("embedding API request failed: cloud endpoint unreachable")
 
-def closed_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    monkeypatch.setattr(pipeline.manager, "search", broken_search)
 
 
 def build_pipeline(tmp_path, embedding) -> RAGPipeline:
@@ -228,7 +262,9 @@ def test_hybrid_retrieve_uses_both_paths(tmp_path):
 
 
 def test_hybrid_falls_back_to_vector_when_disabled(tmp_path, monkeypatch):
-    monkeypatch.setenv("HELLOAGENTS_MEMORY_HYBRID", "0")
+    import memory.rag.pipeline as rag_pipeline
+
+    monkeypatch.setattr(rag_pipeline, "MEMORY_HYBRID", False)
     pipeline = build_pipeline(tmp_path, HashEmbedding())
     try:
         pipeline.ingest(Document("关闭混合检索后走纯向量路径。" * 8, id="doc-off"), chunk_size=120, overlap=20)
@@ -240,18 +276,19 @@ def test_hybrid_falls_back_to_vector_when_disabled(tmp_path, monkeypatch):
         pipeline.close()
 
 
-def test_hybrid_degrades_to_keyword_when_embedding_down(tmp_path):
-    """D8: with the tunnel down retrieval must degrade to FTS5, not fail."""
+def test_hybrid_degrades_to_keyword_when_embedding_down(tmp_path, monkeypatch):
+    """D8: 云端嵌入在查询时故障，检索必须降级为 FTS5，而不是整体失败。"""
 
-    pipeline = build_pipeline(tmp_path, DeadGatewayEmbedding(f"http://127.0.0.1:{closed_port()}"))
+    pipeline = build_pipeline(tmp_path, HashEmbedding())
     try:
         pipeline.ingest(Document("设备编号 abc-123 的降级检索。" * 8, id="doc-down"), chunk_size=120, overlap=20)
+        _break_vector_search(pipeline, monkeypatch)
 
         results = pipeline.hybrid_retrieve("abc-123", limit=3)
 
         assert results and "abc-123" in results[0].content
         assert "降级" in pipeline.last_retrieval_note
-        assert "不可达" in pipeline.last_retrieval_note
+        assert "向量检索失败" in pipeline.last_retrieval_note
     finally:
         pipeline.close()
 
@@ -288,12 +325,13 @@ def test_hybrid_retrieve_exposes_per_path_scores(tmp_path):
         pipeline.close()
 
 
-def test_hybrid_detail_marks_the_missing_path_when_degraded(tmp_path):
+def test_hybrid_detail_marks_the_missing_path_when_degraded(tmp_path, monkeypatch):
     """降级时向量分为 None（面板显示「—」），关键词分仍在——降级原因因此在界面上可见。"""
 
-    pipeline = build_pipeline(tmp_path, DeadGatewayEmbedding(f"http://127.0.0.1:{closed_port()}"))
+    pipeline = build_pipeline(tmp_path, HashEmbedding())
     try:
         pipeline.ingest(Document("设备编号 abc-123 的降级检索。" * 8, id="doc-score-down"), chunk_size=120, overlap=20)
+        _break_vector_search(pipeline, monkeypatch)
 
         results = pipeline.hybrid_retrieve("abc-123", limit=3)
 
