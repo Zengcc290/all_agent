@@ -131,6 +131,7 @@
       transform: translateX(-50%);
       pointer-events: auto;
       display: flex;
+      align-items: center;
       gap: 10px;
       background: rgba(8, 12, 28, 0.85);
       backdrop-filter: blur(20px);
@@ -139,6 +140,15 @@
       border-radius: 9999px;
       box-shadow: 0 0 30px rgba(56, 189, 248, 0.2);
     }
+    /* 工具栏内的按钮/下拉/时间输入统一高度并垂直居中，原生日历图标适配暗色 */
+    .controls.hud .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      color-scheme: dark;
+    }
+    .controls.hud #graph-as-of { padding: 5px 10px; line-height: 1.2; }
     .btn {
       background: transparent;
       border: none;
@@ -156,6 +166,9 @@
       color: #e0f2fe;
       box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
     }
+    /* 工具栏按钮分级：强调动作上色，辅助动作缩小 */
+    .btn.accent { color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.35); }
+    .btn.compact { padding: 4px 10px; font-size: 11px; min-height: 28px; opacity: 0.85; }
 
     /* 抽屉唤出胶囊 */
     #drawer-reopen-trigger {
@@ -194,12 +207,15 @@
       box-shadow: 0 0 8px #38bdf8;
     }
 
-    /* 右侧抽屉 */
+    /* 右侧抽屉：可横向拉宽（右下原生拖拽柄）；隐藏位移按自身宽度算，
+       拉宽后依然完全滑出屏幕 */
     #detail-drawer {
       position: absolute;
       top: 24px;
       right: 28px;
       width: 440px;
+      min-width: 320px;
+      max-width: min(80vw, 760px);
       max-height: calc(100vh - 48px);
       background: rgba(7, 11, 24, 0.94);
       backdrop-filter: blur(25px);
@@ -208,12 +224,13 @@
       padding: 24px;
       z-index: 20;
       box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 30px rgba(192, 132, 252, 0.15);
-      transform: translateX(490px);
+      transform: translateX(calc(100% + 50px));
       transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
       pointer-events: auto;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      resize: horizontal;
     }
     #detail-drawer.visible { transform: translateX(0); }
 
@@ -525,7 +542,10 @@
       outline: none;
       font-family: inherit;
       user-select: text;
+      min-height: 36px;
     }
+    /* 原生日期时间控件：暗色适配 + 与文本框同高 */
+    .form-row input[type="datetime-local"] { color-scheme: dark; }
     .form-row input:focus, .form-row select:focus, .form-row textarea:focus {
       border-color: rgba(52, 211, 153, 0.6);
     }
@@ -545,6 +565,9 @@
     }
     .form-submit:hover { background: rgba(52, 211, 153, 0.25); }
     .form-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+    /* 按钮分级：主操作醒目，辅助操作收敛 */
+    .form-submit.primary { padding: 11px; font-size: 13px; font-weight: 600; }
+    .form-submit.compact { padding: 7px; font-size: 11px; opacity: 0.92; }
     .form-divider {
       margin: 12px 0 10px;
       text-align: center;
@@ -598,6 +621,24 @@
     .ingest-jobs .job-empty { font-size: 12px; color: rgba(148, 163, 184, 0.6); text-align: center; padding: 6px 0; }
     @keyframes jobPulse { 50% { opacity: 0.55; } }
 
+    /* 可收起的功能卡片头：点击标题栏展开/缩回内容 */
+    .collapsible-head {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin: 12px 0 10px;
+      color: rgba(148, 163, 184, 0.7);
+      font-size: 11px;
+      letter-spacing: 1px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .collapsible-head:hover { color: #cbd5e1; }
+    .collapsible-head .chev { transition: transform 0.25s ease; font-size: 10px; }
+    .collapsible-head.collapsed .chev { transform: rotate(-90deg); }
+    .collapsible-body.collapsed { display: none; }
+
     /* 聊天面板 */
     #chat-panel {
       position: absolute;
@@ -616,6 +657,12 @@
       flex-direction: column;
       overflow: hidden;
       animation: chatpop 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      /* 可伸缩：右下角原生拖拽柄调整大小 */
+      resize: both;
+      min-width: 300px;
+      min-height: 320px;
+      max-width: min(92vw, 720px);
+      max-height: calc(100vh - 120px);
     }
     #chat-panel.open { display: flex; }
     @keyframes chatpop { from { transform: scale(0.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
@@ -704,6 +751,7 @@
     #chat-textarea:focus { border-color: rgba(56, 189, 248, 0.6); }
     #chat-send-btn {
       flex: 0 0 auto;
+      min-height: 42px;
       padding: 0 18px;
       border-radius: 12px;
       cursor: pointer;
@@ -720,6 +768,7 @@
       flex: 0 1 148px;
       min-width: 0;
       max-width: 100%;
+      min-height: 42px;
       padding: 0 10px;
       border-radius: 12px;
       border: 1px solid rgba(56, 189, 248, 0.25);
@@ -848,6 +897,11 @@
       line-height: 1.7;
       color: #94a3b8;
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+      resize: both;
+      min-width: 280px;
+      min-height: 200px;
+      max-width: min(92vw, 560px);
+      max-height: 86vh;
     }
     #storage-panel[hidden] { display: none; }
     #storage-panel .storage-head {
@@ -904,6 +958,12 @@
       line-height: 1.7;
       color: #94a3b8;
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+      resize: both;
+      min-width: 300px;
+      min-height: 260px;
+      max-width: min(92vw, 720px);
+      max-height: calc(100vh - 120px);
     }
     #documents-panel[hidden] { display: none; }
     .doc-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -1069,7 +1129,10 @@
         right: 8px;
         width: auto;
         max-width: none;
+        resize: none;
+        min-width: 0;
       }
+      #detail-drawer { resize: none; min-width: 0; }
       .searchwrap { width: min(320px, 100%); }
       #chat-mode-select { flex: 1 1 100%; }
       #chat-textarea { flex: 1 1 100%; }
@@ -1131,8 +1194,8 @@
       <option value="">全部领域</option>
     </select>
     <input class="btn" id="graph-as-of" type="datetime-local" aria-label="查看历史时间点" title="按时间点查看 Neo4j 关系">
-    <button class="btn" id="graph-as-of-apply">时间点</button>
-    <button class="btn" id="graph-as-of-clear">当前</button>
+    <button class="btn accent" id="graph-as-of-apply">时间点</button>
+    <button class="btn compact" id="graph-as-of-clear">当前</button>
   </div>
 
   <div id="stats-bar">
@@ -1264,9 +1327,11 @@
         <div class="form-row">
           <textarea id="knowledge-text" placeholder="粘贴一句话，AI 自动识别实体与关系并入库，例如：向量数据库把非结构化文本编码成稠密向量，用于语义检索。"></textarea>
         </div>
-        <button id="knowledge-submit" class="form-submit alt">✦ AI 一句话入库</button>
-        <div class="form-divider">— 入库记录（后台队列） —</div>
-        <div id="ingest-jobs" class="ingest-jobs" aria-live="polite"></div>
+        <button id="knowledge-submit" class="form-submit alt primary">✦ AI 一句话入库</button>
+        <div class="collapsible-head" id="ingest-jobs-toggle" role="button" tabindex="0" aria-expanded="true" aria-controls="ingest-jobs">
+          — 入库记录（后台队列） — <span class="chev">▾</span>
+        </div>
+        <div id="ingest-jobs" class="ingest-jobs collapsible-body" aria-live="polite"></div>
         <div class="form-divider">— 或拍照 / 上传图片识图 —</div>
         <div class="form-row">
           <input id="image-note" type="text" placeholder="图片说明（可选，如：电脑 13:00 在书桌上跑项目）">
@@ -1274,7 +1339,7 @@
         <div class="form-row">
           <input id="image-event-at" type="datetime-local" aria-label="图片观察时间">
         </div>
-        <button id="image-submit" class="form-submit alt">📷 选择图片并识图入库</button>
+        <button id="image-submit" class="form-submit alt compact">📷 选择图片并识图入库</button>
         <input id="image-input" type="file" hidden accept="image/*" capture="environment">
       </div>
     </div>
@@ -2286,6 +2351,28 @@
     } catch (_) { /* 队列不可用（如内存库）时静默 */ }
   }
   setInterval(() => { if (!document.hidden) refreshIngestJobs(); }, 3000);
+
+  // 入库记录卡片：点击标题栏收起/展开，状态记忆在本地。
+  (function initIngestJobsCollapse() {
+    const head = $("ingest-jobs-toggle");
+    const body = $("ingest-jobs");
+    if (!head || !body) return;
+    const apply = (collapsed) => {
+      head.classList.toggle("collapsed", collapsed);
+      body.classList.toggle("collapsed", collapsed);
+      head.setAttribute("aria-expanded", String(!collapsed));
+    };
+    apply(localStorage.getItem("ingestJobsCollapsed") === "1");
+    const toggle = () => {
+      const collapsed = !body.classList.contains("collapsed");
+      apply(collapsed);
+      localStorage.setItem("ingestJobsCollapsed", collapsed ? "1" : "0");
+    };
+    head.addEventListener("click", toggle);
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    });
+  })();
 
   async function submitImageKnowledge() {
     const input = $("image-input");
