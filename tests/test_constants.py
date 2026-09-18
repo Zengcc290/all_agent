@@ -15,10 +15,11 @@ import inspect
 from constants import (
     DEFAULT_NEO4J_BOLT_PORT,
     DEFAULT_NEO4J_URI,
+    DEFAULT_PROXY_PORT,
+    DEFAULT_PROXY_URL,
     DEFAULT_QDRANT_PORT,
     DEFAULT_QDRANT_URL,
     DEFAULT_WEB_PORT,
-    KNOWLEDGE_INGEST_WORKERS,
     LOCALHOST,
     MEMORY_HYBRID,
     MEMORY_QDRANT_COLLECTION,
@@ -41,6 +42,8 @@ def test_documented_connection_defaults():
     ) == (6333, 7687, 8765)
     assert DEFAULT_QDRANT_URL == "http://127.0.0.1:6333"
     assert DEFAULT_NEO4J_URI == "bolt://127.0.0.1:7687"
+    assert DEFAULT_PROXY_PORT == 7890
+    assert DEFAULT_PROXY_URL == "http://127.0.0.1:7890"
     # 端点由「地址 + 端口」常量拼成，改端口不需要再改端点字面量
     assert DEFAULT_QDRANT_URL == f"http://{LOCALHOST}:{DEFAULT_QDRANT_PORT}"
     assert DEFAULT_NEO4J_URI == f"bolt://{LOCALHOST}:{DEFAULT_NEO4J_BOLT_PORT}"
@@ -65,4 +68,3 @@ def test_runtime_toggles_have_single_source():
     assert WEB_QA_EXTRACT is True
     assert WEB_QA_EXTRACT_SYNC is False
     assert MEMORY_HYBRID is True
-    assert isinstance(KNOWLEDGE_INGEST_WORKERS, int) and KNOWLEDGE_INGEST_WORKERS >= 1

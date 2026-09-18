@@ -23,8 +23,16 @@ from memory.storage.qdrant import QdrantVectorStore
 class FakeQdrantClient:
     """Minimal QdrantClient stand-in: records upserts, replays canned search hits."""
 
-    def __init__(self, *, exists: bool = False, existing_size: int | None = None, hits: list | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        exists: bool = False,
+        existing_size: int | None = None,
+        hits: list | None = None,
+        named_vectors: bool = False,
+    ) -> None:
         self.exists, self.existing_size, self.hits = exists, existing_size, hits or []
+        self.named_vectors = named_vectors
         self.points: list = []
         self.vectors_config = None
         self.searches: list[dict] = []
@@ -42,6 +50,14 @@ class FakeQdrantClient:
         self.deleted_collections.append(collection_name)
 
     def get_collection(self, *, collection_name: str):
+        if self.named_vectors:
+            return SimpleNamespace(
+                config=SimpleNamespace(
+                    params=SimpleNamespace(
+                        vectors=SimpleNamespace(size=self.existing_size)
+                    )
+                )
+            )
         return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(size=self.existing_size)))
 
     def upsert(self, *, collection_name: str, points: list) -> None:
@@ -108,6 +124,30 @@ def test_dimension_mismatch_still_raises():
 
     with pytest.raises(ValueError, match="dimension mismatch"):
         store.upsert(MemoryItem(content="x", memory_type=MemoryType.SEMANTIC, embedding=[0.1] * 4))
+
+
+def test_configured_dimension_is_not_treated_as_collection_size():
+    """配置护栏 1024 不能冒充集合现有维度：集合已是 4096 时同维写入必须成功。"""
+
+    client = FakeQdrantClient(exists=True, existing_size=4096)
+    store = QdrantVectorStore(client=client, dimension=1024, namespace="tests")
+
+    store.upsert_chunk("d1:0", [0.1] * 4096)
+
+    assert len(client.points) == 1
+    assert store.dimension == 4096
+
+
+def test_dimension_mismatch_reads_qdrant_vectors_size():
+    """真实 qdrant-client 把尺寸放在 config.params.vectors.size，不能只读扁平 size。"""
+
+    client = FakeQdrantClient(exists=True, existing_size=1024, named_vectors=True)
+    store = QdrantVectorStore(client=client, namespace="tests")
+
+    with pytest.raises(ValueError, match="dimension mismatch") as excinfo:
+        store.upsert_chunk("d1:0", [0.1] * 4096)
+
+    assert "1024" in str(excinfo.value) and "4096" in str(excinfo.value)
 
 
 def test_dimension_mismatch_message_points_to_single_knob_and_rebuild():

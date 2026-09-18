@@ -107,6 +107,11 @@ DEFAULT_QDRANT_URL = f"http://{LOCALHOST}:{DEFAULT_QDRANT_PORT}"
 #:   uri = "bolt://127.0.0.1:7687"（username/password 同段配置）
 DEFAULT_NEO4J_URI = f"bolt://{LOCALHOST}:{DEFAULT_NEO4J_BOLT_PORT}"
 
+#: 云端 Qdrant / Neo4j 未显式配置 [proxy] 时走的本机转发代理（Clash 默认端口）。
+#: 本机回环地址绝不走代理。
+DEFAULT_PROXY_PORT = 7890
+DEFAULT_PROXY_URL = f"http://{LOCALHOST}:{DEFAULT_PROXY_PORT}"
+
 # ---------------------------------------------------------------------------
 # 嵌入服务（memory/embedding.py）
 #   所在文件：memory/embedding.py（APIEmbedding 默认参数）、memory/base.py（MemoryConfig）
@@ -204,9 +209,6 @@ MEMORY_EDGE_REINFORCE = True
 
 #: RAG 混合检索（FTS5 关键词 × 向量 RRF 融合）总开关；False = 纯向量。
 MEMORY_HYBRID = True
-
-#: 一句话后台入库队列的并发 worker 数（I/O 为主，2-3 即可吃满 LLM 延迟）。
-KNOWLEDGE_INGEST_WORKERS = 2
 
 # ---------------------------------------------------------------------------
 # 知识抽取（memory/rag/knowledge.py）

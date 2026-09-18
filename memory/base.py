@@ -315,8 +315,8 @@ class MemoryConfig:
     neo4j_uri: str | None = None
     neo4j_username: str | None = None
     neo4j_password: str | None = None
-    #: 本地转发代理（http://host:port，如 Clash 7890）。非空时 Qdrant Cloud
-    #: 走该代理、Neo4j Aura 经 CONNECT 隧道转发。来源：services.toml [proxy]。
+    #: 本地转发代理（http://host:port）。显式配置覆盖默认值；云端 Qdrant/Neo4j
+    #: 未配置时由 MemoryManager 使用 constants.DEFAULT_PROXY_URL（7890）。
     proxy_url: str | None = None
     extra: dict[str, object] = field(default_factory=dict)
 

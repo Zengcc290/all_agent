@@ -65,6 +65,7 @@ from .graph_builder import build_graph
 from .ingest_queue import IngestJobQueue, job_to_dict
 from .seed import seed
 from .support import (
+    SEARCH_TOOL_NAME,
     STATIC_DIR,
     build_knowledge_extractor,
     bump_graph_revision,
@@ -290,7 +291,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         online = body.mode == "online"
         # 联网模式只在 AnySearch 已配置时真正开放 web.search；否则按非联网处理。
         tool_names = chat_tool_names(agent, online=online)
-        effective_mode = "online" if tool_names is None else "offline"
+        effective_mode = "online" if SEARCH_TOOL_NAME in tool_names else "offline"
         try:
             # agent.run 是同步阻塞调用，丢进线程避免卡住事件循环。
             # chat_lock：agent 是共享单例且内部历史无锁，串行化避免并发问答

@@ -247,7 +247,7 @@ def test_manager_from_config_selects_qdrant_when_url_set(tmp_path, monkeypatch):
 
         assert type(manager.vector_store) is QdrantVectorStore
         assert manager.vector_store.collection_name == "helloagents_memory"
-        assert manager.vector_store.dimension == manager.config.embedding_dimension
+        assert manager.vector_store.dimension is None
     finally:
         manager.close()
 

@@ -1,10 +1,11 @@
-"""一句话后台入库队列：SQLite 持久化状态 + 线程池并发消费。
+"""一句话后台入库队列：SQLite 持久化状态 + 单线程串行消费。
 
-提交立即返回（前端即刻清空输入框），worker 线程在后台完成向量化与
-LLM 抽取。每条任务的 ``pending → running → done/failed`` 状态写在
-memories 同一个 SQLite 文件里（``ingest_jobs`` 表），随时可查历史；
-进程异常退出后 :meth:`IngestJobQueue.start` 把遗留 ``running`` 任务复位
-为 ``pending`` 并重新入队（``attempts`` 封顶防死循环）。
+提交立即返回（前端即刻清空输入框），后台线程按提交顺序完成向量化与
+LLM 抽取。后一次入库可能要检索/用上上一次的图与向量，所以不能并行。
+每条任务的 ``pending → running → done/failed`` 状态写在 memories 同一个
+SQLite 文件里（``ingest_jobs`` 表），随时可查历史；进程异常退出后
+:meth:`IngestJobQueue.start` 把遗留 ``running`` 任务复位为 ``pending``
+并重新入队（``attempts`` 封顶防死循环）。
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
-from constants import KNOWLEDGE_INGEST_WORKERS
 from memory.rag import Document, RAGPipeline
 from memory.storage.document_repo import DocumentRepository, IngestJobRecord
 
@@ -74,9 +74,7 @@ class IngestJobQueue:
         usable = bool(path) and str(path) != ":memory:"
         # 文件库走 DocumentRepository（每次调用独立连接，线程安全）。
         self._repo = DocumentRepository(path) if usable else None
-        # 并发 worker 数唯一来源：constants.KNOWLEDGE_INGEST_WORKERS（I/O 为主，
-        # 2-3 即可吃满 LLM 延迟；历史 KNOWLEDGE_INGEST_WORKERS 环境变量已删）。
-        self._workers = max(1, KNOWLEDGE_INGEST_WORKERS)
+        # 固定单 worker：后一次入库可能检索/依赖上一次写入的图与向量。
         self._executor: ThreadPoolExecutor | None = None
 
     @property
@@ -89,7 +87,7 @@ class IngestJobQueue:
         if self._repo is None:
             return
         self._executor = ThreadPoolExecutor(
-            max_workers=self._workers, thread_name_prefix="ingest-job"
+            max_workers=1, thread_name_prefix="ingest-job"
         )
         recovered = self._repo.restart_stale_ingest_jobs()
         if recovered:
@@ -152,7 +150,7 @@ class IngestJobQueue:
             return
         repo.set_ingest_job_status(job_id, "running")
         try:
-            # 每任务独立 pipeline：last_ingest_report 不能被并发任务互相覆盖。
+            # 每任务独立 pipeline：串行执行时 last_ingest_report 也不会串味。
             pipeline = RAGPipeline(self._manager, extractor=self._extractor)
             items = pipeline.ingest(
                 Document(

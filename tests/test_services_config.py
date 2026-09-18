@@ -419,6 +419,77 @@ url = "http://127.0.0.1:7890"
         manager.close()
 
 
+def test_manager_defaults_cloud_proxy_to_local_7890(tmp_path, monkeypatch):
+    """云端 Qdrant/Neo4j 未写 [proxy] 时永久走本机 7890；回环地址不走代理。"""
+
+    from memory.manager import MemoryManager
+
+    config = tmp_path / "services.toml"
+    write_and_point(
+        config,
+        """\
+[qdrant]
+url = "https://xxxx.qdrant.tech"
+api_key = "qdrant-secret"
+
+[neo4j]
+uri = "neo4j+s://xxxx.databases.neo4j.io"
+username = "neo4j"
+password = "neo4j-secret"
+""",
+        monkeypatch,
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeQdrant:
+        def __init__(self, **kwargs):
+            captured["qdrant"] = kwargs
+
+    class FakeNeo4j:
+        def __init__(self, *args, **kwargs):
+            captured["neo4j"] = kwargs
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("memory.manager.QdrantVectorStore", FakeQdrant)
+    monkeypatch.setattr("memory.manager.Neo4jGraphStore", FakeNeo4j)
+
+    config_obj = MemoryConfig.from_config()
+    config_obj.sqlite_path = str(tmp_path / "memory.sqlite3")
+    manager = MemoryManager(config_obj)
+    try:
+        assert config_obj.proxy_url is None
+        assert captured["qdrant"]["proxy_url"] == "http://127.0.0.1:7890"
+        assert captured["neo4j"]["proxy_url"] == "http://127.0.0.1:7890"
+    finally:
+        manager.close()
+
+
+def test_manager_does_not_proxy_loopback_qdrant(tmp_path, monkeypatch):
+    from memory.manager import MemoryManager
+
+    config = tmp_path / "services.toml"
+    write_and_point(config, '[qdrant]\nurl = "http://127.0.0.1:6333"\n', monkeypatch)
+
+    captured: dict[str, object] = {}
+
+    class FakeQdrant:
+        def __init__(self, **kwargs):
+            captured["qdrant"] = kwargs
+
+    monkeypatch.setattr("memory.manager.QdrantVectorStore", FakeQdrant)
+
+    config_obj = MemoryConfig.from_config()
+    config_obj.sqlite_path = str(tmp_path / "memory.sqlite3")
+    manager = MemoryManager(config_obj)
+    try:
+        assert captured["qdrant"]["proxy_url"] is None
+    finally:
+        manager.close()
+
+
 # ---------------------------------------------------------------------------
 # 消费方接线：识图抽取模型统一从 services.toml [vision] 读取
 # ---------------------------------------------------------------------------

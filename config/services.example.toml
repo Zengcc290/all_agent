@@ -56,10 +56,7 @@
 # password = "..."
 
 [proxy]
-# 本地转发代理（如 Clash 的 http://127.0.0.1:7890）。配置后：
-#   - Qdrant Cloud 的 HTTP 请求走该代理（不走本机回环地址）；
-#   - Neo4j Aura 通过 CONNECT 隧道走该代理（neo4j 驱动无原生代理支持）。
-#     驱动仍用原始 neo4j+s:// 主机名（保留 SNI/证书校验），Aura 路由表里的
-#     成员主机（*.neo4j.io）各自开一条本地隧道，避免直连被墙或打到错误节点。
-# 不配置时不读系统环境代理（畸形 NO_PROXY 会让 httpx 构造期直接抛错）。
+# 本地转发代理。云端 Qdrant / Neo4j 未写本段时，默认走
+# http://127.0.0.1:7890（constants.DEFAULT_PROXY_URL）。本机回环地址绝不走代理。
+# 换端口时再显式写 url；不配本段 = 用 7890。
 # url = "http://127.0.0.1:7890"

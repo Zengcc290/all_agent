@@ -174,8 +174,11 @@ def get_agent():
                 from tool.memory_query import MemoryQueryTool
                 from tool.rag_search import RAGSearchTool
                 from tool.rag_tool import RAGTool
+                from tool.search import SearchTool
 
-                agent = ReActAgent("knowledge-butler")
+                # 前端知识管家只挂检索/写入记忆的工具，不自动发现
+                # fs / update_log / current_time 等项目脚手架。
+                agent = ReActAgent("knowledge-butler", auto_discover_tools=False)
                 agent.set_system_prompt(SYSTEM_PROMPT)
                 # 四个记忆工具统一注入 Web 单例后端，避免发现机制各自创建的
                 # 默认连接与嵌入配置和 Web API 漂移（同一份记忆库是硬要求）。
@@ -187,6 +190,7 @@ def get_agent():
                     RAGSearchTool(pipeline=get_pipeline()), replace=True
                 )
                 agent.register_tool(RAGTool(pipeline=get_pipeline()), replace=True)
+                agent.register_tool(SearchTool(), replace=True)
                 _agent = agent
     return _agent
 
@@ -225,6 +229,16 @@ def chat_confirmed_side_effects(agent) -> frozenset[str]:
 #: 联网搜索工具的注册名；聊天「联网/非联网」开关据此决定是否可见。
 SEARCH_TOOL_NAME = "web.search"
 
+#: 前端知识管家允许暴露给 LLM 的工具。图检索 / 向量检索 / 增量记忆写入
+#: 是星图聊天真正用到的能力；项目脚手架工具不进这一层。
+CHAT_TOOL_ALLOWLIST = (
+    "memory.query",
+    "memory.add",
+    "memory.rag_search",
+    "memory.rag",
+    SEARCH_TOOL_NAME,
+)
+
 
 def search_available() -> bool:
     """AnySearch 是否已配置（base_url 与 api_key 同时存在才视为可用）。
@@ -242,15 +256,20 @@ def _services_search() -> SearchService:
     return load_services_config().search
 
 
-def chat_tool_names(agent, *, online: bool) -> list[str] | None:
+def chat_tool_names(agent, *, online: bool) -> list[str]:
     """按聊天模式返回可见工具名清单（传给 ``agent.run(tool_names=...)``）。
 
-    - online 且 AnySearch 已配置：返回 ``None``（全部工具，含 web.search）。
-    - 其余情况（offline 或联网未配置）：摘除 web.search，只留本地工具。
+    前端知识管家永远只暴露记忆/图/向量检索相关工具；``None`` 不再表示
+    「发现到的全部工具」。联网且 AnySearch 已配置时额外开放 web.search。
     """
-    if online and search_available():
-        return None
-    return [name for name in agent.tools.snapshot() if name != SEARCH_TOOL_NAME]
+    names = [
+        name
+        for name in agent.tools.snapshot()
+        if name in CHAT_TOOL_ALLOWLIST and name != SEARCH_TOOL_NAME
+    ]
+    if online and search_available() and SEARCH_TOOL_NAME in agent.tools.snapshot():
+        names.append(SEARCH_TOOL_NAME)
+    return names
 
 
 def record_qa(

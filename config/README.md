@@ -11,7 +11,7 @@ gitignored 的 `services.toml` / `provider.toml`（或用 `*_env` 指向系统�
 | 联网搜索（web.search / AnySearch） | `services.toml` → `[search]` |
 | Qdrant Cloud | `services.toml` → `[qdrant]` |
 | Neo4j Aura | `services.toml` → `[neo4j]` |
-| 本地转发代理（Clash 等） | `services.toml` → `[proxy].url`；Qdrant Cloud 与 Neo4j Aura 都走它；不配置则不读系统代理环境变量 |
+| 本地转发代理（Clash 等） | 云端 Qdrant / Neo4j 默认 `http://127.0.0.1:7890`；`services.toml` → `[proxy].url` 可覆盖；本机回环不走代理 |
 
 ## 规则
 

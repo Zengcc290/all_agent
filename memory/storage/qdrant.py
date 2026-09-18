@@ -11,6 +11,31 @@ from ..base import MemoryItem, MemoryType
 from .vector import BaseVectorStore
 
 
+def _collection_vector_size(info: Any) -> int | None:
+    """Read the live collection vector size from Qdrant collection info.
+
+    qdrant-client 把尺寸放在 ``config.params.vectors.size``（或 named vectors
+    的第一组）；测试替身用扁平的 ``config.params.size``。配置文件里的
+    ``[embedding].dimension`` 不是集合现有维度，不能拿来比对。
+    """
+
+    params = getattr(getattr(info, "config", None), "params", None)
+    if params is None:
+        return None
+    vectors = getattr(params, "vectors", None)
+    if vectors is not None:
+        size = getattr(vectors, "size", None)
+        if size is not None:
+            return int(size)
+        if isinstance(vectors, dict) and vectors:
+            first = next(iter(vectors.values()))
+            size = getattr(first, "size", None)
+            if size is not None:
+                return int(size)
+    size = getattr(params, "size", None)
+    return int(size) if size is not None else None
+
+
 def _dimension_mismatch_message(collection: str, existing: int, actual: int) -> str:
     """维度冲突的修复指引：维度只有一个开关——[embedding].model。"""
 
@@ -54,9 +79,8 @@ class QdrantVectorStore(BaseVectorStore):
                 elif proxy_url:
                     client = QdrantClient(url=url, api_key=api_key, proxy=proxy_url)
                 else:
-                    # 无 [proxy] 配置时也不读系统环境代理：畸形 NO_PROXY
-                    # （如带方括号的 [::1]）会让 httpx 在构造期直接抛
-                    # InvalidURL；要代理就在 services.toml [proxy] 显式配。
+                    # MemoryManager 已对云端填上默认 7890；走到这里说明调用方
+                    # 明确不要代理。仍不读系统环境代理，避免畸形 NO_PROXY。
                     client = QdrantClient(url=url, api_key=api_key, trust_env=False)
             else:
                 client = QdrantClient(path=":memory:")
@@ -75,16 +99,19 @@ class QdrantVectorStore(BaseVectorStore):
             exists = self.client.collection_exists(collection_name=self.collection_name)
             if not exists:
                 self.client.create_collection(collection_name=self.collection_name, vectors_config=VectorParams(size=dimension, distance=Distance.COSINE))
-            elif self.dimension is not None and self.dimension != dimension:
-                raise ValueError(_dimension_mismatch_message(self.collection_name, self.dimension, dimension))
             else:
+                # 只跟集合的真实尺寸比对。self.dimension 可能来自配置护栏，
+                # 把它当成「集合已有维度」会在换模型后误报 1024/4096。
+                existing = None
                 get_collection = getattr(self.client, "get_collection", None)
                 if callable(get_collection):
-                    info = get_collection(collection_name=self.collection_name)
-                    configured = getattr(getattr(info, "config", None), "params", None)
-                    configured_size = getattr(configured, "size", None)
-                    if configured_size is not None and int(configured_size) != dimension:
-                        raise ValueError(_dimension_mismatch_message(self.collection_name, int(configured_size), dimension))
+                    existing = _collection_vector_size(
+                        get_collection(collection_name=self.collection_name)
+                    )
+                if existing is not None and existing != dimension:
+                    raise ValueError(
+                        _dimension_mismatch_message(self.collection_name, existing, dimension)
+                    )
             self.dimension = dimension
             self._ensure_payload_indexes()
             self._ready = True

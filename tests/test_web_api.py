@@ -439,10 +439,12 @@ def test_chat_tool_names_follow_mode(
     assert agent.last_tool_names is not None
     assert "web.search" not in agent.last_tool_names
 
-    # 已配置搜索且选择联网：tool_names 为 None（全部工具，含 web.search）
+    # 已配置搜索且选择联网：白名单内开放 web.search，不含脚手架工具
     _search_services(tmp_path, monkeypatch, on=True)
     client.post("/api/chat", json={"message": "q2", "mode": "online"})
-    assert agent.last_tool_names is None
+    assert agent.last_tool_names is not None
+    assert "web.search" in agent.last_tool_names
+    assert "system.current_time" not in agent.last_tool_names
 
     # 未配置搜索却选择联网：回退为非联网
     _search_services(tmp_path, monkeypatch, on=False)
@@ -626,7 +628,10 @@ def test_get_agent_registers_the_four_memory_tools(
             "memory.add",
             "memory.rag_search",
             "memory.rag",
+            "web.search",
         } <= names
+        assert "system.current_time" not in names
+        assert "system.update_log" not in names
         # 只读工具不该要求确认，memory.add 才是聊天唯一自动确认的写入。
         assert support.chat_confirmed_side_effects(agent) == frozenset(
             {agent.tools.confirmation_key("memory.add")}

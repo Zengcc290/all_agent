@@ -1,4 +1,4 @@
-"""一句话后台入库队列：异步提交、SQLite 状态持久化、重启续跑与并发。"""
+"""一句话后台入库队列：异步提交、SQLite 状态持久化、重启续跑与串行消费。"""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def test_queue_unavailable_on_memory_store(tmp_path):
         manager.close()
 
 
-def test_multiple_jobs_complete_concurrently(tmp_path):
+def test_multiple_jobs_complete_in_order(tmp_path):
     manager = make_manager(tmp_path)
     queue = IngestJobQueue(manager, NullKnowledgeExtractor())
     queue.start()

@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import urlsplit
+
+from constants import DEFAULT_PROXY_URL
 
 from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType, make_default_embedding
 from .embedding import BaseEmbedding
@@ -17,6 +20,21 @@ from .storage import (
     SQLiteDocumentStore,
 )
 from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
+
+
+def _is_loopback_endpoint(value: str | None) -> bool:
+    hostname = (urlsplit(value or "").hostname or "").casefold()
+    return hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def cloud_proxy_url(config: MemoryConfig, endpoint: str | None) -> str | None:
+    """Cloud Qdrant/Neo4j 默认走本机 7890；回环地址与显式 [proxy] 覆盖除外。"""
+
+    if not endpoint or _is_loopback_endpoint(endpoint):
+        return None
+    if config.proxy_url:
+        return config.proxy_url
+    return DEFAULT_PROXY_URL
 
 
 class MemoryManager:
@@ -45,8 +63,7 @@ class MemoryManager:
                 url=self.config.qdrant_url,
                 collection_name=self.config.qdrant_collection,
                 api_key=self.config.qdrant_api_key,
-                dimension=self.config.embedding_dimension,
-                proxy_url=self.config.proxy_url,
+                proxy_url=cloud_proxy_url(self.config, self.config.qdrant_url),
             )
         else:
             self.vector_store = InMemoryVectorStore()
@@ -57,7 +74,7 @@ class MemoryManager:
                 self.config.neo4j_uri,
                 self.config.neo4j_username,
                 self.config.neo4j_password,
-                proxy_url=self.config.proxy_url,
+                proxy_url=cloud_proxy_url(self.config, self.config.neo4j_uri),
             )
         )
         common = {
@@ -155,4 +172,4 @@ class MemoryManager:
         self.close()
 
 
-__all__ = ["MemoryManager"]
+__all__ = ["MemoryManager", "cloud_proxy_url"]
