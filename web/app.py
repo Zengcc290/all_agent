@@ -9,6 +9,7 @@
 - POST /api/knowledge 一句话入库：原文向量化 + LLM 自动抽取实体/关系 → 图结构
 - POST /api/knowledge/image 图片/相机 → VL embedding + 视觉模型抽取实体、时间和多元关系
 - GET  /api/knowledge/jobs 一句话入库历史（后台队列状态：排队中/正在入库/成功/失败）
+- POST /api/knowledge/jobs/{job_id}/retry 失败的一句话入库任务重新入队
 - POST /api/seed     （重新）播种 Aetheria 种子数据（幂等）
 - GET  /api/export   导出全部记忆为 JSON 文件（课设「库→文件」要求）
 - POST /api/import   导入此前导出的 JSON（课设「文件→库」要求）
@@ -58,7 +59,12 @@ from constants import (
 )
 from core import ExecutionContext
 from memory import MemoryManager, MemoryType
-from memory.embedding_lock import EmbeddingLockMismatch, apply_embedding_lock
+from memory.embedding_lock import (
+    EmbeddingLockMismatch,
+    apply_embedding_lock,
+    inspect_embedding_lock,
+    mismatch_from_exception,
+)
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
 
@@ -217,7 +223,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         return app.state.manager
 
     def guard_embedding(*, confirm_rebuild: bool = False) -> None:
-        """409 before ingest/reindex when SQLite embedding lock mismatches."""
+        """409 before ingest/reindex when SQLite lock or live Qdrant dimension mismatches."""
 
         manager = the_manager()
         repository = app.state.pipeline.document_repo()
@@ -225,6 +231,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             apply_embedding_lock(manager, repository, confirm_rebuild=confirm_rebuild)
         except EmbeddingLockMismatch as exc:
             raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
+
+    def raise_embedding_http(exc: BaseException) -> None:
+        mapped = mismatch_from_exception(
+            exc, the_manager(), app.state.pipeline.document_repo()
+        )
+        if mapped is not None:
+            raise HTTPException(status_code=409, detail=mapped.to_detail()) from exc
 
     # ------------------------------------------------------------------
     # 星云图缓存：任何写操作递增 revision，/api/graph 命中缓存避免全量重建。
@@ -398,9 +411,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             )
         except HTTPException:
             raise
-        except EmbeddingLockMismatch as exc:
-            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
         except Exception as exc:  # noqa: BLE001 - 解析失败归一为 422，附错误类型
+            raise_embedding_http(exc)
             raise HTTPException(
                 status_code=422, detail=f"文档解析失败：{type(exc).__name__}: {exc}"
             )
@@ -519,6 +531,25 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "workers": getattr(queue, "_workers", 0),
         }
 
+    @app.post("/api/knowledge/jobs/{job_id}/retry")
+    def retry_knowledge_job(
+        job_id: str,
+        confirm_rebuild: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """Re-queue a failed one-sentence ingest job after the embedding gate."""
+
+        guard_embedding(confirm_rebuild=confirm_rebuild)
+        queue = getattr(app.state, "ingest_queue", None)
+        if queue is None or not queue.available:
+            raise HTTPException(status_code=503, detail="入库队列不可用")
+        try:
+            job = queue.retry(job_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="入库任务不存在") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "async": True, **job_to_dict(job)}
+
     @app.post("/api/knowledge/image")
     async def add_image_knowledge(
         file: UploadFile,
@@ -556,10 +587,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             )
         except HTTPException:
             raise
-        except EmbeddingLockMismatch as exc:
-            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=f"图片入库参数无效：{exc}") from exc
+        except Exception as exc:
+            raise_embedding_http(exc)
+            if isinstance(exc, (TypeError, ValueError)):
+                raise HTTPException(status_code=422, detail=f"图片入库参数无效：{exc}") from exc
+            raise
         invalidate_graph()
         report = dict(app.state.pipeline.last_ingest_report)
         return {
@@ -911,9 +943,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
         except HTTPException:
             raise
-        except EmbeddingLockMismatch as exc:
-            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
         except Exception as exc:
+            raise_embedding_http(exc)
             raise HTTPException(status_code=502, detail=f"重嵌入失败：{type(exc).__name__}: {exc}") from exc
         status = "extracted" if document.status == "extracted" else "vectorized"
         repository.set_status(document_id, status)
@@ -938,6 +969,23 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     def reconcile_repair(body: ReconcileBody) -> dict[str, Any]:
         return repair_drift(body.repair)
 
+    @app.post("/api/embedding/rebuild")
+    def rebuild_embedding(confirm_rebuild: bool = Query(default=False)) -> dict[str, Any]:
+        """Confirm and rebuild the vector projection at the current embedding."""
+
+        if not confirm_rebuild:
+            guard_embedding(confirm_rebuild=False)
+        else:
+            guard_embedding(confirm_rebuild=True)
+        invalidate_graph()
+        snapshot = inspect_embedding_lock(the_manager(), app.state.pipeline.document_repo())
+        return {
+            "ok": True,
+            "rebuilt": bool(confirm_rebuild),
+            "embedding_lock": snapshot["locked"],
+            "qdrant_dimension": snapshot["qdrant_dimension"],
+        }
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         ready, _ = chat_ready()
@@ -949,7 +997,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         embedding_state = "api" if base_url else "hash"
         manager = the_manager()
         repository = app.state.pipeline.document_repo()
-        lock = repository.get_embedding_lock() if repository is not None else None
+        snapshot = inspect_embedding_lock(manager, repository)
+        lock = snapshot["locked"]
         return {
             "ok": True,
             "chat_ready": ready,
@@ -974,15 +1023,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 "keyword_fallback": not bool(base_url),
                 "embedding_hint": embedding_config_hint(manager),
             },
-            "embedding_lock": (
-                None
-                if lock is None
-                else {
-                    "model": lock.model,
-                    "dimension": lock.dimension,
-                    "updated_at": lock.updated_at,
-                }
-            ),
+            "embedding_lock": lock,
+            "embedding_current": snapshot["current"],
+            "embedding_projection": snapshot["projection"],
+            "qdrant_dimension": snapshot["qdrant_dimension"],
+            "embedding_mismatch": snapshot["mismatch"],
         }
 
     # ------------------------------------------------------------------

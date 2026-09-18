@@ -618,6 +618,19 @@
     .job-badge.done { color: #34d399; border-color: rgba(52, 211, 153, 0.5); }
     .job-badge.failed { color: #f87171; border-color: rgba(248, 113, 113, 0.5); }
     .ingest-jobs .job-time { flex-shrink: 0; font-size: 10px; color: rgba(148, 163, 184, 0.7); }
+    .ingest-jobs .job-retry {
+      flex-shrink: 0;
+      font-size: 11px;
+      padding: 1px 8px;
+      border-radius: 9999px;
+      border: 1px solid rgba(192, 132, 252, 0.5);
+      background: rgba(192, 132, 252, 0.12);
+      color: #e9d5ff;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .ingest-jobs .job-retry:hover { background: rgba(192, 132, 252, 0.25); }
+    .ingest-jobs .job-retry:disabled { opacity: 0.4; cursor: not-allowed; }
     .ingest-jobs .job-empty { font-size: 12px; color: rgba(148, 163, 184, 0.6); text-align: center; padding: 6px 0; }
     @keyframes jobPulse { 50% { opacity: 0.55; } }
 
@@ -2370,12 +2383,28 @@
   function renderJobRow(job) {
     const cls = ["pending", "running", "done", "failed"].includes(job.status) ? job.status : "pending";
     const time = (job.updated_at || "").replace("T", " ").slice(5, 16);
-    const title = job.error ? ` title="${String(job.error).replace(/"/g, "&quot;")}"` : "";
+    const title = job.error ? ` title="${escapeHtml(job.error)}"` : "";
+    const retry = (job.status === "failed" || job.retryable)
+      ? `<button type="button" class="job-retry" data-retry-job="${escapeHtml(job.job_id)}">重试</button>`
+      : "";
     return `<div class="job-row"${title}>`
-      + `<span class="job-badge ${cls}">${job.label || job.status}</span>`
+      + `<span class="job-badge ${cls}">${escapeHtml(job.label || job.status)}</span>`
       + `<span class="job-text">${escapeHtml(job.text || "")}</span>`
+      + retry
       + `<span class="job-time">${time}</span>`
       + `</div>`;
+  }
+  async function retryIngestJob(jobId) {
+    try {
+      const res = await withEmbeddingGuard((confirm) =>
+        apiPostJson(withConfirmRebuild("/api/knowledge/jobs/" + encodeURIComponent(jobId) + "/retry", confirm), {}, 15000)
+      );
+      if (!res) return;
+      toast("已重新加入入库队列", "ok");
+      await refreshIngestJobs();
+    } catch (err) {
+      toast("重试失败：" + err.message, "err");
+    }
   }
   async function refreshIngestJobs() {
     try {
@@ -2390,6 +2419,17 @@
     } catch (_) { /* 队列不可用（如内存库）时静默 */ }
   }
   setInterval(() => { if (!document.hidden) refreshIngestJobs(); }, 3000);
+  const ingestJobsBox = $("ingest-jobs");
+  if (ingestJobsBox) {
+    ingestJobsBox.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-retry-job]");
+      if (!btn || btn.disabled) return;
+      btn.disabled = true;
+      retryIngestJob(btn.getAttribute("data-retry-job")).finally(() => {
+        btn.disabled = false;
+      });
+    });
+  }
 
   // 入库记录卡片：点击标题栏收起/展开，状态记忆在本地。
   (function initIngestJobsCollapse() {
@@ -2799,8 +2839,8 @@
     const unreachable = embedded === "unreachable";
     const drift = (reconcile && reconcile.drift) || [];
     const badge = $("btn-storage");
-    badge.classList.toggle("warn", unreachable || drift.length > 0);
-    badge.textContent = unreachable || drift.length ? "存储健康 ⚠" : "存储健康";
+    badge.classList.toggle("warn", unreachable || drift.length > 0 || !!h.embedding_mismatch);
+    badge.textContent = unreachable || drift.length || h.embedding_mismatch ? "存储健康 ⚠" : "存储健康";
 
     if ($("storage-panel").hidden) return;   // 关闭时不重绘内容
     $("storage-modes").innerHTML = [
@@ -2810,8 +2850,11 @@
       row("嵌入出网", { gateway: "网关（隧道）", api: "云端 API", hash: "本地哈希（无远端）", unreachable: "不可达 · 已降级" }[embedded] || escapeHtml(embedded),
         unreachable ? "err" : embedded === "hash" ? "warn" : "ok"),
       row("聊天模型", degraded.chat_ready ? "已配置（DeepSeek）" : "未配置", degraded.chat_ready ? "ok" : ""),
-      row("嵌入锁定", formatEmbeddingLock(h.embedding_lock)),
-    ].join("") + (unreachable
+      row("嵌入锁定", formatEmbeddingLock(h.embedding_projection || h.embedding_lock), h.embedding_mismatch ? "err" : ""),
+      row("Qdrant 维度", h.qdrant_dimension == null ? "—" : String(h.qdrant_dimension), h.embedding_mismatch ? "err" : ""),
+    ].join("") + (h.embedding_mismatch
+      ? `<div class="warn">当前嵌入与向量库维度不一致。继续入库会失败；请确认重建向量库并全量重灌。</div>`
+      : "") + (unreachable
       ? `<div class="warn">当前为<b>关键词检索模式</b>（FTS5 + 图谱）；向量检索与入库不可用，恢复隧道后自动回到向量检索。</div>${
         degraded.embedding_hint ? `<code>${escapeHtml(degraded.embedding_hint)}</code>` : ""}`
       : "");
@@ -2866,6 +2909,30 @@
     await refreshReconcile();
   });
 
+  async function offerEmbeddingRebuild(health) {
+    if (!health || !health.embedding_mismatch || window.__embeddingRebuildAsked) return;
+    window.__embeddingRebuildAsked = true;
+    const err = {
+      status: 409,
+      detail: {
+        code: "embedding_lock_mismatch",
+        message: health.embedding_mismatch ? "嵌入锁定不一致" : "",
+        locked: health.embedding_projection || health.embedding_lock,
+        current: health.embedding_current,
+      },
+    };
+    if (!(await confirmEmbeddingRebuild(err))) return;
+    toast("正在重建向量库并全量重灌…");
+    try {
+      await apiPostJson(withConfirmRebuild("/api/embedding/rebuild", true), {}, 300000);
+      toast("向量库已按当前嵌入重建", "ok");
+      window.__embeddingRebuildAsked = false;
+      await checkHealth();
+    } catch (e) {
+      toast("重建失败：" + e.message, "err");
+    }
+  }
+
   async function checkHealth() {
     try {
       const h = await apiGet("/api/health", 8000);
@@ -2880,6 +2947,7 @@
         ? "🌐 联网 · 记忆+搜索"
         : "🌐 联网 · 记忆+搜索（未配置搜索，将按非联网回答）";
       renderStoragePanel(h, null);
+      await offerEmbeddingRebuild(h);
     } catch (_) {
       backendUp = false;
       chatReady = false;

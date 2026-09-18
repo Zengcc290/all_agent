@@ -205,3 +205,10 @@ def test_embedding_lock_confirm_dialog_is_wired() -> None:
     assert "function withEmbeddingGuard" in html
     assert "formatEmbeddingLock" in html
     assert "h.embedding_lock" in html
+    assert "function offerEmbeddingRebuild" in html
+    assert "/api/embedding/rebuild" in html
+    assert "embedding_mismatch" in html
+    assert "data-retry-job" in html
+    assert "function retryIngestJob" in html
+    assert "/api/knowledge/jobs/" in html
+    assert "job-retry" in html

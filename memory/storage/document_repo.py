@@ -606,6 +606,27 @@ class DocumentRepository:
             )
         return cursor.rowcount
 
+    def reset_failed_ingest_job(self, job_id: str) -> IngestJobRecord | None:
+        """User retry: only ``failed`` jobs go back to ``pending`` with a clean slate."""
+
+        now = utc_now().isoformat()
+        with self._connection_scope() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ingest_jobs SET
+                  status = 'pending',
+                  error = '',
+                  result = '',
+                  attempts = 0,
+                  updated_at = ?
+                WHERE job_id = ? AND status = 'failed'
+                """,
+                (now, job_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_ingest_job(job_id)
+
     # -- helpers -------------------------------------------------------
     @staticmethod
     def _check_choice(field_name: str, value: Any, allowed: tuple[str, ...]) -> None:

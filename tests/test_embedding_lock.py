@@ -105,3 +105,26 @@ def test_rebuild_helper_updates_lock(tmp_path):
     finally:
         repo.close()
         manager.close()
+
+
+def test_live_qdrant_size_overrides_stale_sqlite_lock(tmp_path):
+    """SQLite 锁被误写成新维度时，仍须按 Qdrant 现有集合抬错。"""
+
+    client = FakeQdrantClient(exists=True, existing_size=1024)
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=HashEmbedding(dimension=4096),
+        vector_store=QdrantVectorStore(client=client, namespace="tests"),
+    )
+    repo = DocumentRepository(manager.document_store.path)
+    try:
+        repo.set_embedding_lock("HashEmbedding", 4096)
+        with pytest.raises(EmbeddingLockMismatch) as excinfo:
+            apply_embedding_lock(manager, repo)
+        detail = excinfo.value.to_detail()
+        assert detail["locked"]["dimension"] == 1024
+        assert detail["current"]["dimension"] == 4096
+        assert repo.get_embedding_lock().dimension == 4096  # 未确认前不改 SQLite 锁
+    finally:
+        repo.close()
+        manager.close()

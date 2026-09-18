@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from memory import HashEmbedding, InMemoryVectorStore, MemoryConfig, MemoryManager  # noqa: E402
 from memory.rag import EntityCandidate, ExtractionResult, RelationCandidate  # noqa: E402
 from memory.storage import ChunkRecord, DocumentRecord, DocumentRepository  # noqa: E402
+from memory.storage.qdrant import QdrantVectorStore  # noqa: E402
+from tests.test_qdrant_hybrid import FakeQdrantClient  # noqa: E402
 from web import create_app, support  # noqa: E402
 
 
@@ -753,6 +755,40 @@ def test_health_reports_store_modes_and_degraded(file_client) -> None:
         "embedding_hint": health["degraded"]["embedding_hint"],  # 配置指引（非空）
     }
     assert "[embedding]" in health["degraded"]["embedding_hint"]
+
+
+def test_health_and_ingest_409_when_qdrant_dimension_differs(tmp_path: Path) -> None:
+    """SQLite 锁即使已是新维度，Qdrant 集合仍是旧维度时也必须 409。"""
+
+    qdrant = FakeQdrantClient(exists=True, existing_size=1024)
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=HashEmbedding(dimension=4096),
+        vector_store=QdrantVectorStore(client=qdrant, namespace="tests"),
+    )
+    try:
+        app = create_app(manager=manager)
+        with TestClient(app) as client:
+            health = client.get("/api/health").json()
+            assert health["embedding_mismatch"] is True
+            assert health["qdrant_dimension"] == 1024
+            assert health["embedding_current"]["dimension"] == 4096
+            blocked = client.post(
+                "/api/ingest",
+                files=_make_ingest_payload("mismatch.txt", "集合还是 1024 维时不能静默写入。" * 8),
+            )
+            assert blocked.status_code == 409, blocked.text
+            detail = blocked.json()["detail"]
+            assert detail["code"] == "embedding_lock_mismatch"
+            assert detail["locked"]["dimension"] == 1024
+            refused = client.post("/api/embedding/rebuild")
+            assert refused.status_code == 409
+            rebuilt = client.post("/api/embedding/rebuild", params={"confirm_rebuild": True})
+            assert rebuilt.status_code == 200, rebuilt.text
+            assert qdrant.existing_size == 4096
+            assert client.get("/api/health").json()["embedding_mismatch"] is False
+    finally:
+        manager.close()
 
 
 def test_ingest_returns_409_when_embedding_lock_mismatches(file_client) -> None:

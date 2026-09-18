@@ -54,6 +54,7 @@ def job_to_dict(job: IngestJobRecord, *, text_preview: int = 120) -> dict[str, A
         "result": result,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+        "retryable": job.status == "failed",
     }
 
 
@@ -106,6 +107,22 @@ class IngestJobQueue:
 
     def job(self, job_id: str) -> IngestJobRecord | None:
         return None if self._repo is None else self._repo.get_ingest_job(job_id)
+
+    def retry(self, job_id: str) -> IngestJobRecord:
+        """Re-queue a failed job; user retry resets ``attempts`` so the cap does not stick."""
+
+        if self._repo is None:
+            raise RuntimeError("ingest queue unavailable (no persistent sqlite store)")
+        job = self._repo.get_ingest_job(job_id)
+        if job is None:
+            raise LookupError(job_id)
+        if job.status != "failed":
+            raise ValueError(f"只有失败任务可重试，当前状态是 {job.status}")
+        reset = self._repo.reset_failed_ingest_job(job_id)
+        if reset is None:
+            raise LookupError(job_id)
+        self._enqueue(job_id)
+        return reset
 
     def list(self, *, status: str | None = None, limit: int = 50) -> list[IngestJobRecord]:
         return [] if self._repo is None else self._repo.list_ingest_jobs(status=status, limit=limit)

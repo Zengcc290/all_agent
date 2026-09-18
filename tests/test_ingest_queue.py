@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from conftest import HashEmbedding
 from fastapi.testclient import TestClient
 
@@ -13,7 +14,7 @@ from memory import MemoryConfig, MemoryManager, MemoryType
 from memory.rag import NullKnowledgeExtractor
 from memory.storage.document_repo import DocumentRepository
 from web import create_app
-from web.ingest_queue import MAX_ATTEMPTS, IngestJobQueue
+from web.ingest_queue import MAX_ATTEMPTS, IngestJobQueue, job_to_dict
 
 
 def make_manager(tmp_path: Path) -> MemoryManager:
@@ -129,6 +130,75 @@ def test_knowledge_endpoint_async_flow_and_history(tmp_path, monkeypatch):
         assert sync.status_code == 200
         assert sync.json()["chunks"] >= 1
         assert isinstance(sync.json()["extraction"], dict)
+    manager.close()
+
+
+def test_user_retry_resets_failed_job_and_succeeds(tmp_path):
+    manager = make_manager(tmp_path)
+    repo = DocumentRepository(manager.document_store.path)
+    failed = repo.create_ingest_job("失败后可点重试。")
+    repo.set_ingest_job_status(failed.job_id, "running")
+    repo.set_ingest_job_status(failed.job_id, "failed", error="ValueError: boom")
+    done = repo.create_ingest_job("已经成功的任务。")
+    repo.set_ingest_job_status(done.job_id, "done", result="{}")
+
+    queue = IngestJobQueue(manager, NullKnowledgeExtractor())
+    queue.start()
+    try:
+        with pytest.raises(LookupError):
+            queue.retry("job_missing")
+        with pytest.raises(ValueError, match="只有失败任务可重试"):
+            queue.retry(done.job_id)
+
+        reset = queue.retry(failed.job_id)
+        assert reset.status == "pending"
+        assert reset.attempts == 0
+        assert reset.error == ""
+        assert job_to_dict(reset)["retryable"] is False
+
+        finished = queue.wait(failed.job_id, timeout=10)
+        assert finished is not None and finished.status == "done"
+        assert job_to_dict(finished)["retryable"] is False
+    finally:
+        queue.shutdown()
+        manager.close()
+
+
+def test_retry_endpoint_requeues_failed_job(tmp_path):
+    manager = make_manager(tmp_path)
+    app = create_app(manager)
+    with TestClient(app) as client:
+        repo = DocumentRepository(manager.document_store.path)
+        job = repo.create_ingest_job("点按钮重试这条。")
+        repo.set_ingest_job_status(job.job_id, "failed", error="boom")
+        listed = {item["job_id"]: item for item in client.get("/api/knowledge/jobs").json()["items"]}
+        assert listed[job.job_id]["retryable"] is True
+        assert listed[job.job_id]["label"] == "入库失败"
+
+        missing = client.post("/api/knowledge/jobs/job_missing/retry")
+        assert missing.status_code == 404
+
+        done = repo.create_ingest_job("成功过的不能重试。")
+        repo.set_ingest_job_status(done.job_id, "done", result="{}")
+        refused = client.post(f"/api/knowledge/jobs/{done.job_id}/retry")
+        assert refused.status_code == 400
+
+        retried = client.post(f"/api/knowledge/jobs/{job.job_id}/retry")
+        assert retried.status_code == 200, retried.text
+        payload = retried.json()
+        assert payload["ok"] is True
+        assert payload["async"] is True
+        assert payload["status"] == "pending"
+        assert payload["retryable"] is False
+
+        def done_again() -> bool:
+            items = {item["job_id"]: item for item in client.get("/api/knowledge/jobs").json()["items"]}
+            return items[job.job_id]["status"] == "done"
+
+        wait_for(done_again)
+        history = {item["job_id"]: item for item in client.get("/api/knowledge/jobs").json()["items"]}
+        assert history[job.job_id]["label"] == "入库成功"
+        assert history[job.job_id]["retryable"] is False
     manager.close()
 
 

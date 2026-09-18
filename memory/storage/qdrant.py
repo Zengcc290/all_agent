@@ -121,6 +121,17 @@ class QdrantVectorStore(BaseVectorStore):
         except Exception:  # noqa: BLE001 - 读不到尺寸时由写入路径再核对
             return None
 
+    def collection_dimension(self) -> int | None:
+        """Live Qdrant collection size, or None if the collection is missing."""
+
+        try:
+            exists = self.client.collection_exists(collection_name=self.collection_name)
+        except Exception:  # noqa: BLE001 - 探测失败时不当成已有投影
+            return None
+        if not exists:
+            return None
+        return self._live_collection_size()
+
     def _raise_dimension_mismatch(self, existing: int | None, actual: int, cause: BaseException | None = None) -> None:
         message = _dimension_mismatch_message(self.collection_name, int(existing or 0), actual)
         if cause is None:
