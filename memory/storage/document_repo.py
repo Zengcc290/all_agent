@@ -18,11 +18,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..base import utc_now
 
 #: ``documents.status`` state machine (方案 2.1).
 DOCUMENT_STATUSES = ("uploaded", "parsed", "vectorized", "extracted", "failed")
+#: ``ingest_jobs.status`` 状态机（一句话后台入库队列，重启续跑）。
+INGEST_JOB_STATUSES = ("pending", "running", "done", "failed")
 #: ``chunks.vector_status`` state machine.
 CHUNK_VECTOR_STATUSES = ("pending", "indexed", "failed")
 #: ``documents.permission`` - 决定是否允许离开本机（D9）。
@@ -58,6 +61,26 @@ class ChunkRecord:
     char_end: int
     text: str
     vector_status: str = "pending"
+
+
+@dataclass
+class IngestJobRecord:
+    """One background one-sentence ingestion job, durable across restarts.
+
+    ``status`` 在 SQLite 里随时可查（排队中/正在入库/成功/失败）；``result``
+    存完成后的 JSON 摘要（块数 + 抽取报告），历史记录页直接展示。
+    """
+
+    job_id: str
+    text: str
+    event_at: str = ""
+    kind: str = "sentence"
+    status: str = "pending"
+    attempts: int = 0
+    error: str = ""
+    result: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class DocumentRepository:
@@ -154,6 +177,24 @@ class DocumentRepository:
                 )
                 """
             )
+            # 一句话后台入库队列：提交即返回，worker 落库推进状态，重启续跑。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ingest_jobs (
+                    job_id     TEXT PRIMARY KEY,
+                    kind       TEXT NOT NULL DEFAULT 'sentence',
+                    text       TEXT NOT NULL,
+                    event_at   TEXT NOT NULL DEFAULT '',
+                    status     TEXT NOT NULL DEFAULT 'pending',
+                    attempts   INTEGER NOT NULL DEFAULT 0,
+                    error      TEXT NOT NULL DEFAULT '',
+                    result     TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_status ON ingest_jobs(status)")
             self._initialize_fts(connection)
 
     def _initialize_fts(self, connection: sqlite3.Connection) -> None:
@@ -417,6 +458,95 @@ class DocumentRepository:
                 self._connection.close()
                 self._connection = None
 
+    # -- 一句话后台入库队列 ---------------------------------------------
+    def create_ingest_job(self, text: str, *, kind: str = "sentence", event_at: str = "") -> IngestJobRecord:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("ingest job text must be a non-empty string")
+        now = utc_now().isoformat()
+        record = IngestJobRecord(
+            job_id=f"job_{uuid4().hex}",
+            text=text,
+            event_at=event_at,
+            kind=kind,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._connection_scope() as connection:
+            connection.execute(
+                """
+                INSERT INTO ingest_jobs
+                (job_id, kind, text, event_at, status, attempts, error, result, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'pending', 0, '', '', ?, ?)
+                """,
+                (record.job_id, record.kind, record.text, record.event_at, now, now),
+            )
+        return record
+
+    def get_ingest_job(self, job_id: str) -> IngestJobRecord | None:
+        with self._connection_scope() as connection:
+            row = connection.execute(
+                "SELECT * FROM ingest_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _ingest_job_from_row(row) if row is not None else None
+
+    def set_ingest_job_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        error: str = "",
+        result: str = "",
+    ) -> bool:
+        """Advance a job; moving to ``running`` also counts one attempt."""
+
+        self._check_choice("status", status, INGEST_JOB_STATUSES)
+        now = utc_now().isoformat()
+        with self._connection_scope() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ingest_jobs SET
+                  status = :status,
+                  error = CASE WHEN :error != '' THEN :error ELSE error END,
+                  result = CASE WHEN :result != '' THEN :result ELSE result END,
+                  attempts = attempts + :attempt,
+                  updated_at = :now
+                WHERE job_id = :job_id
+                """,
+                {
+                    "status": status,
+                    "error": error,
+                    "result": result,
+                    "attempt": 1 if status == "running" else 0,
+                    "now": now,
+                    "job_id": job_id,
+                },
+            )
+        return cursor.rowcount > 0
+
+    def list_ingest_jobs(self, *, status: str | None = None, limit: int = 50) -> list[IngestJobRecord]:
+        if status is not None:
+            self._check_choice("status", status, INGEST_JOB_STATUSES)
+        query = "SELECT * FROM ingest_jobs"
+        params: list[Any] = []
+        if status is not None:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 200)))
+        with self._connection_scope() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_ingest_job_from_row(row) for row in rows]
+
+    def restart_stale_ingest_jobs(self) -> int:
+        """Reset ``running`` jobs to ``pending``（进程上次异常退出）。"""
+
+        with self._connection_scope() as connection:
+            cursor = connection.execute(
+                "UPDATE ingest_jobs SET status = 'pending', updated_at = ? WHERE status = 'running'",
+                (utc_now().isoformat(),),
+            )
+        return cursor.rowcount
+
     # -- helpers -------------------------------------------------------
     @staticmethod
     def _check_choice(field_name: str, value: Any, allowed: tuple[str, ...]) -> None:
@@ -636,17 +766,34 @@ def execute_deletion(proposal_id: str, token: str, manager: Any) -> dict[str, An
     return {"deleted": deleted, "already_confirmed": False, "proposal_id": proposal_id}
 
 
+def _ingest_job_from_row(row: sqlite3.Row) -> IngestJobRecord:
+    return IngestJobRecord(
+        job_id=row["job_id"],
+        text=row["text"],
+        event_at=row["event_at"],
+        kind=row["kind"],
+        status=row["status"],
+        attempts=row["attempts"],
+        error=row["error"],
+        result=row["result"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
 __all__ = [
     "CHUNK_VECTOR_STATUSES",
     "DELETION_PROPOSAL_STATUSES",
     "DELETION_PROPOSAL_TTL_MINUTES",
     "DOCUMENT_STATUSES",
     "FTS_TOKENIZERS",
+    "INGEST_JOB_STATUSES",
     "PERMISSIONS",
     "ChunkRecord",
     "DeletionProposal",
     "DeletionProposalStore",
     "DocumentRecord",
     "DocumentRepository",
+    "IngestJobRecord",
     "execute_deletion",
 ]

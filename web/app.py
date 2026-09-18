@@ -8,6 +8,7 @@
 - POST /api/facts    手工添加三元组知识
 - POST /api/knowledge 一句话入库：原文向量化 + LLM 自动抽取实体/关系 → 图结构
 - POST /api/knowledge/image 图片/相机 → VL embedding + 视觉模型抽取实体、时间和多元关系
+- GET  /api/knowledge/jobs 一句话入库历史（后台队列状态：排队中/正在入库/成功/失败）
 - POST /api/seed     （重新）播种 Aetheria 种子数据（幂等）
 - GET  /api/export   导出全部记忆为 JSON 文件（课设「库→文件」要求）
 - POST /api/import   导入此前导出的 JSON（课设「文件→库」要求）
@@ -62,6 +63,7 @@ from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
 
 from .graph_builder import build_graph
+from .ingest_queue import IngestJobQueue, job_to_dict
 from .seed import seed
 from .support import (
     STATIC_DIR,
@@ -138,6 +140,8 @@ class GraphRAGBody(BaseModel):
 class KnowledgeBody(BaseModel):
     text: str = Field(min_length=1, max_length=WEB_KNOWLEDGE_MAX_CHARS)
     event_at: str | None = Field(default=None, max_length=80)
+    #: True（默认，兼容旧行为/测试）同步等待结果；False 提交后台队列立即返回。
+    wait: bool = True
 
 
 async def _save_upload(
@@ -190,6 +194,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             app.state.manager,
             extractor=build_knowledge_extractor(),
         )
+        # 一句话后台入库队列：提交即返回，状态持久化在 ingest_jobs 表，
+        # 异常退出后由 start() 复位续跑。:memory: 测试库下 available=False。
+        # on_progress：任务终态时刷星云图缓存，前端 since 轮询自动看到新图。
+        app.state.ingest_queue = IngestJobQueue(
+            app.state.manager,
+            app.state.pipeline.extractor,
+            on_progress=lambda _job_id: invalidate_graph(),
+        )
+        app.state.ingest_queue.start()
         # 知识管家是进程级单例，且其对话历史是一份共享的可变状态：并发问答会
         # 互相覆盖历史。这里串行化聊天请求（单人本地应用，排队是可接受的代价）。
         # 在 lifespan 内创建以保证锁绑定到当前事件循环。
@@ -198,6 +211,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             # 首次启动自动播种，让星云图一打开就有内容。
             seed(app.state.manager)
         yield
+        app.state.ingest_queue.shutdown()
         if owns_manager:
             close_manager()
 
@@ -411,12 +425,41 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------
     # 一句话添加知识（原文向量化 + LLM 自动抽取实体/关系 → 图结构）
+    # wait=false：写一条 ingest_jobs 记录立即返回，后台 worker 并发入库，
+    # 状态（排队中/正在入库/成功/失败）持久化在 SQLite，可查历史、重启续跑。
     # ------------------------------------------------------------------
     @app.post("/api/knowledge")
     def add_knowledge(body: KnowledgeBody) -> dict[str, Any]:
         text = body.text.strip()
         if not text:
             raise HTTPException(status_code=422, detail="一句话内容不能为空")
+        queue = getattr(app.state, "ingest_queue", None)
+
+        if queue is not None and queue.available:
+            job = queue.submit(text, event_at=body.event_at or "")
+            if not body.wait:
+                return {
+                    "ok": True,
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "label": "排队中",
+                    "async": True,
+                }
+            finished = queue.wait(job.job_id)
+            if finished is None or finished.status != "done":
+                error = finished.error if finished is not None else "等待入库超时"
+                raise HTTPException(status_code=500, detail=f"入库失败：{error}")
+            result = json.loads(finished.result) if finished.result else {}
+            report = result.get("report") if isinstance(result.get("report"), dict) else {}
+            return {
+                "ok": True,
+                "job_id": finished.job_id,
+                "chunks": result.get("chunks", 0),
+                "items": [],
+                "extraction": report,
+            }
+
+        # 回退：无持久化 SQLite（如 :memory: 测试库）时保持原同步行为。
         pipeline = app.state.pipeline
         from memory.rag import Document
 
@@ -445,6 +488,22 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "chunks": len(items),
             "items": [item.to_dict() for item in items],
             "extraction": report,
+        }
+
+    @app.get("/api/knowledge/jobs")
+    def list_knowledge_jobs(status: str | None = None, limit: int = 20) -> dict[str, Any]:
+        """入库历史记录：每条一句话任务的持久化状态，前端轮询展示。"""
+
+        queue = getattr(app.state, "ingest_queue", None)
+        if queue is None or not queue.available:
+            return {"items": [], "available": False, "workers": 0}
+        if status is not None and status not in ("pending", "running", "done", "failed"):
+            raise HTTPException(status_code=422, detail="status 取值必须是 pending/running/done/failed")
+        jobs = queue.list(status=status, limit=limit)
+        return {
+            "items": [job_to_dict(job) for job in jobs],
+            "available": True,
+            "workers": getattr(queue, "_workers", 0),
         }
 
     @app.post("/api/knowledge/image")
