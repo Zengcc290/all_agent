@@ -2,7 +2,28 @@
 
 from __future__ import annotations
 
-from core.proxy_tunnel import ProxyBroker, _should_proxy_host
+from core.proxy_tunnel import ConnectTunnel, ProxyBroker, _should_proxy_host
+
+
+class _ResponseSocket:
+    def __init__(self) -> None:
+        self.timeouts: list[float | None] = []
+        self.chunks = [b"HTTP/1.1 200 Connection Established\r\n\r\n"]
+
+    def settimeout(self, value: float | None) -> None:
+        self.timeouts.append(value)
+
+    def recv(self, size: int) -> bytes:
+        return self.chunks.pop(0)
+
+
+def test_connect_response_timeout_is_removed_after_handshake() -> None:
+    sock = _ResponseSocket()
+
+    response = ConnectTunnel._read_connect_response(sock)  # type: ignore[arg-type]
+
+    assert response.startswith(b"HTTP/1.1 200")
+    assert sock.timeouts == [10.0, None]
 
 
 def test_should_proxy_only_aura_hosts() -> None:

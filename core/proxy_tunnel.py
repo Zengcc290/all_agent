@@ -155,14 +155,20 @@ class ConnectTunnel:
 
     @staticmethod
     def _read_connect_response(sock: socket.socket) -> bytes:
+        # 只给 CONNECT 响应设置读取超时；隧道建立后必须恢复阻塞模式。
+        # 否则空闲超过 10 秒时，_pipe 会把 socket.timeout 当成断链并关闭
+        # Neo4j 的长期连接，驱动随后报 ``defunct connection / No data``。
         sock.settimeout(10.0)
-        data = b""
-        while b"\r\n\r\n" not in data and len(data) < 16384:
-            chunk = sock.recv(_READ_CHUNK)
-            if not chunk:
-                break
-            data += chunk
-        return data
+        try:
+            data = b""
+            while b"\r\n\r\n" not in data and len(data) < 16384:
+                chunk = sock.recv(_READ_CHUNK)
+                if not chunk:
+                    break
+                data += chunk
+            return data
+        finally:
+            sock.settimeout(None)
 
 
 class ProxyBroker:
