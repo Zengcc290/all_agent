@@ -154,11 +154,8 @@ def build_knowledge_extractor():
             base_url=profile.base_url,
             model=profile.default_model,
         )
-        vision_model = (
-            os.getenv("KNOWLEDGE_VISION_MODEL")
-            or os.getenv("VISION_MODEL")
-            or ""
-        ).strip()
+        # 模型选择统一在 config/services.toml 的 [vision] 段（.env 不再承载模型名）。
+        vision_model = load_services_config().vision.model or ""
         return LLMKnowledgeExtractor(
             client.complete,
             model=profile.default_model,

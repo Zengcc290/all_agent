@@ -67,13 +67,21 @@ def build_default_pipeline() -> RAGPipeline:
     try:
         from agents.llm import LLM
         from agents.providers import ProviderRegistry
+        from core.services_config import load_services_config
 
         registry = ProviderRegistry()
         profile = registry.get(registry.active_profile)
         key = registry.resolve_api_key(profile.name)
         if key and not key.startswith("replace-with"):
             client = LLM(api_key=key, base_url=profile.base_url, model=profile.default_model)
-            extractor = LLMKnowledgeExtractor(client.complete, model=profile.default_model)
+            # 与 web.support.build_knowledge_extractor 同口径：视觉模型名来自
+            # config/services.toml 的 [vision] 段。
+            vision_model = load_services_config().vision.model or ""
+            extractor = LLMKnowledgeExtractor(
+                client.complete,
+                model=profile.default_model,
+                vision_model=vision_model or profile.default_model,
+            )
     except Exception:
         LOGGER.warning(
             "RAG 知识抽取器不可用，降级为 NullKnowledgeExtractor（仅做向量检索）",

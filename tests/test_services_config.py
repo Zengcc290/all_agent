@@ -24,6 +24,9 @@ dimension = 768
 batch_size = 8
 timeout = 15.0
 
+[vision]
+model = "Qwen/Qwen2.5-VL-72B-Instruct"
+
 [search]
 base_url = "https://search.example.test/v1"
 api_key = "plaintext-search-key"
@@ -56,6 +59,8 @@ def test_loads_all_sections_with_secret_resolution(tmp_path, monkeypatch):
     assert services.embedding.dimension == 768
     assert services.embedding.batch_size == 8
     assert services.embedding.timeout == 15.0
+
+    assert services.vision.model == "Qwen/Qwen2.5-VL-72B-Instruct"
 
     assert services.search.base_url == "https://search.example.test/v1"
     assert services.search.api_key == "plaintext-search-key"
@@ -108,6 +113,9 @@ def test_blank_values_are_treated_as_unset(tmp_path):
 [embedding]
 provider = ""
 
+[vision]
+model = ""
+
 [search]
 base_url = ""
 
@@ -124,6 +132,7 @@ username = ""
     services = load_services_config(config)
 
     assert services.embedding.provider is None
+    assert services.vision.model is None
     assert services.search.base_url is None
     assert services.qdrant.url is None
     assert services.neo4j.uri is None
@@ -452,3 +461,76 @@ url = "http://127.0.0.1:7890"
         assert captured["neo4j"]["proxy_url"] == "http://127.0.0.1:7890"
     finally:
         manager.close()
+
+
+# ---------------------------------------------------------------------------
+# 消费方接线：识图抽取模型统一从 services.toml [vision] 读取（.env 不再承载模型名）
+# ---------------------------------------------------------------------------
+
+PROVIDER_TOML = """\
+[defaults]
+active_profile = "local"
+
+[profiles.local]
+adapter = "openai_compatible"
+api_url = "http://127.0.0.1:8000/v1"
+api_key = "test-key"
+default_model = "text-model"
+models = ["text-model"]
+tool_mode = "native_strict"
+"""
+
+
+def _point_provider_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agents.providers import ProviderRegistry
+
+    provider = tmp_path / "provider.toml"
+    provider.write_text(PROVIDER_TOML, encoding="utf-8")
+    monkeypatch.setattr(
+        ProviderRegistry, "default_config_path", staticmethod(lambda: provider)
+    )
+
+
+def test_vision_model_comes_from_services_toml(tmp_path, monkeypatch):
+    from web.support import build_knowledge_extractor
+
+    _point_provider_at(tmp_path, monkeypatch)
+    services = tmp_path / "services.toml"
+    write_and_point(
+        services, '[vision]\nmodel = "Qwen/Qwen2.5-VL-72B-Instruct"\n', monkeypatch
+    )
+
+    extractor = build_knowledge_extractor()
+
+    assert extractor.vision_model == "Qwen/Qwen2.5-VL-72B-Instruct"
+    assert extractor.model == "text-model"
+
+
+def test_vision_model_falls_back_to_provider_default_without_section(tmp_path, monkeypatch):
+    from web.support import build_knowledge_extractor
+
+    _point_provider_at(tmp_path, monkeypatch)
+    services = tmp_path / "services.toml"
+    write_and_point(services, "[search]\ntimeout = 1.0\n", monkeypatch)
+
+    extractor = build_knowledge_extractor()
+
+    assert extractor.vision_model == "text-model"
+
+
+def test_memory_tool_pipeline_uses_services_toml_vision_model(tmp_path, monkeypatch):
+    import tool._memory as memory_tool_module
+
+    _point_provider_at(tmp_path, monkeypatch)
+    services = tmp_path / "services.toml"
+    write_and_point(
+        services, '[vision]\nmodel = "Qwen/Qwen2.5-VL-72B-Instruct"\n', monkeypatch
+    )
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
+    clean_memory_env(monkeypatch)
+    monkeypatch.setenv("HELLOAGENTS_MEMORY_SQLITE_PATH", str(tmp_path / "memory.sqlite3"))
+
+    pipeline = memory_tool_module.build_default_pipeline()
+
+    assert pipeline.extractor.vision_model == "Qwen/Qwen2.5-VL-72B-Instruct"
+    pipeline.close()

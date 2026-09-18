@@ -3,7 +3,8 @@
 ``config/services.toml`` (gitignored; the publishable template is
 ``config/services.example.toml``) is the single place that describes the
 endpoints, models and credential references for the external services the
-project calls: embedding, web search, Qdrant Cloud and Neo4j Aura.
+project calls: embedding, vision extraction, web search, Qdrant Cloud and
+Neo4j Aura.
 
 Secrets follow the ``provider.toml`` convention: a section either carries the
 plaintext value (the file is gitignored) or names an environment variable via
@@ -40,6 +41,18 @@ class EmbeddingService:
     dimension: int | None = None
     batch_size: int | None = None
     timeout: float | None = None
+
+
+@dataclass(frozen=True)
+class VisionService:
+    """Vision-language model for image → entity/relation extraction.
+
+    Only the model name lives here. The endpoint and credentials come from the
+    active ``config/provider.toml`` profile (OpenAI-compatible chat API), so a
+    vision-capable model on the same provider is all this section selects.
+    """
+
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,7 @@ class ServicesConfig:
     """Parsed view of ``config/services.toml``; missing sections are all-None."""
 
     embedding: EmbeddingService = EmbeddingService()
+    vision: VisionService = VisionService()
     search: SearchService = SearchService()
     qdrant: QdrantService = QdrantService()
     neo4j: Neo4jService = Neo4jService()
@@ -91,7 +105,7 @@ class ServicesConfig:
 
         return any(
             value is not None
-            for section in (self.embedding, self.search, self.qdrant, self.neo4j, self.proxy)
+            for section in (self.embedding, self.vision, self.search, self.qdrant, self.neo4j, self.proxy)
             for value in section.__dict__.values()
         )
 
@@ -127,6 +141,7 @@ def load_services_config(path: str | Path | None = None) -> ServicesConfig:
         raise TypeError(f"services configuration must be a TOML table: {config_path}")
     return ServicesConfig(
         embedding=_parse_embedding(_table(document, "embedding")),
+        vision=_parse_vision(_table(document, "vision")),
         search=_parse_search(_table(document, "search")),
         qdrant=_parse_qdrant(_table(document, "qdrant")),
         neo4j=_parse_neo4j(_table(document, "neo4j")),
@@ -164,6 +179,10 @@ def _parse_embedding(table: dict[str, Any]) -> EmbeddingService:
         batch_size=batch_size,
         timeout=timeout,
     )
+
+
+def _parse_vision(table: dict[str, Any]) -> VisionService:
+    return VisionService(model=_optional_string(table, "model"))
 
 
 def _parse_search(table: dict[str, Any]) -> SearchService:
@@ -266,6 +285,7 @@ __all__ = [
     "QdrantService",
     "SearchService",
     "ServicesConfig",
+    "VisionService",
     "default_config_path",
     "load_services_config",
 ]

@@ -6,7 +6,8 @@
 #   api_key_env = "环境变量名" # 推荐：密钥放 .env，这里只写指向（同 provider.toml）
 #
 # 优先级：显式构造参数 > 环境变量 > 本文件。.env 里已有的值照旧生效，
-# 本文件只在"调用方和环境变量都没设置"时才补上。
+# 本文件只在"调用方和环境变量都没设置"时才补上。模型选择（嵌入模型、识图
+# 抽取模型）统一在本文件配置，.env 只放密钥与部署参数。
 #
 # LLM 聊天模型不在这里——它是 provider.toml 的专属职责（config/provider.toml）。
 # 嵌入 SSH 隧道参数（EMBEDDING_TUNNEL_KEY/HINT 等部署信息）也不在这里，仍在 .env。
@@ -22,6 +23,13 @@
 # dimension = 1024                    # 留空 = 首次响应自动识别
 # batch_size = 10
 # timeout = 30.0
+
+[vision]
+# 识图抽取模型：图片 → 实体/多元关系/时间 的视觉语言模型（VLM）。
+# 端点与密钥沿用 config/provider.toml 的活动 profile（OpenAI-compatible 聊天
+# 接口），这里只选模型名；留空 = 使用该 profile 的 default_model（需它本身支持图片）。
+# 与 [embedding] 的分工：Qwen3-VL-Embedding-* 只生成检索向量，不做关系抽取。
+# model = "Qwen/Qwen2.5-VL-72B-Instruct"
 
 [search]
 # 联网搜索（AnySearch / OpenAI 兼容网关）。
