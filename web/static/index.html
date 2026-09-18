@@ -1091,6 +1091,9 @@
     <select class="btn" id="filter-domain" aria-label="按领域筛选" title="只看某个领域">
       <option value="">全部领域</option>
     </select>
+    <input class="btn" id="graph-as-of" type="datetime-local" aria-label="查看历史时间点" title="按时间点查看 Neo4j 关系">
+    <button class="btn" id="graph-as-of-apply">时间点</button>
+    <button class="btn" id="graph-as-of-clear">当前</button>
   </div>
 
   <div id="stats-bar">
@@ -1223,6 +1226,15 @@
           <textarea id="knowledge-text" placeholder="粘贴一句话，AI 自动识别实体与关系并入库，例如：向量数据库把非结构化文本编码成稠密向量，用于语义检索。"></textarea>
         </div>
         <button id="knowledge-submit" class="form-submit alt">✦ AI 一句话入库</button>
+        <div class="form-divider">— 或拍照 / 上传图片识图 —</div>
+        <div class="form-row">
+          <input id="image-note" type="text" placeholder="图片说明（可选，如：电脑 13:00 在书桌上跑项目）">
+        </div>
+        <div class="form-row">
+          <input id="image-event-at" type="datetime-local" aria-label="图片观察时间">
+        </div>
+        <button id="image-submit" class="form-submit alt">📷 选择图片并识图入库</button>
+        <input id="image-input" type="file" hidden accept="image/*" capture="environment">
       </div>
     </div>
   </div>
@@ -1311,7 +1323,7 @@
   // =====================================================================
   // 1. 数据层：/api/graph → 星系树（恒星=领域 行星=实体 卫星=事实/知识块）
   // =====================================================================
-  const graph = { nodes: [], edges: [], byId: new Map(), stars: [], revision: 0, visible: new Set() };
+  const graph = { nodes: [], edges: [], byId: new Map(), stars: [], revision: 0, visible: new Set(), asOf: "" };
   const UNCLASSIFIED = "未分类";
   const GRAPH_POLL_MS = 20000;   // U6：轻量轮询；无变化时后端只回 revision
 
@@ -1361,9 +1373,15 @@
     // U6 增量刷新：带上本地 revision，后端无变化时只回 revision，这里直接沿用现有
     // 节点与布局（省掉全量重建 + buildStarSystem 重排）。revision=0 也是有效值，
     // 所以用 track 标志而不是「since 非 0」来判断是否走增量。
-    const track = !!(options && options.since);
+    const asOf = options && Object.prototype.hasOwnProperty.call(options, "at")
+      ? (options.at || "") : graph.asOf;
+    graph.asOf = asOf;
+    const track = !asOf && !!(options && options.since);
     const since = graph.revision || 0;
-    const data = await apiGet(track ? `/api/graph?since=${since}` : "/api/graph", 30000);
+    const query = asOf
+      ? `/api/graph?at=${encodeURIComponent(new Date(asOf).toISOString())}`
+      : (track ? `/api/graph?since=${since}` : "/api/graph");
+    const data = await apiGet(query, 30000);
     graph.revision = data.revision || 0;
     if (data.unchanged) return false;
     const focusId = currentFocusNode ? currentFocusNode.id : null;   // 数据刷新后旧引用会失去物理更新
@@ -2086,6 +2104,19 @@
     toast(domainFilter ? `只看领域「${domainFilter}」` : "已显示全部领域");
   }
   filterSelect.addEventListener("change", () => applyDomainFilter(filterSelect.value));
+  $("graph-as-of-apply").addEventListener("click", async () => {
+    const value = $("graph-as-of").value;
+    if (!value) { toast("请选择历史时间点", "err"); return; }
+    try {
+      await loadGraph({ at: value });
+      toast(`已切换到 ${new Date(value).toLocaleString()} 的 Neo4j 关系图`, "ok");
+    } catch (err) { toast("时间点查询失败：" + err.message, "err"); }
+  });
+  $("graph-as-of-clear").addEventListener("click", async () => {
+    $("graph-as-of").value = "";
+    try { await loadGraph({ at: "" }); toast("已恢复当前关系图", "ok"); }
+    catch (err) { toast("恢复当前图失败：" + err.message, "err"); }
+  });
 
   // =====================================================================
   // 8. 搜索
@@ -2189,6 +2220,37 @@
     }
   }
   $("knowledge-submit").addEventListener("click", submitKnowledgeSentence);
+
+  async function submitImageKnowledge() {
+    const input = $("image-input");
+    input.click();
+  }
+  $("image-submit").addEventListener("click", submitImageKnowledge);
+  $("image-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const btn = $("image-submit");
+    btn.disabled = true; btn.textContent = "识图入库中…";
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("text", $("image-note").value.trim());
+      const localTime = $("image-event-at").value;
+      form.append("captured_at", localTime ? new Date(localTime).toISOString() : new Date().toISOString());
+      const res = await apiPostForm("/api/knowledge/image", form, 120000);
+      const extraction = res.extraction || {};
+      const extracted = `${extraction.entities || 0} 个实体 / ${extraction.relations || 0} 条观察`;
+      toast(`图片已入库，识别 ${extracted} ✦${res.warning ? " " + res.warning : ""}`, "ok");
+      $("image-note").value = "";
+      $("image-event-at").value = "";
+      await loadGraph();
+    } catch (err) {
+      toast("识图失败：" + err.message, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = "📷 选择图片并识图入库";
+    }
+  });
 
   // 顶栏「＋ 添加知识」：打开抽屉并聚焦表单
   $("btn-add-knowledge").addEventListener("click", () => {

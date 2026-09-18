@@ -51,6 +51,17 @@ class RetrievedChunk:
         return cls(result.item.content, result.score, result.item.id, result.item.metadata)
 
 
+def _accepts_parameter(extractor: KnowledgeExtractor, name: str) -> bool:
+    try:
+        parameters = inspect.signature(extractor.extract).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 def _accepts_graph_context(extractor: KnowledgeExtractor) -> bool:
     """True when the extractor can consume the pre-extraction subgraph.
 
@@ -58,14 +69,7 @@ def _accepts_graph_context(extractor: KnowledgeExtractor) -> bool:
     working; only implementations that opt in receive ``graph_context``.
     """
 
-    try:
-        parameters = inspect.signature(extractor.extract).parameters
-    except (TypeError, ValueError):
-        return False
-    return "graph_context" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
+    return _accepts_parameter(extractor, "graph_context")
 
 
 def _document_tags(metadata: Mapping[str, Any]) -> list[str]:
@@ -253,6 +257,86 @@ class RAGPipeline:
         self.last_ingest_report = report
         return items
 
+    def ingest_media(
+        self,
+        image: bytes,
+        *,
+        text: str = "",
+        mime_type: str = "image/jpeg",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> MemoryItem:
+        """Index one image and materialize vision-extracted n-ary observations.
+
+        The image bytes are the canonical perceptual payload and are embedded by
+        a VL-capable embedding backend. Knowledge graph edges come only from the
+        structured vision extractor, never from vector similarity.
+        """
+
+        if not isinstance(image, bytes) or not image:
+            raise ValueError("image must be non-empty bytes")
+        if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+            raise ValueError("mime_type must be an image media type")
+        details = dict(metadata or {})
+        details.setdefault("source", details.get("filename") or "图片入库")
+        details["modality"] = "image"
+        content = text.strip() if isinstance(text, str) else ""
+        if not content:
+            content = str(details.get("filename") or "图片观察")
+        item = self.manager.add(
+            content,
+            memory_type=MemoryType.PERCEPTUAL,
+            metadata=details,
+            payload=image,
+            modality="image",
+            timestamp=details.get("captured_at") or None,
+        )
+        report = {
+            "chunks": 1,
+            "domains": [],
+            "entities": 0,
+            "relations": 0,
+            "superseded": 0,
+            "retracted": 0,
+            "skipped_relations": 0,
+            "errors": [],
+            "modality": "image",
+            "multimodal_embedding": bool(
+                getattr(self.manager.embedding, "multimodal", False)
+            ),
+        }
+        if self.auto_extract:
+            try:
+                resolver = EntityResolver(self.manager)
+                graph_context = build_graph_context(
+                    self.manager, content, resolver=resolver
+                )
+                kwargs: dict[str, Any] = {"metadata": details}
+                if _accepts_parameter(self.extractor, "graph_context"):
+                    kwargs["graph_context"] = graph_context
+                if _accepts_parameter(self.extractor, "image"):
+                    kwargs.update({"image": image, "mime_type": mime_type})
+                extraction = self.extractor.extract(content, **kwargs)
+                materialized = materialize_extraction(
+                    self.manager,
+                    extraction,
+                    source_item=item,
+                    source_metadata=details,
+                    resolver=resolver,
+                )
+                for key in (
+                    "entities",
+                    "relations",
+                    "superseded",
+                    "retracted",
+                    "skipped_relations",
+                ):
+                    report[key] = materialized[key]
+                report["domains"] = [materialized["domain"]]
+            except Exception as exc:  # noqa: BLE001 - keep indexed source on extraction failure
+                report["errors"].append(f"{type(exc).__name__}: {exc}")
+        self.last_ingest_report = report
+        return item
+
     def ingest_source(
         self,
         source: str | Path,
@@ -397,8 +481,15 @@ class RAGPipeline:
             raise TypeError("separator must be a string")
         return separator.join(chunk.content for chunk in self.retrieve(query, limit=limit))
 
-    def graph_retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS) -> GraphRAGResult:
-        return self.graph.retrieve(query, limit=limit, hops=hops)
+    def graph_retrieve(
+        self,
+        query: str,
+        *,
+        limit: int = RAG_RETRIEVE_LIMIT,
+        hops: int = RAG_GRAPH_HOPS,
+        at: str | None = None,
+    ) -> GraphRAGResult:
+        return self.graph.retrieve(query, limit=limit, hops=hops, at=at)
 
     def graph_retrieve_multi(self, queries: list[str], *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS) -> GraphRAGResult:
         """F3：多路图检索（分解后的子查询分别查，路径融合）。"""

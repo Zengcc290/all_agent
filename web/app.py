@@ -7,6 +7,7 @@
 - POST /api/ingest   上传文档 → RAG 切块入库（星云长出新星星）
 - POST /api/facts    手工添加三元组知识
 - POST /api/knowledge 一句话入库：原文向量化 + LLM 自动抽取实体/关系 → 图结构
+- POST /api/knowledge/image 图片/相机 → VL embedding + 视觉模型抽取实体、时间和多元关系
 - POST /api/seed     （重新）播种 Aetheria 种子数据（幂等）
 - GET  /api/export   导出全部记忆为 JSON 文件（课设「库→文件」要求）
 - POST /api/import   导入此前导出的 JSON（课设「文件→库」要求）
@@ -27,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -131,10 +132,12 @@ class GraphRAGBody(BaseModel):
     query: str = Field(min_length=1, max_length=WEB_GRAPH_RAG_QUERY_MAX)
     limit: int = Field(default=RAG_RETRIEVE_LIMIT, ge=1, le=WEB_GRAPH_RAG_LIMIT_MAX)
     hops: int = Field(default=RAG_GRAPH_HOPS, ge=0, le=RAG_GRAPH_MAX_HOPS)
+    at: str | None = Field(default=None, max_length=80)
 
 
 class KnowledgeBody(BaseModel):
     text: str = Field(min_length=1, max_length=WEB_KNOWLEDGE_MAX_CHARS)
+    event_at: str | None = Field(default=None, max_length=80)
 
 
 async def _save_upload(
@@ -224,21 +227,30 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # 星云图数据
     # ------------------------------------------------------------------
     @app.get("/api/graph")
-    def graph(since: int = -1) -> dict[str, Any]:
-        """全图；``?since=<revision>`` 时若期间无写入则只回 revision（U6 增量刷新）。
+    def graph(since: int = -1, at: str | None = None) -> dict[str, Any]:
+        """Read the real graph; ``at`` selects a historical ISO-8601 instant.
 
-        ``since`` 默认 -1 表示「不带增量语义」——不能用 0 当哨兵，因为进程刚启动时
-        revision 就是 0，客户端带着 0 来问会被误判成「没带参数」而永远拿全量。
+        A remote Neo4j snapshot bypasses the process-local revision cache,
+        because another process can update Aura without bumping this worker's
+        counter. The in-memory fallback retains the lightweight ``since`` cache.
         """
 
         revision = graph_revision()
-        if graph_cache["payload"] is None or graph_cache["external"] != revision:
-            graph_cache["payload"] = build_graph(the_manager())
-            graph_cache["external"] = revision
-        payload = graph_cache["payload"]
-        if since >= 0 and since == revision:
-            # 自 since 起没有任何图可见的写入：不回传节点/边，前端沿用本地图，
-            # 省掉一次全量 build_graph 与整棵星系树的重排布局。
+        live_neo4j = getattr(the_manager().graph_store, "driver", None) is not None
+        try:
+            if at or live_neo4j:
+                payload = build_graph(the_manager(), at=at)
+            else:
+                if (
+                    graph_cache["payload"] is None
+                    or graph_cache["external"] != revision
+                ):
+                    graph_cache["payload"] = build_graph(the_manager())
+                    graph_cache["external"] = revision
+                payload = graph_cache["payload"]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"时间参数无效：{exc}") from exc
+        if not at and not live_neo4j and since >= 0 and since == revision:
             return {
                 "revision": revision,
                 "unchanged": True,
@@ -254,6 +266,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             body.query,
             limit=body.limit,
             hops=body.hops,
+            at=body.at,
         )
         return result.to_dict() | {"context": result.build_context()}
 
@@ -414,6 +427,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                     "source": "一句话入库",
                     "filename": "一句话入库",
                     "note": text[:400],
+                    "event_at": body.event_at or "",
+                    "reference_time": datetime.now(UTC).isoformat(),
                 },
             ),
             chunk_size=RAG_CHUNK_SIZE,
@@ -430,6 +445,58 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "chunks": len(items),
             "items": [item.to_dict() for item in items],
             "extraction": report,
+        }
+
+    @app.post("/api/knowledge/image")
+    async def add_image_knowledge(
+        file: UploadFile,
+        text: str = Form(default=""),
+        captured_at: str = Form(default=""),
+    ) -> dict[str, Any]:
+        """Index a camera/image observation and extract its n-ary graph facts."""
+
+        filename = file.filename or "camera.jpg"
+        mime_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+        if not mime_type.startswith("image/"):
+            raise HTTPException(status_code=415, detail="只接受图片文件")
+        if len(text) > WEB_KNOWLEDGE_MAX_CHARS:
+            raise HTTPException(status_code=422, detail="图片说明过长")
+        embedding_hint = embedding_unavailable_detail(the_manager())
+        if embedding_hint:
+            raise HTTPException(status_code=503, detail=embedding_hint)
+        tmp_path = await _save_upload(file, prefix="nebula-image-")
+        try:
+            image = tmp_path.read_bytes()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        metadata = {
+            "source": filename,
+            "filename": filename,
+            "captured_at": captured_at.strip(),
+            "reference_time": datetime.now(UTC).isoformat(),
+            "modality": "image",
+        }
+        try:
+            item = app.state.pipeline.ingest_media(
+                image,
+                text=text,
+                mime_type=mime_type,
+                metadata=metadata,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"图片入库参数无效：{exc}") from exc
+        invalidate_graph()
+        report = dict(app.state.pipeline.last_ingest_report)
+        return {
+            "ok": True,
+            "item_id": item.id,
+            "modality": "image",
+            "extraction": report,
+            "warning": (
+                "当前 embedding 不是 VL 模型，图片已留存且已识图，但向量只使用文字说明。"
+                if not report.get("multimodal_embedding")
+                else ""
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -824,6 +891,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "embedding_mode": embedding_mode,
             "embedding_reachable": embedding_reachable,
             "embedding": getattr(embedding, "to_dict", dict)(),
+            "vision_model": getattr(getattr(app.state, "pipeline", None), "extractor", None)
+            and getattr(app.state.pipeline.extractor, "vision_model", None),
             "search_available": search_available(),
             # 三个存储各自的实现（D1：全部在本机），UI 用它区分「本地真值 / 本地投影」。
             "store_modes": {

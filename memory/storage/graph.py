@@ -32,6 +32,9 @@ class Neo4jGraphStore:
         self._reverse: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         #: 内存回退下的实体属性（Neo4j 侧由 ON CREATE/ON MATCH 维护同样的三项）。
         self._entities: dict[str, dict[str, Any]] = {}
+        #: Reified n-ary facts. Each observation owns any number of participants
+        #: and therefore does not collapse same-triple events at different times.
+        self._observations: dict[str, dict[str, Any]] = {}
         if self.driver is None and uri:
             try:
                 from neo4j import GraphDatabase
@@ -142,6 +145,88 @@ class Neo4jGraphStore:
                 target_importance=target_importance,
             ).consume()
 
+    def add_observation(
+        self,
+        observation_id: str,
+        predicate: str,
+        participants: list[Mapping[str, Any]],
+        *,
+        properties: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist one idempotent n-ary fact as an observation node.
+
+        Participants use ``{name, role, ordinal, domain, aliases, importance,
+        entity_type}``.  A separate observation identity preserves repeated
+        triples at different times and lets one fact carry arbitrary roles.
+        """
+
+        if not isinstance(observation_id, str) or not observation_id.strip():
+            raise ValueError("observation_id must be a non-empty string")
+        if not isinstance(predicate, str) or not predicate.strip():
+            raise ValueError("predicate must be a non-empty string")
+        normalized: list[dict[str, Any]] = []
+        for ordinal, participant in enumerate(participants):
+            name = str(participant.get("name") or "").strip()
+            role = str(participant.get("role") or "").strip()
+            if not name or not role:
+                raise ValueError("observation participants require name and role")
+            normalized.append(
+                {
+                    "name": name,
+                    "role": role,
+                    "ordinal": int(participant.get("ordinal", ordinal)),
+                    "domain": str(participant.get("domain") or ""),
+                    "aliases": [str(value) for value in participant.get("aliases") or []],
+                    "importance": float(participant.get("importance", 0.5)),
+                    "entity_type": str(participant.get("entity_type") or "概念"),
+                }
+            )
+        if len(normalized) < 2 or not any(p["role"] == "subject" for p in normalized):
+            raise ValueError("an observation requires a subject and at least one other participant")
+        props = dict(properties or {})
+        props.update({"predicate": predicate, "observation_id": observation_id})
+        if self.driver is None:
+            self._observations[observation_id] = {
+                "id": observation_id,
+                "predicate": predicate,
+                "properties": props,
+                "participants": normalized,
+            }
+            for participant in normalized:
+                self._merge_entity(
+                    participant["name"],
+                    participant["domain"],
+                    participant["aliases"],
+                    participant["importance"],
+                )
+                self._entities[participant["name"]]["entity_type"] = participant[
+                    "entity_type"
+                ]
+            return
+        query = (
+            "MERGE (o:MemoryObservation {id: $observation_id}) "
+            "SET o += $properties, o.predicate = $predicate, o.name = $observation_id "
+            "WITH o OPTIONAL MATCH (o)-[old:HAS_PARTICIPANT]->() DELETE old "
+            "WITH DISTINCT o UNWIND $participants AS participant "
+            "MERGE (e:MemoryEntity {name: participant.name}) "
+            "ON CREATE SET e.domain = participant.domain, e.aliases = participant.aliases, "
+            "e.importance = participant.importance, e.entity_type = participant.entity_type "
+            "ON MATCH SET e.aliases = CASE WHEN size(participant.aliases) = 0 "
+            "THEN e.aliases ELSE participant.aliases END, "
+            "e.entity_type = coalesce(e.entity_type, participant.entity_type) "
+            "MERGE (o)-[r:HAS_PARTICIPANT {role: participant.role, ordinal: participant.ordinal}]->(e) "
+            "SET r.entity_type = participant.entity_type, r.kind = participant.role, "
+            "r.weight = coalesce(r.weight, 1.0)"
+        )
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                query,
+                observation_id=observation_id,
+                predicate=predicate,
+                properties=props,
+                participants=normalized,
+            ).consume()
+
     def _merge_entity(
         self, name: str, domain: str, aliases: list[str] | None, importance: float
     ) -> None:
@@ -245,6 +330,168 @@ class Neo4jGraphStore:
                 for record in session.run(query)
             }
 
+    def graph_snapshot(self, *, at: str | None = None) -> dict[str, Any]:
+        """Return the actual graph projection used by the Web visualization.
+
+        ``at`` selects the latest temporal observation per subject/predicate at
+        or before that instant.  Without it, all observations are returned so
+        the UI can render the complete timeline.
+        """
+
+        if at:
+            from ..base import ensure_datetime
+
+            if ensure_datetime(at) is None:
+                raise ValueError("at must be an ISO-8601 datetime")
+        if self.driver is None:
+            entities = [
+                {"name": name, "properties": dict(properties)}
+                for name, properties in self._entities.items()
+            ]
+            observations = [
+                {
+                    "id": value["id"],
+                    "predicate": value["predicate"],
+                    "properties": dict(value["properties"]),
+                    "participants": [dict(item) for item in value["participants"]],
+                }
+                for value in self._observations.values()
+            ]
+            relations = [
+                {
+                    "source": edge["source"],
+                    "relation": edge["relation"],
+                    "target": edge["target"],
+                    "properties": dict(edge["properties"]),
+                }
+                for edges in self._local.values()
+                for edge in edges
+            ]
+        else:
+            entity_query = (
+                "MATCH (e:MemoryEntity) "
+                "RETURN e.name AS name, properties(e) AS properties"
+            )
+            observation_query = (
+                "MATCH (o:MemoryObservation) "
+                "OPTIONAL MATCH (o)-[r:HAS_PARTICIPANT]->(e:MemoryEntity) "
+                "RETURN o.id AS id, o.predicate AS predicate, properties(o) AS properties, "
+                "collect({name: e.name, role: r.role, ordinal: r.ordinal, "
+                "entity_type: r.entity_type, domain: e.domain, aliases: e.aliases, "
+                "importance: e.importance}) AS participants"
+            )
+            relation_query = (
+                "MATCH (a:MemoryEntity)-[r:RELATED]->(b:MemoryEntity) "
+                "RETURN a.name AS source, r.kind AS relation, b.name AS target, "
+                "properties(r) AS properties"
+            )
+            with self.driver.session(database=self.database) as session:
+                entities = [
+                    {
+                        "name": str(record["name"]),
+                        "properties": dict(record["properties"] or {}),
+                    }
+                    for record in session.run(entity_query)
+                ]
+                observations = [
+                    {
+                        "id": str(record["id"]),
+                        "predicate": str(record["predicate"] or "关联"),
+                        "properties": dict(record["properties"] or {}),
+                        "participants": [
+                            dict(item)
+                            for item in (record["participants"] or [])
+                            if item and item.get("name")
+                        ],
+                    }
+                    for record in session.run(observation_query)
+                ]
+                relations = [dict(record) for record in session.run(relation_query)]
+        return {
+            "mode": "neo4j" if self.driver is not None else "inmemory",
+            "entities": entities,
+            "observations": self._observations_at(observations, at),
+            "relations": self._relations_at(relations, at),
+        }
+
+    @staticmethod
+    def _temporal_bounds(
+        properties: Mapping[str, Any], at: str
+    ) -> tuple[bool, Any, Any]:
+        from ..base import ensure_datetime
+
+        moment = ensure_datetime(at)
+        if moment is None:
+            raise ValueError("at must be an ISO-8601 datetime")
+        try:
+            valid_from = ensure_datetime(str(properties.get("valid_from") or ""))
+        except ValueError:
+            valid_from = None
+        try:
+            valid_to = ensure_datetime(str(properties.get("valid_to") or ""))
+        except ValueError:
+            valid_to = None
+        in_window = (valid_from is None or valid_from <= moment) and (
+            valid_to is None or moment <= valid_to
+        )
+        try:
+            event_at = ensure_datetime(str(properties.get("event_at") or ""))
+        except ValueError:
+            event_at = None
+        return in_window and (event_at is None or event_at <= moment), event_at, moment
+
+    @classmethod
+    def _observations_at(
+        cls, observations: list[dict[str, Any]], at: str | None
+    ) -> list[dict[str, Any]]:
+        if not at:
+            return observations
+        timeless: list[dict[str, Any]] = []
+        latest: dict[tuple[str, str], tuple[Any, dict[str, Any]]] = {}
+        for observation in observations:
+            properties = observation.get("properties") or {}
+            visible, event_at, _ = cls._temporal_bounds(properties, at)
+            if not visible or str(properties.get("status") or "fact") == "expired":
+                continue
+            if properties.get("cardinality") != "temporal" or event_at is None:
+                timeless.append(observation)
+                continue
+            subject = next(
+                (
+                    str(item.get("name") or "")
+                    for item in observation.get("participants") or []
+                    if item.get("role") == "subject"
+                ),
+                "",
+            )
+            key = (subject, str(observation.get("predicate") or ""))
+            current = latest.get(key)
+            if current is None or event_at > current[0]:
+                latest[key] = (event_at, observation)
+        return [*timeless, *(value[1] for value in latest.values())]
+
+    @classmethod
+    def _relations_at(
+        cls, relations: list[dict[str, Any]], at: str | None
+    ) -> list[dict[str, Any]]:
+        if not at:
+            return relations
+        visible: list[dict[str, Any]] = []
+        latest: dict[tuple[str, str], tuple[Any, dict[str, Any]]] = {}
+        for relation in relations:
+            properties = relation.get("properties") or {}
+            matches, event_at, _ = cls._temporal_bounds(properties, at)
+            if not matches or str(properties.get("status") or "fact") == "expired":
+                continue
+            if properties.get("cardinality") == "temporal" and event_at is not None:
+                key = (str(relation.get("source") or ""), str(relation.get("relation") or ""))
+                current = latest.get(key)
+                if current is None or event_at > current[0]:
+                    latest[key] = (event_at, relation)
+            else:
+                visible.append(relation)
+        return [*visible, *(value[1] for value in latest.values())]
+
     def relation_memory_ids(self) -> list[str]:
         """``memory_id`` of every edge (reconcile compares this against facts)."""
 
@@ -259,7 +506,12 @@ class Neo4jGraphStore:
             return [str(record["memory_id"]) for record in session.run(query)]
 
     def get_relations(
-        self, entity: str, *, relation: str | None = None, direction: str = "both"
+        self,
+        entity: str,
+        *,
+        relation: str | None = None,
+        direction: str = "both",
+        at: str | None = None,
     ) -> list[dict[str, Any]]:
         if direction not in {"in", "out", "both"}:
             raise ValueError("direction must be in, out, or both")
@@ -281,7 +533,7 @@ class Neo4jGraphStore:
                 ]
             if relation is not None:
                 values = [edge for edge in values if edge["relation"] == relation]
-            return values
+            return self._relations_at(values, at)
         if direction == "out":
             match, condition = "(a)-[r:RELATED]->(b)", "a.name = $entity"
         elif direction == "in":
@@ -296,10 +548,11 @@ class Neo4jGraphStore:
             clauses.append("r.kind = $relation")
         query = f"MATCH {match} WHERE {' AND '.join(clauses)} RETURN a.name AS source, r.kind AS relation, b.name AS target, properties(r) AS properties"
         with self.driver.session(database=self.database) as session:
-            return [
+            values = [
                 dict(record)
                 for record in session.run(query, entity=entity, relation=relation)
             ]
+        return self._relations_at(values, at)
 
     related = get_relations
 
@@ -392,7 +645,7 @@ class Neo4jGraphStore:
         if not isinstance(memory_id, str) or not memory_id:
             raise ValueError("memory_id must be a non-empty string")
         if self.driver is None:
-            removed = False
+            removed = self._observations.pop(memory_id, None) is not None
             for source, edges in list(self._local.items()):
                 kept = [
                     edge
@@ -415,10 +668,19 @@ class Neo4jGraphStore:
                 else:
                     self._local.pop(source, None)
             return removed
-        query = "MATCH ()-[r:RELATED {memory_id: $memory_id}]->() DELETE r"
+        query = (
+            "MATCH ()-[r:RELATED {memory_id: $memory_id}]->() DELETE r "
+            "WITH count(r) AS removed "
+            "OPTIONAL MATCH (o:MemoryObservation {id: $memory_id}) DETACH DELETE o "
+            "RETURN removed"
+        )
         with self.driver.session(database=self.database) as session:
-            result = session.run(query, memory_id=memory_id).consume()
-            return bool(getattr(result.counters, "relationships_deleted", 0))
+            result = session.run(query, memory_id=memory_id)
+            record = result.single()
+            summary = result.consume()
+            return bool(record and record["removed"]) or bool(
+                getattr(summary.counters, "nodes_deleted", 0)
+            )
 
     def close(self) -> None:
         if self.driver is not None and callable(getattr(self.driver, "close", None)):

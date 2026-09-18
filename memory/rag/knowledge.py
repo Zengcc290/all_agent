@@ -8,6 +8,7 @@ extractor when no provider is configured.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -32,6 +33,7 @@ from ..ids import (
     _clean_text,
     entity_id_for,
     normalize_entity_name,
+    observation_id_for,
     predicate_key_for,
     relation_id_for,
 )
@@ -99,6 +101,21 @@ class EntityCandidate(BaseModel):
         return _clean_text(value, max_length=1000)
 
 
+class RelationRole(BaseModel):
+    """One additional participant in an n-ary observation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    role: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1, max_length=200)
+    entity_type: str = Field(default=ENTITY_DEFAULT_TYPE, max_length=80)
+
+    @field_validator("role", "value", "entity_type", mode="before")
+    @classmethod
+    def normalize_strings(cls, value: Any) -> str:
+        return _clean_text(value, max_length=200)
+
+
 class RelationCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -107,8 +124,10 @@ class RelationCandidate(BaseModel):
     object: str = Field(min_length=1, max_length=200)
     #: 补丁动作：assert 断言、supersede 更新（旧值退场）、retract 撤回。
     action: Literal["assert", "supersede", "retract"] = "assert"
-    #: single 表示该 (subject, predicate) 只能有一个当前值；multi 可并列累积。
-    cardinality: Literal["single", "multi"] = "multi"
+    #: temporal 表示同一槽位按时间追加观察，不覆盖历史。
+    cardinality: Literal["single", "multi", "temporal"] = "multi"
+    #: 除主语/宾语外的任意参与者，例如地点、活动、设备、人员。
+    roles: list[RelationRole] = Field(default_factory=list, max_length=20)
     #: F4 时间/状态分类：关系成立/失效时间点与时间段，空值视为无界。
     valid_from: str = Field(default="", max_length=60)
     valid_to: str = Field(default="", max_length=60)
@@ -155,13 +174,29 @@ class ExtractionResult(BaseModel):
 
 
 class KnowledgeExtractor(Protocol):
-    def extract(self, text: str, *, metadata: Mapping[str, Any] | None = None) -> ExtractionResult: ...
+    def extract(
+        self,
+        text: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        graph_context: str = "",
+        image: Any = None,
+        mime_type: str = "image/jpeg",
+    ) -> ExtractionResult: ...
 
 
 class NullKnowledgeExtractor:
     """Safe fallback used when no chat model is configured."""
 
-    def extract(self, text: str, *, metadata: Mapping[str, Any] | None = None) -> ExtractionResult:
+    def extract(
+        self,
+        text: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        graph_context: str = "",
+        image: Any = None,
+        mime_type: str = "image/jpeg",
+    ) -> ExtractionResult:
         return ExtractionResult()
 
 
@@ -170,7 +205,7 @@ class LLMKnowledgeExtractor:
 
     SYSTEM_PROMPT = (
         "你是知识图谱抽取器。只输出一个合法 JSON 对象，不要 Markdown、解释或额外文字。\n"
-        "任务：把文本转换成对既有知识图的补丁（patch），而不是孤立的事实快照。\n"
+        "任务：把文本或图片转换成对既有知识图的补丁（patch），而不是孤立的事实快照。\n"
         "\n"
         "【实体】\n"
         "1. 若文本提到「已知实体」里的对象，name 必须原样使用该已知规范名，不要新造变体。\n"
@@ -186,19 +221,29 @@ class LLMKnowledgeExtractor:
         "【取值基数 cardinality】\n"
         "1. single：同一 (subject, predicate) 只能有一个当前值，出现新值即旧值失效。"
         "典型：余额、当前版本、状态、价格、负责人、所在地。\n"
-        "2. multi：可并列累积，多条同时成立。典型：支持、属于、部署于、位于、别名、包含。\n"
-        "3. 凡是 single，或文本表达「更新/改成/不再是/现在没有了」，action 用 supersede。\n"
-        "4. 判断不确定时用 cardinality=multi、action=assert；不确定的新值不要猜测。\n"
+        "2. multi：可并列累积，多条同时成立。典型：支持、属于、部署于、别名、包含。\n"
+        "3. temporal：有 event_at 的位置、状态、活动等按时间追加，不覆盖其他时刻。\n"
+        "4. 凡是 single，或文本明确表达『更新/改成/不再是/现在没有了』，action 用 supersede。\n"
+        "5. 带明确观察时间且没有纠错语义时，使用 cardinality=temporal、action=assert。\n"
+        "6. 判断不确定时用 cardinality=multi、action=assert；不确定的新值不要猜测。\n"
+        "\n"
+        "【多元关系与时间】\n"
+        "1. 一个事实除 subject/predicate/object 外还有地点、活动、工具、人员等参与者时，放进 roles。\n"
+        "2. roles 格式为 {role,value,entity_type}；不要把时间重复放进 roles，时间写 event_at。\n"
+        "3. 例如『电脑 13:00 在书桌上跑项目』可输出 subject=电脑,predicate=运行,object=项目,"
+        "roles=[{role:地点,value:书桌,entity_type:地点}],event_at=完整 ISO-8601 时间。\n"
+        "4. 相对时间以输入里的 reference_time 为基准；图片拍摄时间优先使用 captured_at。\n"
         "\n"
         "【约束】\n"
         "1. subject/predicate/object 必须都能在文本或已知图中找到依据；无法确认的关系不要输出。\n"
-        "2. 不要输出「历史值」的关系，历史值由程序按 supersede 自动退场。\n"
+        "2. 对 single 的更新不要重复输出旧值；temporal 观察则按各自 event_at 原样保留。\n"
         "3. 每条关系必须给出 evidence，且 evidence 必须是原文片段。\n"
         "4. 单次最多 50 个实体、80 条关系；宁少勿滥。\n"
         "\n"
         "字段格式：domain:string, topics:string[], "
         "entities:[{name,entity_type,description,confidence,aliases}], "
-        "relations:[{subject,predicate,object,action,cardinality,confidence,evidence}], "
+        "relations:[{subject,predicate,object,action,cardinality,roles:[{role,value,entity_type}],"
+        "valid_from,valid_to,status,event_at,confidence,evidence}], "
         "keywords:string[]。"
     )
 
@@ -207,12 +252,14 @@ class LLMKnowledgeExtractor:
         complete: Callable[..., Any],
         *,
         model: str | None = None,
+        vision_model: str | None = None,
         timeout: float = 60.0,
     ) -> None:
         if not callable(complete):
             raise TypeError("complete must be callable")
         self.complete = complete
         self.model = model
+        self.vision_model = vision_model
         self.timeout = timeout
 
     def extract(
@@ -221,29 +268,60 @@ class LLMKnowledgeExtractor:
         *,
         metadata: Mapping[str, Any] | None = None,
         graph_context: str = "",
+        image: Any = None,
+        mime_type: str = "image/jpeg",
     ) -> ExtractionResult:
-        if not isinstance(text, str) or not text.strip():
+        if (not isinstance(text, str) or not text.strip()) and image is None:
             return ExtractionResult()
-        source = _clean_text((metadata or {}).get("filename") or (metadata or {}).get("source"), max_length=300)
-        payload: dict[str, Any] = {"source": source, "text": text[:12000]}
+        metadata = dict(metadata or {})
+        source = _clean_text(
+            metadata.get("filename") or metadata.get("source"), max_length=300
+        )
+        payload: dict[str, Any] = {
+            "source": source,
+            "text": text[:12000] if isinstance(text, str) else "",
+            "reference_time": metadata.get("reference_time") or utc_now().isoformat(),
+        }
+        for key in ("captured_at", "event_at", "modality"):
+            if metadata.get(key):
+                payload[key] = metadata[key]
         if graph_context.strip():
             payload["已知图"] = graph_context
+        prompt = json.dumps(payload, ensure_ascii=False)
+        if image is None:
+            user_content: Any = prompt
+            selected_model = self.model
+        else:
+            user_content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self._image_data_url(image, mime_type)},
+                },
+            ]
+            selected_model = self.vision_model or self.model
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False),
-            },
+            {"role": "user", "content": user_content},
         ]
         response = self.complete(
             messages,
-            model=self.model,
+            model=selected_model,
             temperature=0.0,
             timeout=self.timeout,
             stream=False,
         )
         raw = self._content(response)
         return ExtractionResult.model_validate(self._parse_json(raw))
+
+    @staticmethod
+    def _image_data_url(image: Any, mime_type: str) -> str:
+        if isinstance(image, (bytes, bytearray, memoryview)):
+            encoded = base64.b64encode(bytes(image)).decode("ascii")
+            return f"data:{mime_type};base64,{encoded}"
+        if isinstance(image, str) and image.strip():
+            return image.strip()
+        raise TypeError("image must be bytes or a non-empty URL/data URI")
 
     @staticmethod
     def _content(response: Any) -> str:
@@ -649,7 +727,35 @@ def materialize_extraction(
             continue
         subject = resolve_endpoint(candidate.subject)
         object_name = resolve_endpoint(candidate.object)
-        relation_id = relation_id_for(subject, candidate.predicate, object_name)
+        roles = [
+            {
+                "role": role.role,
+                "value": resolve_endpoint(role.value),
+                "entity_type": role.entity_type,
+            }
+            for role in candidate.roles
+        ]
+        temporal = bool(
+            candidate.event_at
+            or candidate.valid_from
+            or candidate.valid_to
+            or candidate.cardinality == "temporal"
+            or roles
+        )
+        relation_id = (
+            observation_id_for(
+                subject,
+                candidate.predicate,
+                object_name,
+                roles=roles,
+                event_at=candidate.event_at,
+                valid_from=candidate.valid_from,
+                valid_to=candidate.valid_to,
+                source_id=source_item.id,
+            )
+            if temporal
+            else relation_id_for(subject, candidate.predicate, object_name)
+        )
         existing = manager.get(relation_id, memory_type=MemoryType.SEMANTIC)
         existing_metadata = dict(existing.metadata) if existing is not None else {}
         source_ids = {
@@ -695,7 +801,12 @@ def materialize_extraction(
             retracted += 1
             continue
 
-        retire = candidate.action == "supersede" or candidate.cardinality == "single"
+        # Timed observations append history. Only an explicit supersede is
+        # allowed to retire another timed observation; ordinary single-value
+        # behavior remains unchanged for timeless state facts.
+        retire = candidate.action == "supersede" or (
+            candidate.cardinality == "single" and not temporal
+        )
         superseded_by: list[str] = []
         if retire:
             for stale in facts_for(subject, candidate.predicate):
@@ -738,6 +849,10 @@ def materialize_extraction(
             "predicate_key": predicate_key_for(subject, candidate.predicate),
             "action": candidate.action,
             "cardinality": candidate.cardinality,
+            "roles": roles,
+            "observation_id": relation_id if temporal else "",
+            "modality": source_item.modality or metadata.get("modality") or "text",
+            "captured_at": metadata.get("captured_at", ""),
             # F4：时间/状态透传，空值由检索侧视为无界/默认。
             "valid_from": candidate.valid_from,
             "valid_to": candidate.valid_to,
@@ -889,6 +1004,7 @@ __all__ = [
     "LLMKnowledgeExtractor",
     "NullKnowledgeExtractor",
     "RelationCandidate",
+    "RelationRole",
     "build_graph_context",
     "entity_id_for",
     "is_prefix_match",

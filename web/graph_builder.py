@@ -74,8 +74,25 @@ def _entity_aliases(manager: MemoryManager) -> dict[str, list[str]]:
         return {}
 
 
-def build_graph(manager: MemoryManager) -> dict[str, Any]:
+def _graph_snapshot(
+    manager: MemoryManager, *, at: str | None = None
+) -> dict[str, Any] | None:
+    """Read topology from the graph backend; ``None`` means compatibility fallback."""
+
+    getter = getattr(getattr(manager, "graph_store", None), "graph_snapshot", None)
+    if not callable(getter):
+        return None
+    try:
+        return dict(getter(at=at))
+    except (TypeError, ValueError):
+        raise
+    except Exception:  # noqa: BLE001 - unavailable graph falls back to SQLite satellites
+        return None
+
+
+def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, Any]:
     items: list[MemoryItem] = manager.list()
+    snapshot = _graph_snapshot(manager, at=at)
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     domains: dict[str, str] = {}
@@ -159,11 +176,18 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
                        "action": md.get("action", "assert"),
                        "superseded_by": md.get("superseded_by", []),
                        "supersedes": md.get("supersedes", []),
-                       "superseded_at": md.get("superseded_at", "")}
+                       "superseded_at": md.get("superseded_at", ""),
+                       "roles": md.get("roles", []),
+                       "event_at": md.get("event_at", ""),
+                       "valid_from": md.get("valid_from", ""),
+                       "valid_to": md.get("valid_to", ""),
+                       "status": md.get("status", "fact"),
+                       "modality": md.get("modality", "text"),
+                       "captured_at": md.get("captured_at", "")}
         nodes[item.id] = node
         # Superseded and retracted facts stay visible as history satellites but
         # produce no edge, so graph traversal only walks current values.
-        if not active:
+        if not active or snapshot is not None:
             continue
         edges.append({
             "id": f"edge:{item.id}",
@@ -242,11 +266,161 @@ def build_graph(manager: MemoryManager) -> dict[str, Any]:
             parent=TIMELINE_ID,
         )
 
+    # Relationship topology comes from Neo4j/in-memory graph, not from SQLite
+    # inference. SQLite still supplies source text, document previews and event
+    # satellites. Old backends without graph_snapshot retain the legacy path.
+    if snapshot is not None:
+        for entity in snapshot.get("entities") or []:
+            name = str(entity.get("name") or "").strip()
+            if not name:
+                continue
+            properties = dict(entity.get("properties") or {})
+            entity_id = entity_node(
+                name, domain=str(properties.get("domain") or DEFAULT_DOMAIN)
+            )
+            aliases = [str(value) for value in properties.get("aliases") or []]
+            if aliases:
+                nodes[entity_id]["meta"]["aliases"] = aliases
+            if properties.get("entity_type"):
+                nodes[entity_id]["meta"]["entity_type"] = properties["entity_type"]
+
+        observation_ids = {
+            str(observation.get("id") or "")
+            for observation in snapshot.get("observations") or []
+        }
+        for observation in snapshot.get("observations") or []:
+            observation_id = str(observation.get("id") or "").strip()
+            if not observation_id:
+                continue
+            predicate = str(observation.get("predicate") or "关联")
+            properties = dict(observation.get("properties") or {})
+            participants = sorted(
+                [dict(value) for value in observation.get("participants") or []],
+                key=lambda value: int(value.get("ordinal") or 0),
+            )
+            subject = next(
+                (str(value.get("name")) for value in participants if value.get("role") == "subject"),
+                "",
+            )
+            object_name = next(
+                (str(value.get("name")) for value in participants if value.get("role") == "object"),
+                "",
+            )
+            if not subject or not object_name:
+                continue
+            domain = str(properties.get("domain") or DEFAULT_DOMAIN)
+            source_id = entity_node(subject, domain=domain)
+            target_id = entity_node(object_name, domain=domain)
+            active = properties.get("active", True) is not False
+            if observation_id not in nodes:
+                title = f"{subject} —{predicate}→ {object_name}"
+                nodes[observation_id] = _node(
+                    observation_id,
+                    "fact",
+                    title if active else f"{title}（历史）",
+                    content=str(properties.get("evidence") or ""),
+                    domain=domain,
+                    date=str(properties.get("event_at") or properties.get("created_at") or "")[:NEBULA_DATE_CHARS],
+                    importance=float(properties.get("confidence", 0.75) or 0.75),
+                    parent=source_id,
+                    source=str(properties.get("source") or "") or None,
+                )
+            nodes[observation_id]["meta"].update(
+                {
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": object_name,
+                    "participants": participants,
+                    **properties,
+                }
+            )
+            if not active:
+                continue
+            extra = [
+                value
+                for value in participants
+                if value.get("role") not in {"subject", "object"}
+            ]
+            common = {
+                "confidence": properties.get("confidence", 0.75),
+                "evidence": properties.get("evidence", ""),
+                "event_at": properties.get("event_at", ""),
+                "valid_from": properties.get("valid_from", ""),
+                "valid_to": properties.get("valid_to", ""),
+                "active": active,
+                "observation_id": observation_id,
+            }
+            if not extra:
+                edges.append(
+                    {
+                        "id": f"edge:{observation_id}",
+                        "source": source_id,
+                        "target": target_id,
+                        "relation": predicate,
+                        **common,
+                    }
+                )
+                continue
+            edges.append(
+                {
+                    "id": f"edge:{observation_id}:subject",
+                    "source": source_id,
+                    "target": observation_id,
+                    "relation": predicate,
+                    **common,
+                }
+            )
+            for participant in [
+                value for value in participants if value.get("role") != "subject"
+            ]:
+                name = str(participant.get("name") or "")
+                participant_id = entity_node(
+                    name, domain=str(participant.get("domain") or domain)
+                )
+                role = str(participant.get("role") or "参与")
+                edges.append(
+                    {
+                        "id": f"edge:{observation_id}:{int(participant.get('ordinal') or 0)}",
+                        "source": observation_id,
+                        "target": participant_id,
+                        "relation": "宾语" if role == "object" else role,
+                        "role": role,
+                        **common,
+                    }
+                )
+
+        for index, relation in enumerate(snapshot.get("relations") or []):
+            properties = dict(relation.get("properties") or {})
+            if properties.get("active", True) is False:
+                continue
+            if str(properties.get("memory_id") or "") in observation_ids:
+                continue
+            source = str(relation.get("source") or "")
+            target = str(relation.get("target") or "")
+            predicate = str(relation.get("relation") or "关联")
+            if not source or not target:
+                continue
+            edges.append(
+                {
+                    "id": f"edge:neo4j:{properties.get('memory_id') or index}",
+                    "source": entity_node(source),
+                    "target": entity_node(target),
+                    "relation": predicate,
+                    **properties,
+                }
+            )
+
     node_list = list(nodes.values())
     kinds = {"domain": 0, "entity": 0, "fact": 0, "chunk": 0, "note": 0, "event": 0}
     for node in node_list:
         kinds[node["kind"]] = kinds.get(node["kind"], 0) + 1
     return {
+        "graph_source": (
+            str(snapshot.get("mode") or "graph")
+            if snapshot is not None
+            else "sqlite-fallback"
+        ),
+        "as_of": at or "",
         "stats": {
             "domains": kinds["domain"],
             "entities": kinds["entity"],

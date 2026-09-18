@@ -154,7 +154,16 @@ def build_knowledge_extractor():
             base_url=profile.base_url,
             model=profile.default_model,
         )
-        return LLMKnowledgeExtractor(client.complete, model=profile.default_model)
+        vision_model = (
+            os.getenv("KNOWLEDGE_VISION_MODEL")
+            or os.getenv("VISION_MODEL")
+            or ""
+        ).strip()
+        return LLMKnowledgeExtractor(
+            client.complete,
+            model=profile.default_model,
+            vision_model=vision_model or profile.default_model,
+        )
     except Exception:  # noqa: BLE001 - 任何配置问题都退回无抽取器的可用状态
         return NullKnowledgeExtractor()
 

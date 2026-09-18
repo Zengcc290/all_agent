@@ -122,6 +122,9 @@ class SemanticMemory(BaseMemory):
             "valid_to",
             "status",
             "event_at",
+            "captured_at",
+            "modality",
+            "observation_id",
         ):
             if key in metadata:
                 properties[key] = metadata[key]
@@ -141,6 +144,7 @@ class SemanticMemory(BaseMemory):
             "domain": str(item.metadata.get("domain", "")),
             "aliases": list(item.metadata.get("aliases") or []),
             "importance": float(item.importance),
+            "entity_type": str(item.metadata.get("entity_type", "概念")),
         }
 
     def _write_edge(
@@ -153,11 +157,12 @@ class SemanticMemory(BaseMemory):
     ) -> None:
         source_entity = self._endpoint_attributes(subject)
         target_entity = self._endpoint_attributes(object)
+        properties = self._graph_properties(item, metadata)
         self.graph_store.add_relation(
             subject,
             predicate,
             object,
-            properties=self._graph_properties(item, metadata),
+            properties=properties,
             source_domain=str(source_entity.get("domain", "")),
             target_domain=str(target_entity.get("domain", "")),
             source_aliases=list(source_entity.get("aliases") or []),
@@ -165,6 +170,66 @@ class SemanticMemory(BaseMemory):
             source_importance=float(source_entity.get("importance", 0.5)),
             target_importance=float(target_entity.get("importance", 0.5)),
         )
+
+        participants: list[dict[str, Any]] = [
+            {
+                "name": subject,
+                "role": "subject",
+                "ordinal": 0,
+                **source_entity,
+            },
+            {
+                "name": object,
+                "role": "object",
+                "ordinal": 1,
+                **target_entity,
+            },
+        ]
+        for ordinal, role in enumerate(metadata.get("roles") or [], start=2):
+            if not isinstance(role, Mapping):
+                continue
+            role_name = str(role.get("role") or "").strip()
+            value = str(role.get("value") or "").strip()
+            if not role_name or not value:
+                continue
+            attributes = self._endpoint_attributes(value)
+            participant = {
+                "name": value,
+                "role": role_name,
+                "ordinal": ordinal,
+                **attributes,
+            }
+            if role.get("entity_type"):
+                participant["entity_type"] = str(role["entity_type"])
+            participants.append(participant)
+            # Compatibility projection: existing GraphRAG traverses RELATED
+            # edges, while the authoritative n-ary shape remains the
+            # MemoryObservation + HAS_PARTICIPANT topology below.
+            self.graph_store.add_relation(
+                subject,
+                role_name,
+                value,
+                properties={**properties, "observation_id": item.id},
+                source_domain=str(source_entity.get("domain", "")),
+                target_domain=str(attributes.get("domain", "")),
+                source_aliases=list(source_entity.get("aliases") or []),
+                target_aliases=list(attributes.get("aliases") or []),
+                source_importance=float(source_entity.get("importance", 0.5)),
+                target_importance=float(attributes.get("importance", 0.5)),
+            )
+
+        add_observation = getattr(self.graph_store, "add_observation", None)
+        if callable(add_observation):
+            add_observation(
+                item.id,
+                predicate,
+                participants,
+                properties={
+                    **properties,
+                    "domain": str(metadata.get("domain") or ""),
+                    "created_at": item.created_at.isoformat(),
+                },
+            )
 
     def add_relation(
         self,
@@ -188,9 +253,9 @@ class SemanticMemory(BaseMemory):
         return removed
 
     def related(
-        self, entity: str, *, relation: str | None = None
+        self, entity: str, *, relation: str | None = None, at: str | None = None
     ) -> list[dict[str, Any]]:
-        return self.graph_store.get_relations(entity, relation=relation)
+        return self.graph_store.get_relations(entity, relation=relation, at=at)
 
     def facts(self, entity: str | None = None) -> list[MemoryItem]:
         items = self.list()

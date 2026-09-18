@@ -98,6 +98,7 @@ class GraphRAGPipeline:
         hops: int = RAG_GRAPH_HOPS,
         threshold: float | None = None,
         path_limit: int = RAG_GRAPH_PATH_LIMIT,
+        at: str | None = None,
     ) -> GraphRAGResult:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
@@ -120,7 +121,7 @@ class GraphRAGPipeline:
         )
         try:
             seeds = self._find_seed_entities(query, evidence)
-            paths = self._expand(seeds, hops=hops, path_limit=path_limit)
+            paths = self._expand(seeds, hops=hops, path_limit=path_limit, at=at)
         except Exception:  # noqa: BLE001 - Aura/local graph flaps must not drop vector evidence
             # Graph backends (Aura via proxy, local Neo4j) can flap without
             # taking the whole chat answer down.  Vector/keyword evidence still
@@ -215,7 +216,7 @@ class GraphRAGPipeline:
         return list(dict.fromkeys(names))
 
     def _expand(
-        self, seeds: list[str], *, hops: int, path_limit: int
+        self, seeds: list[str], *, hops: int, path_limit: int, at: str | None = None
     ) -> list[GraphPath]:
         if hops == 0 or not seeds:
             return []
@@ -240,7 +241,7 @@ class GraphRAGPipeline:
             current, entities, relations, evidence, depth, confidence, effective, steps = queue.popleft()
             if depth >= hops:
                 continue
-            for edge in self._weighted_edges(current):
+            for edge in self._weighted_edges(current, at=at):
                 source = str(edge.get("source") or current)
                 target = str(edge.get("target") or current)
                 neighbor = target if source == current else source
@@ -254,7 +255,7 @@ class GraphRAGPipeline:
                     continue
                 # F4：时间/状态过滤。时间段空值视为无界；status 默认只要
                 # fact/plan（uncertain 降权而非排除，expired 不命中）。
-                if not self._edge_in_window(props):
+                if not self._edge_in_window(props, at=at):
                     continue
                 edge_confidence = float(props.get("confidence", 0.0) or 0.0)
                 edge_status = str(props.get("status") or "fact")
@@ -313,10 +314,12 @@ class GraphRAGPipeline:
             self._reinforce(adopted)
         return adopted
 
-    def _weighted_edges(self, entity: str) -> list[dict[str, Any]]:
+    def _weighted_edges(
+        self, entity: str, *, at: str | None = None
+    ) -> list[dict[str, Any]]:
         """Edges around ``entity`` with the strongest first (F1 权重优先遍历)."""
 
-        edges = self.manager.semantic.related(entity)
+        edges = self.manager.semantic.related(entity, at=at)
         edges.sort(
             key=lambda edge: float(
                 (edge.get("properties") or {}).get("weight", 1.0) or 1.0
@@ -359,12 +362,27 @@ class GraphRAGPipeline:
             return False
         return item.metadata.get("active", True) is not False
 
-    def _edge_in_window(self, properties: dict[str, Any]) -> bool:
-        """F4 时间段过滤：``valid_from <= now <= valid_to``，空值视为无界。"""
+    def _edge_in_window(
+        self, properties: dict[str, Any], *, at: str | None = None
+    ) -> bool:
+        """Time-window filter at ``at`` (or now); empty bounds are unbounded."""
 
         from ..base import ensure_datetime, utc_now
 
-        now = utc_now()
+        try:
+            moment = ensure_datetime(at) if at else utc_now()
+        except (TypeError, ValueError):
+            return False
+        if moment is None:
+            moment = utc_now()
+        event_raw = str(properties.get("event_at") or "").strip()
+        if event_raw and at:
+            try:
+                event_at = ensure_datetime(event_raw)
+            except (TypeError, ValueError):
+                event_at = None
+            if event_at is not None and event_at > moment:
+                return False
         for key in ("valid_from", "valid_to"):
             raw = str(properties.get(key) or "").strip()
             if not raw:
@@ -375,9 +393,9 @@ class GraphRAGPipeline:
                 return True  # 畸形时间不静默丢边，交给 status/active 判断
             if bound is None:
                 continue
-            if key == "valid_from" and now < bound:
+            if key == "valid_from" and moment < bound:
                 return False
-            if key == "valid_to" and now > bound:
+            if key == "valid_to" and moment > bound:
                 return False
         return True
 
