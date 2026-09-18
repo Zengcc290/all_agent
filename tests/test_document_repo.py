@@ -182,3 +182,28 @@ def test_stats_counts(repo: DocumentRepository):
         repo.set_chunk_vector_status(f"d1:{index}", "indexed")
 
     assert repo.stats() == {"documents": 2, "chunks": 5, "chunks_indexed": 3}
+
+
+def test_embedding_lock_persists(tmp_path):
+    path = tmp_path / "memory.sqlite3"
+    repo = DocumentRepository(path)
+    try:
+        assert repo.get_embedding_lock() is None
+        written = repo.set_embedding_lock("BAAI/bge-m3", 1024)
+        assert written.model == "BAAI/bge-m3"
+        assert written.dimension == 1024
+        assert written.updated_at
+    finally:
+        repo.close()
+
+    reopened = DocumentRepository(path)
+    try:
+        locked = reopened.get_embedding_lock()
+        assert locked is not None
+        assert locked.model == "BAAI/bge-m3"
+        assert locked.dimension == 1024
+        updated = reopened.set_embedding_lock("Qwen/Qwen3-Embedding-8B", 4096)
+        assert updated.dimension == 4096
+        assert reopened.get_embedding_lock().model == "Qwen/Qwen3-Embedding-8B"
+    finally:
+        reopened.close()

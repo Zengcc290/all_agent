@@ -193,3 +193,15 @@ def test_u8_keyboard_reachability_and_small_screen_layout() -> None:
     assert "max-width: min(920px, calc(100vw - 56px))" in html
     assert "width: min(400px, calc(100vw - 24px))" in html
     assert "flex: 1 1 140px" in html
+
+
+def test_embedding_lock_confirm_dialog_is_wired() -> None:
+    html = INDEX.read_text(encoding="utf-8")
+
+    assert "embedding_lock_mismatch" in html
+    assert "window.confirm" in html
+    assert "confirm_rebuild=true" in html
+    assert "已保持锁定配置" in html
+    assert "function withEmbeddingGuard" in html
+    assert "formatEmbeddingLock" in html
+    assert "h.embedding_lock" in html

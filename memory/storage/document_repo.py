@@ -63,6 +63,15 @@ class ChunkRecord:
     vector_status: str = "pending"
 
 
+@dataclass(frozen=True)
+class EmbeddingLockRecord:
+    """Single-row lock of the embedding space this SQLite file belongs to."""
+
+    model: str
+    dimension: int
+    updated_at: str = ""
+
+
 @dataclass
 class IngestJobRecord:
     """One background one-sentence ingestion job, durable across restarts.
@@ -195,6 +204,16 @@ class DocumentRepository:
                 """
             )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_status ON ingest_jobs(status)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS embedding_lock (
+                    id         INTEGER PRIMARY KEY CHECK (id = 1),
+                    model      TEXT NOT NULL,
+                    dimension  INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             self._initialize_fts(connection)
 
     def _initialize_fts(self, connection: sqlite3.Connection) -> None:
@@ -442,6 +461,46 @@ class DocumentRepository:
             else:
                 rows = connection.execute("SELECT chunk_id FROM chunks ORDER BY chunk_id").fetchall()
         return [row["chunk_id"] for row in rows]
+
+    def list_all_chunks(self) -> list[ChunkRecord]:
+        """Every chunk in document order (full projection rebuild)."""
+
+        with self._connection_scope() as connection:
+            rows = connection.execute(
+                "SELECT * FROM chunks ORDER BY document_id, chunk_index"
+            ).fetchall()
+        return [self._decode_chunk(row) for row in rows]
+
+    def get_embedding_lock(self) -> EmbeddingLockRecord | None:
+        with self._connection_scope() as connection:
+            row = connection.execute(
+                "SELECT model, dimension, updated_at FROM embedding_lock WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return EmbeddingLockRecord(
+            model=str(row["model"]),
+            dimension=int(row["dimension"]),
+            updated_at=str(row["updated_at"] or ""),
+        )
+
+    def set_embedding_lock(self, model: str, dimension: int) -> EmbeddingLockRecord:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("embedding lock model must be a non-empty string")
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+            raise ValueError("embedding lock dimension must be a positive integer")
+        now = utc_now().isoformat()
+        with self._connection_scope() as connection:
+            connection.execute(
+                """
+                INSERT INTO embedding_lock (id, model, dimension, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  model=excluded.model, dimension=excluded.dimension, updated_at=excluded.updated_at
+                """,
+                (model.strip(), dimension, now),
+            )
+        return EmbeddingLockRecord(model=model.strip(), dimension=dimension, updated_at=now)
 
     def stats(self) -> dict[str, int]:
         with self._connection_scope() as connection:
@@ -794,6 +853,7 @@ __all__ = [
     "DeletionProposalStore",
     "DocumentRecord",
     "DocumentRepository",
+    "EmbeddingLockRecord",
     "IngestJobRecord",
     "execute_deletion",
 ]

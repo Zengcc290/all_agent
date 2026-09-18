@@ -18,6 +18,7 @@ from constants import (
 )
 
 from ..base import MemoryItem, MemorySearchResult, MemoryType
+from ..embedding_lock import apply_embedding_lock
 from ..manager import MemoryManager
 from ..storage.document_repo import (
     PERMISSIONS,
@@ -167,6 +168,7 @@ class RAGPipeline:
         resolver = EntityResolver(self.manager)
         accepts_context = _accepts_graph_context(self.extractor)
         repository = self.document_repo()
+        apply_embedding_lock(self.manager, repository)
         for document in values:
             source = str(document.metadata.get("source", document.id))
             if repository is not None:
@@ -288,6 +290,7 @@ class RAGPipeline:
         content = text.strip() if isinstance(text, str) else ""
         if not content:
             content = str(details.get("filename") or "图片观察")
+        apply_embedding_lock(self.manager, self.document_repo())
         item = self.manager.add(
             content,
             memory_type=MemoryType.PERCEPTUAL,

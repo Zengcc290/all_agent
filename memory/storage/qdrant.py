@@ -11,29 +11,49 @@ from ..base import MemoryItem, MemoryType
 from .vector import BaseVectorStore
 
 
+def _vector_size_of(value: Any) -> int | None:
+    """Pull ``size`` off VectorParams, a named-vector map, or a dict payload."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    size = getattr(value, "size", None)
+    if size is not None:
+        return int(size)
+    if isinstance(value, dict):
+        if "size" in value and value["size"] is not None:
+            return int(value["size"])
+        if value:
+            return _vector_size_of(next(iter(value.values())))
+    return None
+
+
 def _collection_vector_size(info: Any) -> int | None:
     """Read the live collection vector size from Qdrant collection info.
 
-    qdrant-client 把尺寸放在 ``config.params.vectors.size``（或 named vectors
-    的第一组）；测试替身用扁平的 ``config.params.size``。配置文件里的
+    真实路径是 ``config.params.vectors``（``VectorParams`` 或 named-vector 字典）。
+    测试替身仍可能把尺寸放在扁平的 ``config.params.size``。配置文件里的
     ``[embedding].dimension`` 不是集合现有维度，不能拿来比对。
     """
 
+    if isinstance(info, dict):
+        info = type("Info", (), info)()
     params = getattr(getattr(info, "config", None), "params", None)
+    if isinstance(getattr(info, "config", None), dict):
+        params = info.config.get("params")
     if params is None:
         return None
-    vectors = getattr(params, "vectors", None)
-    if vectors is not None:
-        size = getattr(vectors, "size", None)
-        if size is not None:
-            return int(size)
-        if isinstance(vectors, dict) and vectors:
-            first = next(iter(vectors.values()))
-            size = getattr(first, "size", None)
-            if size is not None:
-                return int(size)
-    size = getattr(params, "size", None)
-    return int(size) if size is not None else None
+    if isinstance(params, dict):
+        return _vector_size_of(params.get("vectors")) or _vector_size_of(params.get("size"))
+    return _vector_size_of(getattr(params, "vectors", None)) or _vector_size_of(
+        getattr(params, "size", None)
+    )
+
+
+def _is_dimension_error(exc: BaseException) -> bool:
+    text = str(exc).casefold()
+    return "expected dim" in text or "vector dimension error" in text or "dimension mismatch" in text
 
 
 def _dimension_mismatch_message(collection: str, existing: int, actual: int) -> str:
@@ -43,9 +63,10 @@ def _dimension_mismatch_message(collection: str, existing: int, actual: int) -> 
         f"Qdrant collection dimension mismatch: 集合 {collection!r} 是 {existing} 维，"
         f"但当前 embedding 模型输出 {actual} 维。维度不能单独改集合或配置："
         "要么把 config/services.toml 的 [embedding].model 换回原模型；"
-        "要么按新模型重建向量投影（SQLite 是真值，可全量重灌）——先运行 "
-        "python scripts/migrate_to_cloud.py --recreate-collection（重建集合并重灌 chunks），"
-        "再运行 python scripts/reindex_embeddings.py（重灌记忆条目向量）。"
+        "要么确认重建向量投影（SQLite 是真值，可全量重灌）。"
+        "入库/重索引接口在确认后会 recreate 集合并重灌；命令行等价于 "
+        "python scripts/migrate_to_cloud.py --recreate-collection 与 "
+        "python scripts/reindex_embeddings.py。"
     )
 
 
@@ -91,8 +112,25 @@ class QdrantVectorStore(BaseVectorStore):
         self.client, self.collection_name, self.dimension, self.namespace = client, collection_name, dimension, namespace
         self._ready = False
 
+    def _live_collection_size(self) -> int | None:
+        get_collection = getattr(self.client, "get_collection", None)
+        if not callable(get_collection):
+            return None
+        try:
+            return _collection_vector_size(get_collection(collection_name=self.collection_name))
+        except Exception:  # noqa: BLE001 - 读不到尺寸时由写入路径再核对
+            return None
+
+    def _raise_dimension_mismatch(self, existing: int | None, actual: int, cause: BaseException | None = None) -> None:
+        message = _dimension_mismatch_message(self.collection_name, int(existing or 0), actual)
+        if cause is None:
+            raise ValueError(message)
+        raise ValueError(message) from cause
+
     def _ensure_collection(self, dimension: int) -> None:
-        if self._ready:
+        existing = self._live_collection_size() if self._ready else None
+        if self._ready and (existing is None or existing == dimension):
+            self.dimension = dimension
             return
         try:
             from qdrant_client.models import Distance, VectorParams
@@ -102,22 +140,18 @@ class QdrantVectorStore(BaseVectorStore):
             else:
                 # 只跟集合的真实尺寸比对。self.dimension 可能来自配置护栏，
                 # 把它当成「集合已有维度」会在换模型后误报 1024/4096。
-                existing = None
-                get_collection = getattr(self.client, "get_collection", None)
-                if callable(get_collection):
-                    existing = _collection_vector_size(
-                        get_collection(collection_name=self.collection_name)
-                    )
+                if existing is None:
+                    existing = self._live_collection_size()
                 if existing is not None and existing != dimension:
-                    raise ValueError(
-                        _dimension_mismatch_message(self.collection_name, existing, dimension)
-                    )
+                    self._raise_dimension_mismatch(existing, dimension)
             self.dimension = dimension
             self._ensure_payload_indexes()
             self._ready = True
         except ValueError:
             raise
         except Exception as exc:
+            if _is_dimension_error(exc):
+                self._raise_dimension_mismatch(self._live_collection_size(), dimension, exc)
             raise RuntimeError(f"unable to initialize Qdrant collection: {exc}") from exc
 
     def _ensure_payload_indexes(self) -> None:
@@ -148,9 +182,8 @@ class QdrantVectorStore(BaseVectorStore):
     def recreate_collection(self, dimension: int) -> None:
         """Drop and recreate the collection at ``dimension``（换嵌入模型后重建投影）。
 
-        向量只是 SQLite 真值的投影：删除集合只丢投影不丢数据，随后用
-        ``migrate_to_cloud.py``（chunks）与 ``reindex_embeddings.py``（记忆条目）
-        按新模型全量重灌即可恢复。
+        向量只是 SQLite 真值的投影：删除集合只丢投影不丢数据。调用方必须先
+        得到确认，再全量重灌；本方法本身从不在写入路径上静默触发。
         """
 
         if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
@@ -179,7 +212,12 @@ class QdrantVectorStore(BaseVectorStore):
         from qdrant_client.models import PointStruct
         payload = self._light_payload(item)
         payload["namespace"] = self.namespace
-        self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(item.id), vector=item.embedding, payload=payload)])
+        try:
+            self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(item.id), vector=item.embedding, payload=payload)])
+        except Exception as exc:
+            if not _is_dimension_error(exc):
+                raise
+            self._raise_dimension_mismatch(self._live_collection_size() or self.dimension, len(item.embedding), exc)
 
     def upsert_chunk(self, chunk_id: str, vector: list[float], *, document_id: str = "", chunk_index: int = 0, source: str = "", memory_type: str = "semantic") -> None:
         """Write one chunk vector with the narrow chunk payload (方案 2.2).
@@ -202,7 +240,12 @@ class QdrantVectorStore(BaseVectorStore):
             # 缺了这个键的点会永远检索不到。
             "namespace": self.namespace,
         }
-        self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(chunk_id), vector=vector, payload=payload)])
+        try:
+            self.client.upsert(collection_name=self.collection_name, points=[PointStruct(id=self._point_id(chunk_id), vector=vector, payload=payload)])
+        except Exception as exc:
+            if not _is_dimension_error(exc):
+                raise
+            self._raise_dimension_mismatch(self._live_collection_size() or self.dimension, len(vector), exc)
 
     @staticmethod
     def _light_payload(item: MemoryItem) -> dict[str, Any]:
@@ -216,7 +259,7 @@ class QdrantVectorStore(BaseVectorStore):
         return {key: full.get(key) for key in ("id", "memory_type", "created_at", "expires_at")}
 
     def delete(self, item_id: str) -> bool:
-        if not self._ready:
+        if not self._ensure_ready_for_read():
             return False
         from qdrant_client.models import PointIdsList
         self.client.delete(collection_name=self.collection_name, points_selector=PointIdsList(points=[self._point_id(item_id)]))
@@ -227,7 +270,8 @@ class QdrantVectorStore(BaseVectorStore):
 
         ``_ready`` is only set by writes, so a process that merely reads (the
         reconcile endpoint, a UI session) would otherwise report an empty
-        collection as "no vectors".
+        collection as "no vectors". 读路径不把 ``_ready`` 置位，避免跳过写入时
+        的维度核对。
         """
 
         if self._ready:
@@ -237,7 +281,6 @@ class QdrantVectorStore(BaseVectorStore):
                 return False
         except Exception:  # noqa: BLE001 - 探测失败按「读不到」处理，由调用方降级
             return False
-        self._ready = True
         return True
 
     def list_ids(self, *, limit: int = 10000) -> list[str]:

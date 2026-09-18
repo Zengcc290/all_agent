@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from memory import HashEmbedding, MemoryConfig, MemoryManager, make_default_embedding  # noqa: E402
+from memory.embedding_lock import EmbeddingIdentity, EmbeddingLockMismatch, embedding_model_name  # noqa: E402
 from memory.storage.document_repo import DocumentRecord, DocumentRepository  # noqa: E402
 from memory.storage.qdrant import QdrantVectorStore  # noqa: E402
 
@@ -89,6 +90,16 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError(f"嵌入数量不匹配：{len(vectors)} != {len(chunks)}")
         dims = {len(v) for v in vectors}
         print(f"嵌入完成：{len(vectors)} 条，维度 {dims}，耗时 {t_embed:.3f}s")
+        current = EmbeddingIdentity(embedding_model_name(embedding), len(vectors[0]))
+        locked = repo.get_embedding_lock()
+        if (
+            locked is not None
+            and (locked.model != current.model or locked.dimension != current.dimension)
+            and not args.recreate_collection
+        ):
+            print(EmbeddingLockMismatch(locked, current))
+            print("换模型后请加 --recreate-collection 以确认重建集合并全量重灌。")
+            return 2
 
         # ---- 可选：维度变更时先重建集合（阶段 2 之前，否则旧集合按新维度 upsert 会报维度不一致）----
         if args.recreate_collection:
@@ -136,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         remote_ids = manager.vector_store.list_ids(limit=10000)
         t_check = time.perf_counter() - t3
 
+        repo.set_embedding_lock(current.model, current.dimension)
         report = {
             "chunks": len(chunks),
             "documents": len(by_document),

@@ -1409,10 +1409,15 @@
     try {
       const res = await fetch(path, options ? { ...options, signal: ctrl.signal } : { signal: ctrl.signal });
       if (!res.ok) {
-        let detail = "";
-        try { detail = (await res.json()).detail || ""; } catch (_) {}
-        const err = new Error(`HTTP ${res.status}${detail ? "：" + detail : ""}`);
+        let payload = null;
+        try { payload = await res.json(); } catch (_) {}
+        const detail = payload && payload.detail;
+        const message = typeof detail === "string"
+          ? detail
+          : (detail && detail.message) ? String(detail.message) : "";
+        const err = new Error(`HTTP ${res.status}${message ? "：" + message : ""}`);
         err.status = res.status;
+        err.detail = detail;
         throw err;
       }
       return await res.json();
@@ -1425,6 +1430,37 @@
     body: JSON.stringify(body)
   }, t);
   const apiPostForm = (path, form, t) => apiFetch(path, { method: "POST", body: form }, t);
+  const withConfirmRebuild = (path, confirm) => (
+    confirm ? path + (path.includes("?") ? "&" : "?") + "confirm_rebuild=true" : path
+  );
+  function formatEmbeddingLock(lock) {
+    if (!lock) return "尚未锁定";
+    const model = lock.model || "未知模型";
+    const dim = lock.dimension != null ? `${lock.dimension} 维` : "未知维度";
+    return `${model} / ${dim}`;
+  }
+  async function confirmEmbeddingRebuild(err) {
+    const detail = err && err.detail;
+    if (err.status !== 409 || !detail || detail.code !== "embedding_lock_mismatch") {
+      throw err;
+    }
+    const ok = window.confirm(
+      `当前嵌入与库内锁定配置不一致。\n锁定：${formatEmbeddingLock(detail.locked)}\n当前：${formatEmbeddingLock(detail.current)}\n\n继续将重建向量库并全量重灌；取消则保持锁定配置。`
+    );
+    if (!ok) {
+      toast(`已保持锁定配置：${formatEmbeddingLock(detail.locked)}`, "err");
+      return false;
+    }
+    return true;
+  }
+  async function withEmbeddingGuard(send) {
+    try {
+      return await send(false);
+    } catch (err) {
+      if (!(await confirmEmbeddingRebuild(err))) return null;
+      return await send(true);
+    }
+  }
 
   // =====================================================================
   // 1. 数据层：/api/graph → 星系树（恒星=领域 行星=实体 卫星=事实/知识块）
@@ -2308,7 +2344,10 @@
     btn.disabled = true; btn.textContent = "已提交…";
     $("knowledge-text").value = ""; // 立即清空：入库在后台继续
     try {
-      const res = await apiPostJson("/api/knowledge", { text, wait: false }, 15000);
+      const res = await withEmbeddingGuard((confirm) =>
+        apiPostJson(withConfirmRebuild("/api/knowledge", confirm), { text, wait: false }, 15000)
+      );
+      if (!res) return;
       if (res.async) {
         toast(`已加入后台入库队列，完成状态见「入库记录」`, "ok");
       } else {
@@ -2391,7 +2430,10 @@
       form.append("text", $("image-note").value.trim());
       const localTime = $("image-event-at").value;
       form.append("captured_at", localTime ? new Date(localTime).toISOString() : new Date().toISOString());
-      const res = await apiPostForm("/api/knowledge/image", form, 120000);
+      const res = await withEmbeddingGuard((confirm) =>
+        apiPostForm(withConfirmRebuild("/api/knowledge/image", confirm), form, 120000)
+      );
+      if (!res) return;
       const extraction = res.extraction || {};
       const extracted = `${extraction.entities || 0} 个实体 / ${extraction.relations || 0} 条观察`;
       toast(`图片已入库，识别 ${extracted} ✦${res.warning ? " " + res.warning : ""}`, "ok");
@@ -2426,7 +2468,10 @@
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await apiPostForm("/api/ingest", form, 120000);
+      const res = await withEmbeddingGuard((confirm) =>
+        apiPostForm(withConfirmRebuild("/api/ingest", confirm), form, 120000)
+      );
+      if (!res) return;
       const extraction = res.extraction || {};
       const extracted = `${extraction.entities || 0} 个实体 / ${extraction.relations || 0} 条连接`;
       toast(`《${res.filename}》已入库，${res.chunks} 个知识块，自动识别 ${extracted} ✦`, "ok");
@@ -2655,7 +2700,14 @@
   async function revectorizeDocument(documentId) {
     toast("正在重嵌入…（远端网关逐批推理）");
     try {
-      const res = await apiPostJson(`/api/documents/${encodeURIComponent(documentId)}/revectorize`, {}, 180000);
+      const res = await withEmbeddingGuard((confirm) =>
+        apiPostJson(
+          withConfirmRebuild(`/api/documents/${encodeURIComponent(documentId)}/revectorize`, confirm),
+          {},
+          180000
+        )
+      );
+      if (!res) return;
       toast(`已重嵌入 ${res.chunks_reindexed} 块，文档状态 ${res.status}`, "ok");
     } catch (err) {
       toast("重嵌入失败：" + err.message, "err");
@@ -2758,6 +2810,7 @@
       row("嵌入出网", { gateway: "网关（隧道）", api: "云端 API", hash: "本地哈希（无远端）", unreachable: "不可达 · 已降级" }[embedded] || escapeHtml(embedded),
         unreachable ? "err" : embedded === "hash" ? "warn" : "ok"),
       row("聊天模型", degraded.chat_ready ? "已配置（DeepSeek）" : "未配置", degraded.chat_ready ? "ok" : ""),
+      row("嵌入锁定", formatEmbeddingLock(h.embedding_lock)),
     ].join("") + (unreachable
       ? `<div class="warn">当前为<b>关键词检索模式</b>（FTS5 + 图谱）；向量检索与入库不可用，恢复隧道后自动回到向量检索。</div>${
         degraded.embedding_hint ? `<code>${escapeHtml(degraded.embedding_hint)}</code>` : ""}`

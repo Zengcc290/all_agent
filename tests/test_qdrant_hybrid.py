@@ -44,10 +44,15 @@ class FakeQdrantClient:
     def create_collection(self, *, collection_name: str, vectors_config) -> None:
         self.exists = True
         self.vectors_config = vectors_config
+        size = getattr(vectors_config, "size", None)
+        if size is not None:
+            self.existing_size = size
 
     def delete_collection(self, *, collection_name: str) -> None:
         self.exists = False
         self.deleted_collections.append(collection_name)
+        self.points.clear()
+        self.existing_size = None
 
     def get_collection(self, *, collection_name: str):
         if self.named_vectors:
@@ -61,6 +66,13 @@ class FakeQdrantClient:
         return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(size=self.existing_size)))
 
     def upsert(self, *, collection_name: str, points: list) -> None:
+        if points and self.existing_size is not None:
+            vector = getattr(points[0], "vector", None)
+            if vector is not None and len(vector) != self.existing_size:
+                raise RuntimeError(
+                    "Unexpected Response: 400 (Bad Request) "
+                    f"expected dim: {self.existing_size}, got {len(vector)}"
+                )
         self.points.extend(points)
 
     def search(self, *, collection_name: str, query_vector, query_filter, limit: int) -> list:
@@ -124,6 +136,22 @@ def test_dimension_mismatch_still_raises():
 
     with pytest.raises(ValueError, match="dimension mismatch"):
         store.upsert(MemoryItem(content="x", memory_type=MemoryType.SEMANTIC, embedding=[0.1] * 4))
+    assert client.deleted_collections == []
+
+
+def test_dimension_mismatch_on_upsert_does_not_recreate():
+    """写入路径发现维度冲突必须抬错，不能静默 recreate 丢掉旧投影。"""
+
+    client = FakeQdrantClient(exists=True, existing_size=1024)
+    store = QdrantVectorStore(client=client, namespace="tests")
+    store._ensure_collection(1024)
+
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        store.upsert_chunk("d1:0", [0.1] * 4096)
+
+    assert client.deleted_collections == []
+    assert client.existing_size == 1024
+    assert client.points == []
 
 
 def test_configured_dimension_is_not_treated_as_collection_size():

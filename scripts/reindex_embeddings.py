@@ -18,6 +18,7 @@ Qdrant 集合，否则是内存回退——与 Web/Agent 运行时同一份投�
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,9 +26,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from memory import HashEmbedding, MemoryConfig, MemoryManager, default_sqlite_path, make_default_embedding  # noqa: E402
+from memory.embedding_lock import EmbeddingLockMismatch, apply_embedding_lock  # noqa: E402
+from memory.storage.document_repo import DocumentRepository  # noqa: E402
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="用当前嵌入配置重灌记忆条目向量")
+    parser.add_argument(
+        "--confirm-rebuild",
+        action="store_true",
+        help="嵌入锁定不一致时：重建向量集合并全量重灌（否则拒绝）",
+    )
+    args = parser.parse_args()
     config = MemoryConfig.from_config()
     embedding = make_default_embedding(config)
     if isinstance(embedding, HashEmbedding):
@@ -44,6 +54,16 @@ def main() -> int:
     # 与 Web/Agent 同一份配置（含云端 Qdrant 投影），只覆盖库路径。
     config.sqlite_path = str(db_path)
     manager = MemoryManager(config, embedding=embedding)
+    repo = DocumentRepository(db_path) if db_path.exists() else None
+    try:
+        apply_embedding_lock(manager, repo, confirm_rebuild=args.confirm_rebuild)
+    except EmbeddingLockMismatch as exc:
+        print(exc)
+        print("换模型后请加 --confirm-rebuild 以重建向量集合并全量重灌。")
+        manager.close()
+        if repo is not None:
+            repo.close()
+        return 2
     print(f"向量存储：{type(manager.vector_store).__name__}")
     items = manager.document_store.list(include_expired=True)
     print(f"待重索引：{len(items)} 条 -> {embedding!r}")
@@ -59,6 +79,9 @@ def main() -> int:
             failed += 1
             print(f"  ! {item.id}: {type(exc).__name__}: {exc}")
     print(f"完成：{done} 条成功，{failed} 条失败，共 {len(items)} 条。")
+    if repo is not None:
+        repo.close()
+    manager.close()
     return 0 if failed == 0 else 2
 
 

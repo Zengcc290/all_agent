@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -58,6 +58,7 @@ from constants import (
 )
 from core import ExecutionContext
 from memory import MemoryManager, MemoryType
+from memory.embedding_lock import EmbeddingLockMismatch, apply_embedding_lock
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
 
@@ -215,6 +216,16 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     def the_manager() -> MemoryManager:
         return app.state.manager
 
+    def guard_embedding(*, confirm_rebuild: bool = False) -> None:
+        """409 before ingest/reindex when SQLite embedding lock mismatches."""
+
+        manager = the_manager()
+        repository = app.state.pipeline.document_repo()
+        try:
+            apply_embedding_lock(manager, repository, confirm_rebuild=confirm_rebuild)
+        except EmbeddingLockMismatch as exc:
+            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
+
     # ------------------------------------------------------------------
     # 星云图缓存：任何写操作递增 revision，/api/graph 命中缓存避免全量重建。
     # 数据量大时 build_graph 是全库 O(N) 遍历，每请求重建会拖慢打开/刷新。
@@ -371,16 +382,24 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # 文档导入（RAG 摄取）
     # ------------------------------------------------------------------
     @app.post("/api/ingest")
-    async def ingest(file: UploadFile) -> dict[str, Any]:
+    async def ingest(
+        file: UploadFile,
+        confirm_rebuild: bool = Query(default=False),
+    ) -> dict[str, Any]:
         filename = file.filename or "untitled"
         tmp_path = await _save_upload(file, prefix="nebula-ingest-")
         try:
+            guard_embedding(confirm_rebuild=confirm_rebuild)
             items = app.state.pipeline.ingest_source(
                 tmp_path,
                 metadata={"source": filename, "filename": filename},
                 chunk_size=WEB_INGEST_CHUNK_SIZE,
                 overlap=RAG_CHUNK_OVERLAP,
             )
+        except HTTPException:
+            raise
+        except EmbeddingLockMismatch as exc:
+            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
         except Exception as exc:  # noqa: BLE001 - 解析失败归一为 422，附错误类型
             raise HTTPException(
                 status_code=422, detail=f"文档解析失败：{type(exc).__name__}: {exc}"
@@ -419,10 +438,14 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # 状态（排队中/正在入库/成功/失败）持久化在 SQLite，可查历史、重启续跑。
     # ------------------------------------------------------------------
     @app.post("/api/knowledge")
-    def add_knowledge(body: KnowledgeBody) -> dict[str, Any]:
+    def add_knowledge(
+        body: KnowledgeBody,
+        confirm_rebuild: bool = Query(default=False),
+    ) -> dict[str, Any]:
         text = body.text.strip()
         if not text:
             raise HTTPException(status_code=422, detail="一句话内容不能为空")
+        guard_embedding(confirm_rebuild=confirm_rebuild)
         queue = getattr(app.state, "ingest_queue", None)
 
         if queue is not None and queue.available:
@@ -501,6 +524,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         file: UploadFile,
         text: str = Form(default=""),
         captured_at: str = Form(default=""),
+        confirm_rebuild: bool = Query(default=False),
     ) -> dict[str, Any]:
         """Index a camera/image observation and extract its n-ary graph facts."""
 
@@ -523,12 +547,17 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             "modality": "image",
         }
         try:
+            guard_embedding(confirm_rebuild=confirm_rebuild)
             item = app.state.pipeline.ingest_media(
                 image,
                 text=text,
                 mime_type=mime_type,
                 metadata=metadata,
             )
+        except HTTPException:
+            raise
+        except EmbeddingLockMismatch as exc:
+            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"图片入库参数无效：{exc}") from exc
         invalidate_graph()
@@ -853,9 +882,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         }
 
     @app.post("/api/documents/{document_id}/revectorize")
-    def revectorize_document(document_id: str) -> dict[str, Any]:
+    def revectorize_document(
+        document_id: str,
+        confirm_rebuild: bool = Query(default=False),
+    ) -> dict[str, Any]:
         """重建该文档的向量投影；网关不可达时明确失败，绝不切换到别的向量空间（D8）。"""
 
+        guard_embedding(confirm_rebuild=confirm_rebuild)
         repository = the_repository()
         document = repository.get_document(document_id)
         if document is None:
@@ -878,6 +911,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
         except HTTPException:
             raise
+        except EmbeddingLockMismatch as exc:
+            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"重嵌入失败：{type(exc).__name__}: {exc}") from exc
         status = "extracted" if document.status == "extracted" else "vectorized"
@@ -913,6 +948,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         embedding_mode = "api" if base_url else "local-hash"
         embedding_state = "api" if base_url else "hash"
         manager = the_manager()
+        repository = app.state.pipeline.document_repo()
+        lock = repository.get_embedding_lock() if repository is not None else None
         return {
             "ok": True,
             "chat_ready": ready,
@@ -937,6 +974,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 "keyword_fallback": not bool(base_url),
                 "embedding_hint": embedding_config_hint(manager),
             },
+            "embedding_lock": (
+                None
+                if lock is None
+                else {
+                    "model": lock.model,
+                    "dimension": lock.dimension,
+                    "updated_at": lock.updated_at,
+                }
+            ),
         }
 
     # ------------------------------------------------------------------

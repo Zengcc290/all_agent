@@ -49,6 +49,10 @@ class DriftVectorStore(InMemoryVectorStore):
     def upsert_chunk(self, chunk_id, vector, **kwargs) -> None:
         self.ids.add(chunk_id)
 
+    def recreate_collection(self, dimension: int) -> None:
+        super().recreate_collection(dimension)
+        self.ids.clear()
+
     def list_ids(self) -> list[str]:
         return sorted(self.ids)
 
@@ -749,6 +753,53 @@ def test_health_reports_store_modes_and_degraded(file_client) -> None:
         "embedding_hint": health["degraded"]["embedding_hint"],  # 配置指引（非空）
     }
     assert "[embedding]" in health["degraded"]["embedding_hint"]
+
+
+def test_ingest_returns_409_when_embedding_lock_mismatches(file_client) -> None:
+    client, _ = file_client
+    first = client.post(
+        "/api/ingest",
+        files=_make_ingest_payload("lock.txt", "先用 1024 维哈希嵌入入库。" * 8),
+    )
+    assert first.status_code == 200, first.text
+    lock = client.get("/api/health").json()["embedding_lock"]
+    assert lock["model"] == "HashEmbedding"
+    assert lock["dimension"] == 1024
+
+    client.app.state.manager.embedding = HashEmbedding(dimension=16)
+    blocked = client.post(
+        "/api/ingest",
+        files=_make_ingest_payload("mismatch.txt", "换维度后必须 409，不能静默重建。" * 8),
+    )
+    assert blocked.status_code == 409
+    detail = blocked.json()["detail"]
+    assert detail["code"] == "embedding_lock_mismatch"
+    assert detail["locked"]["dimension"] == 1024
+    assert detail["current"]["dimension"] == 16
+    still = client.get("/api/health").json()["embedding_lock"]
+    assert still["dimension"] == 1024
+
+
+def test_ingest_confirm_rebuild_reindexes_then_writes(file_client) -> None:
+    client, store = file_client
+    first = client.post(
+        "/api/ingest",
+        files=_make_ingest_payload("old-space.txt", "旧向量空间的文档。" * 8),
+    )
+    assert first.status_code == 200, first.text
+    old_ids = set(store.ids)
+
+    client.app.state.manager.embedding = HashEmbedding(dimension=16)
+    rebuilt = client.post(
+        "/api/ingest",
+        params={"confirm_rebuild": True},
+        files=_make_ingest_payload("new-space.txt", "确认后重建并灌入新文档。" * 8),
+    )
+    assert rebuilt.status_code == 200, rebuilt.text
+    lock = client.get("/api/health").json()["embedding_lock"]
+    assert lock["dimension"] == 16
+    assert rebuilt.json()["chunks"] >= 1
+    assert old_ids <= store.ids
 
 
 def test_revectorize_rebuilds_every_chunk(file_client) -> None:

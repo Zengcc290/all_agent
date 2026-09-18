@@ -45,6 +45,14 @@ class InMemoryVectorStore(BaseVectorStore):
             with self._lock:
                 self._vectors[item.id] = (list(item.embedding), item.memory_type)
 
+    def recreate_collection(self, dimension: int) -> None:
+        """Drop in-memory vectors so a confirmed embedding-space rebuild can reindex."""
+
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+            raise ValueError("dimension must be a positive integer")
+        with self._lock:
+            self._vectors.clear()
+
     def delete(self, item_id: str) -> bool:
         with self._lock:
             return self._vectors.pop(item_id, None) is not None
