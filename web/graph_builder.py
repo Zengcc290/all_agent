@@ -212,7 +212,7 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
         else:
             doc_meta[document_id]["domains"].append(chunk_domain)
 
-    # --- facts: attach documents now; edges use shared predicate hubs later ---
+    # --- facts: attach documents now; edges use directed predicates later ---
     sqlite_facts: list[MemoryItem] = []
     for item in items:
         md = item.metadata
