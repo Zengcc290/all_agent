@@ -32,6 +32,7 @@ from constants import (
     NEBULA_PALETTE,
 )
 from memory import MemoryItem, MemoryManager
+from web.cleanup import find_orphan_entities
 from web.domain_classifier import classify_domain, majority_domain
 
 
@@ -502,10 +503,34 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
                 }
             )
 
+    # --- 恒星 ↔ 行星连线：每个实体/原句行星都有一条指向所属领域恒星的有向边 ---
+    # 让星图把「恒星系」和它辖下的行星用引力桥连起来，而不是只在布局上相邻。
+    for node in nodes.values():
+        if node["kind"] not in {"entity", "chunk"}:
+            continue
+        star_id = f"dom:{node['domain']}"
+        if star_id not in nodes:
+            continue
+        pair = (star_id, "属于", node["id"])
+        if pair in linked_pairs:
+            continue
+        linked_pairs.add(pair)
+        edges.append(
+            {
+                "id": f"edge:{star_id}:属于:{node['id']}",
+                "source": star_id,
+                "target": node["id"],
+                "relation": "属于",
+                "confidence": 1.0,
+                "structural": True,
+            }
+        )
+
     node_list = list(nodes.values())
     kinds = {"domain": 0, "entity": 0, "fact": 0, "chunk": 0, "note": 0, "event": 0}
     for node in node_list:
         kinds[node["kind"]] = kinds.get(node["kind"], 0) + 1
+    orphan_count = len(find_orphan_entities(manager, items=items))
     return {
         "graph_source": (
             str(snapshot.get("mode") or "graph")
@@ -523,6 +548,7 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
             "events": kinds["event"],
             "edges": len(edges),
             "historical_facts": historical_facts,
+            "orphan_entities": orphan_count,
             "total": len(node_list),
         },
         "nodes": node_list,

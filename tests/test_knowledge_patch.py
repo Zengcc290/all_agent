@@ -493,7 +493,7 @@ def test_graph_context_feeds_known_entities_and_trims_whole_lines():
     squeezed = build_graph_context(manager, "web 中转站现在的余额是多少", max_chars=60)
     assert squeezed
     assert all(
-        line.endswith("：") or line.startswith("- ") or "--" in line
+        line.endswith("：") or line.startswith("- ") or "--" in line or line.startswith("已知领域")
         for line in squeezed.splitlines()
     )
 
@@ -625,3 +625,30 @@ def test_ingest_builds_one_resolver_per_call(monkeypatch):
     assert len(items) > 1, "用例需要多 chunk 才有意义"
     # 修复前：每个 chunk 在 build_graph_context 里各建一个 resolver。
     assert len(created) == 1
+
+def test_domain_prompt_guides_reuse_over_new_stars():
+    """LLM 领域判断提示词：优先复用已知领域，新领域名有长度与禁用词约束。"""
+
+    from memory.rag.knowledge import LLMKnowledgeExtractor
+
+    prompt = LLMKnowledgeExtractor.SYSTEM_PROMPT
+    assert "【领域 domain】" in prompt
+    assert "优先复用「已知领域」里的现有领域名" in prompt
+    assert "2~10 个汉字" in prompt
+    assert "「未分类」" in prompt
+
+
+def test_build_graph_context_injects_known_domains():
+    """图上下文注入已知领域清单：LLM 据此决定是否新建领域恒星。"""
+
+    from memory.rag.knowledge import LLMKnowledgeExtractor
+
+    manager = _manager()
+    resolver = EntityResolver(manager)
+    resolver.resolve("web 中转站", domain="中转站", aliases=["web"])
+    manager.semantic.add_fact("web 中转站", "余额", "1 元")
+
+    context = build_graph_context(manager, "web 中转站的余额是多少", resolver=resolver)
+    assert "已知领域（优先复用，不要随意新建）" in context
+    assert "中转站" in context
+    assert "【领域 domain】" in LLMKnowledgeExtractor.SYSTEM_PROMPT

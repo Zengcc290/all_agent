@@ -229,6 +229,13 @@ class LLMKnowledgeExtractor:
         "2. roles 格式为 {role,value,entity_type}；不要把时间重复放进 roles，时间写 event_at。\n"
         "3. 相对时间以输入里的 reference_time 为基准；图片拍摄时间优先使用 captured_at。\n"
         "\n"
+        "【领域 domain】\n"
+        "1. 优先复用「已知领域」里的现有领域名，不要为同一主题新建领域。\n"
+        "2. 仅当文本构成一个已知领域之外的新主题（例如一批围绕新题材的实体/关系），"
+        "且无法归入任何已知领域时，才新建领域名；新领域名 2~10 个汉字，简洁概括主题。\n"
+        "3. 禁止使用「未分类」「其他」「默认」作为领域名；"
+        "拿不准时复用与实体关系最相关的现有领域。\n"
+        "\n"
         "【约束】\n"
         "1. subject/predicate/object 必须都能在文本或已知图中找到依据；无法确认的关系不要输出。\n"
         "2. 每条关系必须给出 evidence，且 evidence 必须是原文片段。\n"
@@ -945,7 +952,10 @@ def build_graph_context(
                 names.add(subject)
             if object_name:
                 names.add(object_name)
-    lines = ["已知实体（必须复用，不要新造）："]
+    # 已知领域清单：让 LLM 优先复用现有恒星，只有真正新主题才新建。
+    known_domains = _known_domains()
+    lines = [f"已知领域（优先复用，不要随意新建）：{'、'.join(known_domains)}"]
+    lines += ["已知实体（必须复用，不要新造）："]
     for item in seeds.values():
         metadata = item.metadata
         canonical = str(metadata.get("canonical_name") or item.content)
@@ -975,6 +985,16 @@ def build_graph_context(
     lines.extend(line for _, line in relations[:max_relations])
     lines.extend(line for _, line in retired[: max(1, max_relations // 3)])
     return _fit_lines(lines, max_chars)
+
+
+def _known_domains() -> list[str]:
+    """已知领域清单（同步 web/domain_classifier 的 KNOWN_DOMAINS）。"""
+
+    try:
+        from web.domain_classifier import KNOWN_DOMAINS
+    except Exception:  # noqa: BLE001 - 顺便导入失败时返回常规集
+        return ["未分类"]
+    return list(KNOWN_DOMAINS)
 
 
 def _fit_lines(lines: list[str], max_chars: int) -> str:

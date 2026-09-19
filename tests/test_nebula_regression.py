@@ -130,3 +130,24 @@ def test_source_sentence_planet_connects_all_entities(manager: MemoryManager) ->
     washing = [e for e in graph["edges"] if e["relation"] == "在洗澡"]
     guarding = [e for e in graph["edges"] if e["relation"] == "守着"]
     assert len(washing) == 1 and len(guarding) == 1
+def test_every_entity_and_chunk_links_to_its_domain_star(manager: MemoryManager) -> None:
+    """恒星 ↔ 行星连线：每个实体/原句行星都有一条指向所属领域恒星的「属于」有向边。"""
+
+    pipeline = RAGPipeline(manager, extractor=MultiRelationExtractor())
+    pipeline.ingest(Document("小猫在浴缸洗澡，小狗在旁边守着。", id="src-1", metadata={"filename": "note.txt"}))
+
+    graph = build_graph(manager)
+    belong = [e for e in graph["edges"] if e["relation"] == "属于"]
+    assert len(belong) > 0
+    by_id = {n["id"]: n["title"] for n in graph["nodes"]}
+
+    for node in graph["nodes"]:
+        if node["kind"] not in {"entity", "chunk"}:
+            continue
+        star_id = f"dom:{node['domain']}"
+        assert star_id in by_id, f"行星 {node['id']} 的领域恒星缺失"
+        matches = [
+            e for e in belong if e["source"] == star_id and e["target"] == node["id"]
+        ]
+        assert len(matches) == 1, f"{node['id']} 缺少唯一的「属于」恒星边"
+        assert matches[0]["structural"] is True
