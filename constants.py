@@ -270,6 +270,14 @@ WEB_KNOWLEDGE_MAX_CHARS = 20000
 #: /api/import 响应中回传的错误明细条数上限（避免超长响应）。
 WEB_IMPORT_ERRORS_MAX = 20
 
+#: /api/documents 分页的每页条目上限（防止 page_size=100000 拉爆响应）。
+WEB_DOCUMENTS_PAGE_SIZE_MAX = 100
+
+#: 问答留痕写入 episodic 的原文截断上限：避免超长对话把记忆库无限撑大，
+#: 检索仍能命中问题/答案的关键句。
+WEB_QA_QUESTION_MAX_CHARS = 2000
+WEB_QA_ANSWER_MAX_CHARS = 8000
+
 #: /api/ingest 的 RAG 切块块长（比默认 1000 更细，用于文档）。
 WEB_INGEST_CHUNK_SIZE = 800
 

@@ -22,8 +22,10 @@ from typing import Any
 from constants import (
     NEBULA_EVENT_TITLE_CHARS,
     QA_EXTRACT_CHUNK_SIZE,
+    WEB_QA_ANSWER_MAX_CHARS,
     WEB_QA_EXTRACT,
     WEB_QA_EXTRACT_SYNC,
+    WEB_QA_QUESTION_MAX_CHARS,
 )
 from core.services_config import SearchService, load_services_config
 from memory import (
@@ -155,10 +157,11 @@ def get_pipeline() -> RAGPipeline:
     """进程级 RAG 管道：Web API、知识管家工具、问答抽取共用同一份记忆。"""
     global _pipeline
     if _pipeline is None:
+        manager = get_manager()
         with _manager_lock:
             if _pipeline is None:
                 _pipeline = RAGPipeline(
-                    get_manager(),
+                    manager,
                     extractor=build_knowledge_extractor(),
                 )
     return _pipeline
@@ -287,6 +290,8 @@ def record_qa(
     metadata 保留结构化字段，星图时间线上以「问：…」事件出现。
     """
     now = utc_now()
+    question = str(question or "")[:WEB_QA_QUESTION_MAX_CHARS]
+    answer = str(answer or "")[:WEB_QA_ANSWER_MAX_CHARS]
     return manager.episodic.record(
         f"问：{question}\n答：{answer}",
         metadata={

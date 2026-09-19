@@ -139,11 +139,17 @@ class IngestJobQueue:
             job = self.job(job_id)
         return job
 
-    def shutdown(self) -> None:
-        """不再等待在跑的任务：它们在 SQLite 里保持 ``running``，下次启动续跑。"""
+    def shutdown(self, *, wait: bool = True) -> None:
+        """停止 worker 池。
+
+        ``wait=True`` 等在跑任务收尾（默认）：v1.65 之前异步关闭会残留
+        仍在访问已关闭 manager/document store 的后台线程，进程退出竞争。
+        需要立刻退出时传 ``wait=False``；未完成的任务在 SQLite 里保持
+        ``running``，下次启动由 ``start()`` 复位续跑。
+        """
 
         if self._executor is not None:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=wait)
             self._executor = None
         if self._repo is not None:
             self._repo.close()

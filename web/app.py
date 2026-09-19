@@ -46,6 +46,7 @@ from constants import (
     RAG_RETRIEVE_LIMIT,
     WEB_AUTOSEED,
     WEB_CHAT_MAX_CHARS,
+    WEB_DOCUMENTS_PAGE_SIZE_MAX,
     WEB_FACT_DOMAIN_MAX,
     WEB_FACT_NOTE_MAX,
     WEB_FACT_OBJECT_MAX,
@@ -87,6 +88,12 @@ from .support import (
     schedule_qa_extraction,
     search_available,
 )
+
+
+def _reject_json_constant(value: str) -> None:
+    """Reject ``NaN``/``Infinity`` so imported JSON stays strictly finite."""
+
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 class ReconcileBody(BaseModel):
@@ -471,8 +478,18 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             finished = queue.wait(job.job_id)
             if finished is None or finished.status != "done":
                 error = finished.error if finished is not None else "等待入库超时"
-                raise HTTPException(status_code=500, detail=f"入库失败：{error}")
-            result = json.loads(finished.result) if finished.result else {}
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"入库失败：{error or '未知错误'}",
+                )
+            try:
+                result = json.loads(finished.result) if finished.result else {}
+            except ValueError as exc:
+                # 后台任务写入的 result 必须是合法 JSON；对端损坏时给可读错误，
+                # 而不是让解析异常变成 500 内部错误。
+                raise HTTPException(
+                    status_code=500, detail=f"入库结果解析失败：{exc}"
+                ) from exc
             report = result.get("report") if isinstance(result.get("report"), dict) else {}
             return {
                 "ok": True,
@@ -523,7 +540,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             return {"items": [], "available": False, "workers": 0}
         if status is not None and status not in ("pending", "running", "done", "failed"):
             raise HTTPException(status_code=422, detail="status 取值必须是 pending/running/done/failed")
-        jobs = queue.list(status=status, limit=limit)
+        # 仓储层内部有 200 条硬上限，这里在 API 层再夹一层，避免超大步进直接
+        # 打到 SQL 层（同时让前端拿到的 limit 就是实际生效值）。
+        jobs = queue.list(status=status, limit=max(1, min(int(limit), 200)))
         return {
             "items": [job_to_dict(job) for job in jobs],
             "available": True,
@@ -649,7 +668,12 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         finally:
             tmp_path.unlink(missing_ok=True)
         try:
-            data = json.loads(raw.decode("utf-8"))
+            # 导入文件严格 JSON：拒绝 NaN/Infinity，避免把非有限数值写进记忆库
+            # （项目的模型/API 全链路都用 reject_json_constant 保证严格有限）。
+            data = json.loads(
+                raw.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
         except (UnicodeDecodeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"不是合法的 JSON：{exc}")
         entries = data.get("items") if isinstance(data, dict) else data
@@ -693,7 +717,17 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 skipped += 1
                 continue
             md = raw_item.get("metadata") or {}
+            if not isinstance(md, dict):
+                skipped += 1
+                note_error(f"{item_id}: metadata 必须是 JSON 对象")
+                continue
             memory_type = raw_item.get("memory_type") or "semantic"
+            if not isinstance(memory_type, str) or memory_type not in set(
+                type_.value for type_ in MemoryType
+            ):
+                skipped += 1
+                note_error(f"{item_id}: 未知 memory_type：{memory_type!r}")
+                continue
             importance = raw_item.get("importance", 0.5)
             subject, predicate, obj = (
                 md.get("subject"),
@@ -858,6 +892,11 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     @app.get("/api/documents")
     def list_documents(tag: str = "", status: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= WEB_DOCUMENTS_PAGE_SIZE_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=f"page_size 必须是 1 到 {WEB_DOCUMENTS_PAGE_SIZE_MAX} 之间的整数",
+            )
         repository = the_repository()
         try:
             items, total = repository.list_documents(tag=tag, status=status, page=page, page_size=page_size)

@@ -39,6 +39,10 @@ from constants import (
 #: ``{"text": ...}`` / ``{"image": ...}`` 内容对象与它们的混合列表。
 VL_EMBEDDING_MODEL_MARKER = "vl"
 
+#: 嵌入 API 响应体上限（字节）。单次批内最多 DEFAULT_EMBEDDING_BATCH_SIZE 条
+#: 输入，正常响应远小于此；超限说明对端行为异常，不整段读进内存。
+EMBEDDING_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+
 
 class BaseEmbedding(ABC):
     """Tiny interface every embedding provider implements."""
@@ -331,7 +335,16 @@ def _request(embedding: APIEmbedding, values: list[Any]) -> Any:
     )
     try:
         with urllib.request.urlopen(request, timeout=embedding.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            try:
+                body = response.read(EMBEDDING_RESPONSE_MAX_BYTES + 1)
+            except TypeError:
+                # 测试替身与小适配器只暴露无参 read()；它们仍受下面长度检查约束。
+                body = response.read()
+            if len(body) > EMBEDDING_RESPONSE_MAX_BYTES:
+                raise OverflowError(
+                    f"body exceeds {EMBEDDING_RESPONSE_MAX_BYTES} bytes"
+                )
+            return json.loads(body.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(
@@ -341,6 +354,8 @@ def _request(embedding: APIEmbedding, values: list[Any]) -> Any:
         raise RuntimeError(f"embedding API request failed: {exc.reason}") from exc
     except ValueError as exc:
         raise RuntimeError(f"embedding API returned invalid JSON: {exc}") from exc
+    except OverflowError as exc:
+        raise RuntimeError(f"embedding API response is too large: {exc}") from exc
 
 
 def _extract_embedding_vectors(response: Any) -> list[list[float]]:

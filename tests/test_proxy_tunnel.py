@@ -70,3 +70,46 @@ def test_broker_resolver_keeps_non_aura_address() -> None:
         assert other[0][1] != mapped[0][1]
     finally:
         broker.close()
+
+
+def test_refcounted_getaddrinfo_patch_installs_and_uninstalls() -> None:
+    """补丁引用计数：多实例共存时链式生效，逐个关闭后原子函数还原。"""
+
+    import socket as socket_module
+
+    import memory.storage.graph as graph_module
+
+    original = socket_module.getaddrinfo
+    try:
+        first = _install_broker()
+        second = _install_broker()
+        patched = socket_module.getaddrinfo
+        assert patched is graph_module._chained_getaddrinfo
+
+        def resolve(host: str) -> str:
+            return patched(host, 7687)[0][4][0]
+
+        assert resolve("example.com") == original("example.com", 80)[0][4][0]
+        first_port = resolve("a.databases.neo4j.io")
+        second_port = resolve("b.neo4j.io")
+        assert first_port == "127.0.0.1" and second_port == "127.0.0.1"
+
+        graph_module._uninstall_socket_patch(first)
+        assert socket_module.getaddrinfo is graph_module._chained_getaddrinfo
+        assert resolve("a.databases.neo4j.io") == "127.0.0.1"
+
+        graph_module._uninstall_socket_patch(second)
+        assert socket_module.getaddrinfo is original
+    finally:
+        if socket_module.getaddrinfo is not original:
+            socket_module.getaddrinfo = original
+        graph_module._socket_patch_frames.clear()
+        graph_module._socket_patch_original = None
+
+
+def _install_broker():
+    import memory.storage.graph as graph_module
+    from core.proxy_tunnel import ProxyBroker
+
+    broker = ProxyBroker("http://127.0.0.1:7890")
+    return graph_module._install_socket_patch(broker)

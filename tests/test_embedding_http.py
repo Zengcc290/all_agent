@@ -106,6 +106,20 @@ def test_real_http_invalid_json_is_surfaced(base_url: str):
         instance.embed("text")
 
 
+def test_real_http_oversized_response_is_rejected(base_url: str):
+    """回归：嵌入响应曾无上限 read()，云端异常返回超大正文会耗尽内存。"""
+
+    from memory.embedding import EMBEDDING_RESPONSE_MAX_BYTES
+
+    _EmbeddingsHandler.responder = staticmethod(
+        lambda body: (200, b"x" * (EMBEDDING_RESPONSE_MAX_BYTES + 1))
+    )
+    instance = APIEmbedding(api_key="test-key", base_url=base_url)
+
+    with pytest.raises(RuntimeError, match="too large"):
+        instance.embed("text")
+
+
 def test_real_http_connection_refused_is_surfaced():
     # Port 1 is reserved/unbound: the request must fail with a clear message.
     instance = APIEmbedding(api_key="test-key", base_url="http://127.0.0.1:1/v1", timeout=2.0)

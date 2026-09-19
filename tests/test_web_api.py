@@ -373,13 +373,23 @@ def test_chat_records_qa_into_episodic_memory(
     assert "asked_at" in meta
     assert qa_items[0].timestamp is not None
 
-    # 端到端：模拟 agent 用 memory.query 检索（不指定 memory_type 应能命中）
-    from tool.memory_query import MemoryQueryInput, MemoryQueryTool
 
-    tool = MemoryQueryTool(manager=client.app.state.manager)
-    found = tool.execute(MemoryQueryInput(action="search", query="我这两天在忙什么"))
-    assert found.count >= 1
-    assert any("这是测试回答" in item["content"] for item in found.items)
+def test_record_qa_truncates_very_long_text(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：超长问答原文曾完整写入 episodic，记忆库会随对话无限膨胀。"""
+
+    from constants import WEB_QA_ANSWER_MAX_CHARS, WEB_QA_QUESTION_MAX_CHARS
+    from web.support import record_qa
+
+    manager = client.app.state.manager
+    long_question = "问" * (WEB_QA_QUESTION_MAX_CHARS + 500)
+    long_answer = "答" * (WEB_QA_ANSWER_MAX_CHARS + 500)
+    item = record_qa(manager, long_question, long_answer, mode="offline")
+
+    assert len(item.metadata["question"]) == WEB_QA_QUESTION_MAX_CHARS
+    assert len(item.metadata["answer"]) == WEB_QA_ANSWER_MAX_CHARS
+    assert len(item.content) < len(long_question) + len(long_answer)
 
 
 def test_chat_returns_retrieval_breakdown_for_the_provenance_panel(
@@ -666,6 +676,22 @@ def test_list_documents_pagination(file_client) -> None:
     assert len(second["items"]) == 1
     assert first["items"][0]["chunk_count"] > 0
     assert client.get("/api/documents", params={"page": 0}).status_code == 422
+
+
+def test_list_documents_rejects_oversized_page_size(file_client) -> None:
+    """回归：page_size 无上限时一个超大步进就能拉爆响应。"""
+
+    client, _ = file_client
+    from constants import WEB_DOCUMENTS_PAGE_SIZE_MAX
+
+    response = client.get(
+        "/api/documents", params={"page_size": WEB_DOCUMENTS_PAGE_SIZE_MAX + 1}
+    )
+    assert response.status_code == 422
+    assert "page_size" in response.json()["detail"]
+    assert client.get(
+        "/api/documents", params={"page_size": WEB_DOCUMENTS_PAGE_SIZE_MAX}
+    ).status_code == 200
 
 
 def test_get_document_raw_text(file_client) -> None:

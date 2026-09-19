@@ -3,11 +3,80 @@
 from __future__ import annotations
 
 import socket
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from operator import itemgetter
 from typing import Any
 
 from constants import MEMORY_EDGE_WEIGHT_GROWTH, MEMORY_EDGE_WEIGHT_MAX
+
+# ---------------------------------------------------------------------------
+# 进程级 socket.getaddrinfo 补丁（Aura 经本地代理访问）。
+#
+# Neo4j 驱动在连接/路由阶段才按成员主机名解析地址，因此补丁必须陪伴驱动
+# 整个生命周期。多实例（同一进程里的多个 Neo4jGraphStore）同时存在时，
+# 用引用计数 + 链式帧保证：谁安装谁卸载，互不覆盖，非 Aura 主机一律走
+# 最初捕获的原函数；同一时间不会有两份互相打架的全局补丁。
+# ---------------------------------------------------------------------------
+_socket_patch_lock = threading.Lock()
+_socket_patch_original: Callable[..., Any] | None = None
+_socket_patch_frames: list[Callable[..., Any]] = []
+
+
+def _chained_getaddrinfo(
+    host, port, family: int = 0, type: int = 0, proto: int = 0, flags: int = 0
+):
+    original = _socket_patch_original
+    if original is None:
+        raise RuntimeError("socket.getaddrinfo patch installed without a captured original")
+    for frame in tuple(reversed(_socket_patch_frames)):
+        mapped = frame(host, port, family, type, proto, flags)
+        if mapped is not None:
+            return mapped
+    return original(host, port, family, type, proto, flags)
+
+
+def _make_proxy_frame(broker: Any) -> Callable[..., Any]:
+    """Build one chained frame: Aura hosts -> loopback tunnel, other hosts -> None."""
+
+    from core.proxy_tunnel import _numeric_port, _should_proxy_host
+
+    original = _socket_patch_original
+    assert original is not None
+
+    def frame(
+        host, port, family: int = 0, type: int = 0, proto: int = 0, flags: int = 0
+    ):
+        if not _should_proxy_host(host):
+            return None
+        tunnel = broker.ensure(str(host), _numeric_port(port))
+        assert tunnel.local_port is not None
+        return original("127.0.0.1", tunnel.local_port, family, type, proto, flags)
+
+    return frame
+
+
+def _install_socket_patch(broker: Any) -> Callable[..., Any]:
+    global _socket_patch_original
+    with _socket_patch_lock:
+        if not _socket_patch_frames:
+            _socket_patch_original = socket.getaddrinfo
+            socket.getaddrinfo = _chained_getaddrinfo
+        frame = _make_proxy_frame(broker)
+        _socket_patch_frames.append(frame)
+        return frame
+
+
+def _uninstall_socket_patch(frame: Callable[..., Any]) -> None:
+    global _socket_patch_original
+    with _socket_patch_lock:
+        try:
+            _socket_patch_frames.remove(frame)
+        except ValueError:
+            return
+        if not _socket_patch_frames:
+            socket.getaddrinfo = _socket_patch_original
+            _socket_patch_original = None
 
 
 class Neo4jGraphStore:
@@ -30,7 +99,7 @@ class Neo4jGraphStore:
         self._username = username
         self._password = password
         self._broker: Any = None
-        self._original_getaddrinfo: Any = None
+        self._socket_patch_frame: Callable[..., Any] | None = None
         self._local: dict[str, list[dict[str, Any]]] = {}
         self._reverse: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         #: 内存回退下的实体属性（Neo4j 侧由 ON CREATE/ON MATCH 维护同样的三项）。
@@ -58,29 +127,41 @@ class Neo4jGraphStore:
         }
         if self.proxy_url:
             # Aura needs neo4j+s routing.  The driver has no native proxy, so
-            # *.neo4j.io is remapped onto CONNECT tunnels.  A custom resolver
-            # alone cannot complete TLS+routing here; getaddrinfo is required.
-            import socket
-
+            # *.neo4j.io is remapped onto CONNECT tunnels *for the driver's whole
+            # lifetime*（连接与路由阶段都会解析成员主机，不能只在构造时换装）。
+            # 补丁引用计数安装：close() 时由本实例自己卸载，不影响同进程其他实例。
             from core.proxy_tunnel import ProxyBroker
 
             self._broker = ProxyBroker(self.proxy_url)
-            if self._original_getaddrinfo is None:
-                self._original_getaddrinfo = socket.getaddrinfo
-            socket.getaddrinfo = self._broker.remap_getaddrinfo(self._original_getaddrinfo)
-        self.driver = GraphDatabase.driver(self._uri, **kwargs)
+            self._socket_patch_frame = _install_socket_patch(self._broker)
+        try:
+            self.driver = GraphDatabase.driver(self._uri, **kwargs)
+        except Exception:
+            # 驱动构造失败时立即卸载刚安装的补丁，避免泄漏进程级全局补丁。
+            self._discard_socket_patch()
+            raise
+
+    def _discard_socket_patch(self) -> None:
+        if self._socket_patch_frame is not None:
+            _uninstall_socket_patch(self._socket_patch_frame)
+            self._socket_patch_frame = None
+        if self._broker is not None:
+            try:
+                self._broker.close()
+            except Exception:  # noqa: BLE001 - best effort during error path
+                pass
+            self._broker = None
 
     def _reopen_driver(self) -> None:
-        import socket
-
         if self.driver is not None and callable(getattr(self.driver, "close", None)):
             try:
                 self.driver.close()
             except Exception:  # noqa: BLE001 - stale driver must not block reconnect
                 pass
             self.driver = None
-        if self._original_getaddrinfo is not None:
-            socket.getaddrinfo = self._original_getaddrinfo
+        if self._socket_patch_frame is not None:
+            _uninstall_socket_patch(self._socket_patch_frame)
+            self._socket_patch_frame = None
         if self._broker is not None:
             try:
                 self._broker.close()
@@ -739,12 +820,7 @@ class Neo4jGraphStore:
     def close(self) -> None:
         if self.driver is not None and callable(getattr(self.driver, "close", None)):
             self.driver.close()
-        if self._original_getaddrinfo is not None:
-            socket.getaddrinfo = self._original_getaddrinfo
-            self._original_getaddrinfo = None
-        if self._broker is not None:
-            self._broker.close()
-            self._broker = None
+        self._discard_socket_patch()
 
 
 __all__ = ["Neo4jGraphStore"]
