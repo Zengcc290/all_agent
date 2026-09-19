@@ -1,0 +1,29 @@
+# 本地版 provider 配置模板（可提交，占位密钥）。
+#
+# 用法：切到本地模式
+#   python scripts/switch_config.py local
+# 脚本会把本文件复制为 config/provider.toml（gitignored 的生效文件）。
+#
+# 本地版含义：聊天模型指向本机 OpenAI 兼容网关（LM Studio / Ollama / vLLM），
+# 也可以保留云端 profile 并用 api_key_env 指向环境变量。
+
+[defaults]
+# 切换生效的聊天 profile：local（本地网关）或 deepseek（云端 API）。
+active_profile = "local"
+
+[profiles.local]
+adapter = "openai_compatible"
+api_url = "http://localhost:8000/v1"
+api_key = "replace-with-local-api-key"
+default_model = "local-model"
+models = ["local-model"]
+tool_mode = "text_react"
+
+# 需要云端聊天时保留下面这份，并把 active_profile 改成 "deepseek"。
+[profiles.deepseek]
+adapter = "openai_compatible"
+api_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+default_model = "deepseek-chat"
+models = ["deepseek-chat", "deepseek-reasoner"]
+tool_mode = "text_react"

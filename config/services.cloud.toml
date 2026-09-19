@@ -1,0 +1,48 @@
+# 云端版 services 配置模板（可提交，占位密钥）。
+#
+# 用法：切到云端模式
+#   python scripts/switch_config.py cloud
+# 脚本会把本文件复制为 config/services.toml（gitignored 的生效文件），
+# 然后按下方提示填入真实密钥，或改用 *_env 指向环境变量。
+#
+# 云端版含义：全部外部服务走云端——SiliconFlow/DashScope 嵌入、
+# Qdrant Cloud、Neo4j Aura；出网点默认经本地转发代理 127.0.0.1:7890。
+
+[embedding]
+# 云端嵌入（OpenAI 兼容 /embeddings，支持文本与图文 VL 输入）。
+# 维度唯一开关是 model：换模型后需
+#   python scripts/migrate_to_cloud.py --recreate-collection
+#   python scripts/reindex_embeddings.py
+provider = "openai"
+base_url = "https://api.siliconflow.cn/v1"
+model = "Qwen/Qwen3-VL-Embedding-8B"
+api_key = "replace-with-siliconflow-api-key"
+dimension = 4096
+batch_size = 10
+timeout = 30.0
+
+[vision]
+# 识图抽取模型（端点/密钥沿用 provider 的活动 profile）。
+# model = "Qwen/Qwen2.5-VL-72B-Instruct"
+
+[search]
+# 联网搜索网关。留空 = 不启用。
+# base_url = "https://your-anysearch-endpoint/v1"
+# api_key = "replace-with-search-api-key"
+# timeout = 5.0
+
+[qdrant]
+# Qdrant Cloud：https://cloud.qdrant.io 创建的集群。
+url = "https://replace-with-your-cluster.us-central1-0.gcp.cloud.qdrant.io"
+api_key = "replace-with-qdrant-api-key"
+collection = "star"
+
+[neo4j]
+# Neo4j Aura：https://console.neo4j.io 的实例。
+uri = "neo4j+s://replace-with-your-instance.databases.neo4j.io"
+username = "neo4j"
+password = "replace-with-neo4j-password"
+
+[proxy]
+# 云端 Qdrant / Neo4j 默认走本地转发代理（Clash 等）。
+url = "http://127.0.0.1:7890"

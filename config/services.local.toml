@@ -1,0 +1,49 @@
+# 本地版 services 配置模板（可提交，占位密钥）。
+#
+# 用法：切到本地模式
+#   python scripts/switch_config.py local
+# 脚本会把本文件复制为 config/services.toml（gitignored 的生效文件）。
+#
+# 本地版含义：优先离线/本机服务。嵌入走本地 hash 或本地网关，
+# 向量库/图库默认内存或本机端点；云端服务不填 = 不启用。
+
+[embedding]
+# provider 取值：auto | openai | hash
+#   auto   = 配齐 base_url + api_key 才走云端，否则离线 hash 兜底
+#   hash   = 强制离线（本地版默认，零依赖）
+provider = "hash"
+
+# 若本机有 OpenAI 兼容网关（如 LM Studio / Ollama / vLLM），取消注释并填：
+# provider = "openai"
+# base_url = "http://localhost:8000/v1"
+# model = "local-embedding-model"
+# api_key = "replace-with-local-api-key"
+# dimension = 1024
+# batch_size = 10
+# timeout = 30.0
+
+[vision]
+# 本地识图模型名；留空 = 使用 provider 的 default_model。
+# model = "local-vision-model"
+
+[search]
+# 本地搜索网关（AnySearch / OpenAI 兼容）。留空 = 不启用联网搜索。
+# base_url = "http://localhost:9000/v1"
+# api_key = "replace-with-local-search-key"
+# timeout = 5.0
+
+[qdrant]
+# 本地 Qdrant（Docker 或本机安装）。留空 = 内存向量回退。
+# url = "http://127.0.0.1:6333"
+# api_key = ""
+# collection = "star"
+
+[neo4j]
+# 本地 Neo4j（Community 版 bolt 端口）。留空 = 内存图回退。
+# uri = "bolt://localhost:7687"
+# username = "neo4j"
+# password = "replace-with-local-neo4j-password"
+
+[proxy]
+# 本地转发代理（Clash 等）；本机回环地址绝不走代理。
+# url = "http://127.0.0.1:7890"
