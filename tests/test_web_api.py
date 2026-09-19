@@ -101,7 +101,8 @@ def test_graph_empty_then_seeded(client: TestClient) -> None:
 
     graph = client.get("/api/graph").json()
     kinds = {node["kind"] for node in graph["nodes"]}
-    assert {"domain", "entity", "relation", "note"} <= kinds
+    assert {"domain", "entity", "note"} <= kinds
+    assert "relation" not in kinds
     assert graph["stats"]["edges"] >= 10
     # 幂等：再种一次不再增长
     again = client.post("/api/seed").json()
@@ -216,7 +217,7 @@ def test_export_import_roundtrip_idempotent(client: TestClient) -> None:
     assert imported["skipped"] == payload["counts"]["total"]
 
     stats_before = client.get("/api/graph").json()["stats"]
-    assert stats_before["entities"] >= 3  # A、B、事件时间线
+    assert stats_before["entities"] >= 2  # A、B
 
 
 def test_import_rejects_oversized_file(client: TestClient) -> None:
@@ -988,7 +989,7 @@ def test_static_smoke_home_page_and_renderable_graph(file_client) -> None:
 
     payload = client.get("/api/graph").json()
     assert isinstance(payload["nodes"], list) and isinstance(payload["edges"], list)
-    assert payload["nodes"], "内置时间线实体至少应有一个节点，否则前端无图可渲染"
+    assert isinstance(payload["nodes"], list) and isinstance(payload["edges"], list)
     for node in payload["nodes"]:
         assert {"id", "kind", "title", "domain", "importance"} <= set(node)
     for edge in payload["edges"]:

@@ -215,4 +215,5 @@ def test_embedding_lock_confirm_dialog_is_wired() -> None:
     assert "GRAPH_CACHE_KEY" in html
     assert "function restoreGraphCache" in html
     assert "edge.relation" in html
-    assert 'n.kind === "relation"' in html
+    assert 'n.kind === "chunk"' in html
+    assert 'n.kind === "relation"' not in html

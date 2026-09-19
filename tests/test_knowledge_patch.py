@@ -364,17 +364,16 @@ def test_graph_projection_keeps_history_satellite_but_drops_stale_edge():
     )
 
     graph = build_graph(manager)
-    assert graph["stats"]["facts"] == 1
+    assert graph["stats"]["facts"] == 0
     assert graph["stats"]["historical_facts"] == 1
     stale_nodes = [node for node in graph["nodes"] if node["id"] == "relation:old"]
     assert stale_nodes == []
-    hubs = [node for node in graph["nodes"] if node["kind"] == "relation" and node["title"] == "余额"]
-    assert len(hubs) == 1
+    assert all(node["kind"] != "relation" for node in graph["nodes"])
     titles = {node["id"]: node["title"] for node in graph["nodes"]}
-    connected = {titles.get(edge["source"]) for edge in graph["edges"] if edge["target"] == hubs[0]["id"]}
-    assert "web" in connected
-    assert "0 元" in connected
-    assert "1 元" not in connected
+    edges = [edge for edge in graph["edges"] if edge["relation"] == "余额"]
+    assert len(edges) == 1
+    assert titles[edges[0]["source"]] == "web"
+    assert titles[edges[0]["target"]] == "0 元"
 
 
 def test_manual_and_extracted_facts_share_one_id_scheme():

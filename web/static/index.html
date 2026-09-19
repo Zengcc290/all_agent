@@ -1648,16 +1648,16 @@
       if (!star) continue;  // 孤儿节点由补种兜底恒星收容
       n.parentStar = star;
       const parentEntity = graph.byId.get(n.parent);
-      n.treeParent = (n.kind === "entity" || n.kind === "relation" || !parentEntity || parentEntity === n) ? star : parentEntity;
-      if (n.kind === "entity" || n.kind === "relation") { star.children.push(n); n.level = 2; }
+      n.treeParent = (!parentEntity || parentEntity === n) ? star : parentEntity;
+      if (n.kind === "entity" || n.kind === "chunk") { star.children.push(n); n.level = 2; }
       else { n.level = 3; }
       n.tierName = n.kind === "entity" ? "行星 (Planet)"
-        : n.kind === "relation" ? "行星·关系 (Relation)"
-        : { fact: "卫星·事实 (Moon)", chunk: "卫星·知识块 (Moon)", note: "卫星·档案 (Moon)", event: "卫星·事件 (Moon)" }[n.kind] || "卫星 (Moon)";
+        : n.kind === "chunk" ? "行星·原句 (Source)"
+        : { fact: "卫星·事实 (Moon)", note: "卫星·档案 (Moon)", event: "卫星·事件 (Moon)" }[n.kind] || "卫星 (Moon)";
     }
     // 4) 卫星挂载：parent 指向实体 → 该实体的 children；否则直接绕恒星
     for (const n of graph.nodes) {
-      if (n.kind === "domain" || n.kind === "entity" || n.kind === "relation") continue;
+      if (n.kind === "domain" || n.kind === "entity" || n.kind === "chunk") continue;
       const parentEntity = graph.byId.get(n.parent);
       if (parentEntity && parentEntity.kind === "entity") {
         parentEntity.children.push(n);
@@ -1695,13 +1695,13 @@
       }
     };
     for (const star of graph.stars) {
-      const entities = star.children.filter(c => c.kind === "entity" || c.kind === "relation");
+      const entities = star.children.filter(c => c.kind === "entity" || c.kind === "chunk");
       place(star, entities, 170, 130, 12, "entity");
       for (const ent of entities) {
         const moons = ent.children || [];
         place(ent, moons, 42, 26, 8, "moon");
       }
-      const stray = star.children.filter(c => c.kind !== "entity");
+      const stray = star.children.filter(c => c.kind !== "entity" && c.kind !== "chunk");
       place(star, stray, 150, 110, 10, "moon");
     }
     // 6) 扁平渲染数组（一次建好，每帧遍历零递归）
@@ -1911,9 +1911,15 @@
       const alpha = dimmed ? 0.04 : (isHot || inPath ? 0.9 : 0.16 + Math.min(0.2, (edge.confidence || 1) * 0.2));
       if (alpha <= 0.05) continue;
       ctx.save();
+      // 有向边：从 source 指向 target，箭头落在 target 一侧
+      const dx = pt.px - ps.px, dy = pt.py - ps.py;
+      const elen = Math.hypot(dx, dy) || 1;
+      const ux = dx / elen, uy = dy / elen;
+      const tipR = Math.max(3, (t.radius || 4) * zoom * 0.9);
+      const tipX = pt.px - ux * tipR, tipY = pt.py - uy * tipR;
       ctx.beginPath();
       ctx.moveTo(ps.px, ps.py);
-      ctx.quadraticCurveTo((ps.px + pt.px) / 2, (ps.py + pt.py) / 2, pt.px, pt.py);
+      ctx.quadraticCurveTo((ps.px + pt.px) / 2, (ps.py + pt.py) / 2, tipX, tipY);
       ctx.strokeStyle = inPath ? "rgba(125, 211, 252, 1)" : hexToRgba(s.color || "#38bdf8", alpha);
       ctx.lineWidth = inPath ? 2.6 : (isHot ? 2.2 : 1);
       if (inPath) {
@@ -1927,6 +1933,17 @@
         if (isHot) { ctx.shadowColor = s.color || "#38bdf8"; ctx.shadowBlur = 14; }
       }
       ctx.stroke();
+      // 箭头
+      const arrowSize = 5 + 2 * zoom;
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = inPath ? "rgba(125, 211, 252, 1)" : hexToRgba(s.color || "#38bdf8", alpha);
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(tipX - ux * arrowSize - uy * arrowSize * 0.5, tipY - uy * arrowSize + ux * arrowSize * 0.5);
+      ctx.lineTo(tipX - ux * arrowSize + uy * arrowSize * 0.5, tipY - uy * arrowSize - ux * arrowSize * 0.5);
+      ctx.closePath();
+      ctx.fill();
       if (!dimmed && edge.relation && (isHot || inPath || lodLevel() >= 2)) {
         const mx = (ps.px + pt.px) / 2;
         const my = (ps.py + pt.py) / 2;
@@ -2019,7 +2036,7 @@
       for (const n of visible) {
         if (labels >= 60) break;
         if (n.renderedRadius < 6 && n.kind !== "domain") continue;
-        if (n.kind === "chunk" || n.kind === "event") continue;  // 知识块/事件不标名
+        if (n.kind === "event") continue;  // 事件不标名；原句行星需要显示名称
         ctx.fillStyle = "#f1f5f9";
         ctx.font = `${Math.min(13, Math.max(9, 9 + zoom * 0.9))}px -apple-system, 'Microsoft YaHei', sans-serif`;
         ctx.textAlign = "center";

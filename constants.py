@@ -302,11 +302,8 @@ NEBULA_PALETTE = [
     "#a3e635",  # 黄绿
 ]
 
-#: 兜底领域名与内置「事件时间线」的域名/实体名/节点 ID。
+#: 兜底领域名。
 DEFAULT_DOMAIN = "未分类"
-TIMELINE_DOMAIN = "时间线"
-TIMELINE_ENTITY = "事件时间线"
-TIMELINE_ID = "ent:__timeline__"
 
 #: 星图节点文案截断长度（节点正文预览 / 事件标题 / 日期字符串）。
 NEBULA_CONTENT_PREVIEW_CHARS = 400

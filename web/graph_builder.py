@@ -2,12 +2,14 @@
 
 映射规则（与前端 web/static/index.html 的布局约定一致）：
 - kind=domain  → 恒星   （level 1，前端做星系定位）
-- kind=entity  → 行星   （level 2，绕所属领域公转）
-- kind=relation→ 行星   （谓词枢纽：同一关系名复用一个节点，实体连到它）
-- kind=fact    → 卫星   （多元观察才保留；二元关系走 relation 枢纽）
-- kind=chunk   → 卫星   （绕相关实体公转，同一原文只出现一次）
+- kind=entity  → 行星   （level 2，绕所属领域公转；全局同名同一个）
+- kind=chunk   → 行星   （原句：一个文档凝聚为一颗行星，挂领域下，含有向「提及」边连到全部相关实体）
+- kind=fact    → 卫星   （多元观察保留，挂主语实体下）
 - kind=note    → 卫星   （绕所属实体公转，不产生边）
-- kind=event   → 卫星   （挂在内置「事件时间线」实体下）
+- kind=event   → 卫星   （绕所属领域公转）
+
+关系不再作为节点：二元关系是一条有向边 source→target，relation 字段是谓词；
+时序观察把 event_at/cardinality=temporal 附在边上，同一实体的多条时序边并列保留。
 
 分类依据（按优先级）：
 1. metadata 同时含 subject/predicate/object → fact（语义三元组）
@@ -28,9 +30,6 @@ from constants import (
     NEBULA_DATE_CHARS,
     NEBULA_EVENT_TITLE_CHARS,
     NEBULA_PALETTE,
-    TIMELINE_DOMAIN,
-    TIMELINE_ENTITY,
-    TIMELINE_ID,
 )
 from memory import MemoryItem, MemoryManager
 from web.domain_classifier import classify_domain, majority_domain
@@ -102,7 +101,6 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
     fact_keys: set[tuple[str, str, str]] = set()
     chunk_to_doc: dict[str, str] = {}
     doc_meta: dict[str, dict[str, Any]] = {}
-    relation_ids: dict[str, str] = {}
     linked_pairs: set[tuple[str, str]] = set()
 
     def domain_node(name: str) -> str:
@@ -141,26 +139,6 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
         entity_ids[key] = node_id
         return node_id
 
-    def relation_node(predicate: str, *, domain: str = "") -> str:
-        key = (predicate or "关联").strip() or "关联"
-        if key in relation_ids:
-            return relation_ids[key]
-        node_id = f"rel:{key}"
-        domain_name = domain or DEFAULT_DOMAIN
-        node = _node(
-            node_id,
-            "relation",
-            key,
-            domain=domain_name,
-            importance=0.72,
-            parent=domain_node(domain_name),
-        )
-        node["color"] = "#f59e0b"
-        node["meta"]["predicate"] = key
-        nodes[node_id] = node
-        relation_ids[key] = node_id
-        return node_id
-
     def link_triple(
         subject: str,
         predicate: str,
@@ -175,21 +153,19 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
         fact_keys.add(triple)
         source_id = entity_node(subject, domain=domain)
         target_id = entity_node(obj, domain=domain)
-        hub_id = relation_node(predicate, domain=domain)
-        common = {"relation": predicate, **(extra or {})}
-        for endpoint_id, suffix in ((source_id, "s"), (target_id, "o")):
-            pair = (endpoint_id, hub_id)
-            if pair in linked_pairs:
-                continue
-            linked_pairs.add(pair)
-            edges.append(
-                {
-                    "id": f"edge:{hub_id}:{suffix}:{endpoint_id}",
-                    "source": endpoint_id,
-                    "target": hub_id,
-                    **common,
-                }
-            )
+        pair = (source_id, predicate, target_id)
+        if pair in linked_pairs:
+            return
+        linked_pairs.add(pair)
+        edges.append(
+            {
+                "id": f"edge:{source_id}:{predicate}:{target_id}",
+                "source": source_id,
+                "target": target_id,
+                "relation": predicate,
+                **dict(extra or {}),
+            }
+        )
 
     def attach_doc_entities(doc_id: str | None, *names: object) -> None:
         if not doc_id or doc_id not in doc_meta:
@@ -201,13 +177,6 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
                 info["entity_set"].add(key_name)
                 info["entities"].append(key_name)
 
-
-    # 内置「事件时间线」实体：聊天/上传等事件都挂在这里。
-    nodes[TIMELINE_ID] = _node(
-        TIMELINE_ID, "entity", TIMELINE_ENTITY, domain=TIMELINE_DOMAIN,
-        importance=0.4, parent=domain_node(TIMELINE_DOMAIN),
-    )
-    entity_ids[TIMELINE_ENTITY] = TIMELINE_ID
 
     # --- 第一遍：显式实体（种子数据里的 kind=entity 项） ---
     explicit_entities = [item for item in items if item.metadata.get("kind") == "entity"]
@@ -255,13 +224,34 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
         sqlite_facts.append(item)
 
 
+    # --- 实体→文档：被提取的实体进入其所属文档的 entity_set（即便还没有任何关系边）---
+    # 这样原句行星才能用「提及」边连到全部被提取实体，而不只是连到有二元关系的实体。
+    for item in items:
+        md = item.metadata
+        if md.get("kind") != "entity":
+            continue
+        doc_id = md.get("document_id") or chunk_to_doc.get(str(md.get("chunk_id") or ""))
+        if not doc_id:
+            doc_id = next(
+                (
+                    chunk_to_doc[source_id]
+                    for source_id in md.get("source_ids") or []
+                    if source_id in chunk_to_doc
+                ),
+                None,
+            )
+        name = md.get("canonical_name") or md.get("title") or item.content
+        attach_doc_entities(str(doc_id) if doc_id else None, name)
+
     # --- 实体备注（kind=note）：挂到所属实体的卫星 ---
     for item in items:
         md = item.metadata
         if md.get("kind") != "note":
             continue
-        parent = entity_ids.get((md.get("entity") or "").strip(), TIMELINE_ID)
-        domain = md.get("domain") or nodes[parent]["domain"]
+        parent = entity_ids.get((md.get("entity") or "").strip())
+        domain = md.get("domain") or (nodes[parent]["domain"] if parent else DEFAULT_DOMAIN)
+        if parent is None:
+            parent = domain_node(domain)
         nodes[item.id] = _node(
             item.id, "note", md.get("title") or "档案", content=item.content,
             domain=domain, date=_date(item), importance=item.importance,
@@ -283,8 +273,8 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
             continue
         nodes[item.id] = _node(
             item.id, "event", md.get("title") or item.content[:NEBULA_EVENT_TITLE_CHARS], content=item.content,
-            domain=TIMELINE_DOMAIN, date=_date(item), importance=item.importance,
-            parent=TIMELINE_ID,
+            domain=md.get("domain") or DEFAULT_DOMAIN, date=_date(item), importance=item.importance,
+            parent=domain_node(md.get("domain") or DEFAULT_DOMAIN),
         )
 
     # Relationship topology comes from Neo4j/in-memory graph, not from SQLite
@@ -473,8 +463,6 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
 
     for document_id, info in unique_docs.values():
         domain = majority_domain(info["domains"]) or DEFAULT_DOMAIN
-        related = [name for name in info["entities"] if name in entity_ids]
-        parent = entity_ids[related[0]] if related else domain_node(domain)
         node_id = f"doc:{document_id}"
         if node_id in nodes:
             continue
@@ -489,31 +477,32 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
             domain=domain,
             date=str(info["date"]),
             importance=float(info["importance"] or 0.5),
-            parent=parent,
+            parent=domain_node(domain),
             source=str(info["source"] or "") or None,
         )
         node["meta"]["document_id"] = document_id
         node["meta"]["related_entities"] = list(info["entities"])
         nodes[node_id] = node
-        for name in related:
-            endpoint = entity_ids[name]
-            pair = (endpoint, node_id)
+        # 原句行星必须和被提取的全部实体有边：即便某个实体还没有任何关系边，
+        # 也要通过「提及」连到原句，避免实体在图上变成孤儿。
+        for name in info["entities"]:
+            endpoint = entity_ids.get(name)
+            if endpoint is None:
+                continue
+            pair = (node_id, endpoint)
             if pair in linked_pairs:
                 continue
             linked_pairs.add(pair)
             edges.append(
                 {
                     "id": f"edge:{node_id}:{endpoint}",
-                    "source": endpoint,
-                    "target": node_id,
-                    "relation": "来源",
+                    "source": node_id,
+                    "target": endpoint,
+                    "relation": "提及",
                 }
             )
 
     node_list = list(nodes.values())
-    kinds = {"domain": 0, "entity": 0, "relation": 0, "fact": 0, "chunk": 0, "note": 0, "event": 0}
-    for node in node_list:
-        kinds[node["kind"]] = kinds.get(node["kind"], 0) + 1
     kinds = {"domain": 0, "entity": 0, "fact": 0, "chunk": 0, "note": 0, "event": 0}
     for node in node_list:
         kinds[node["kind"]] = kinds.get(node["kind"], 0) + 1
@@ -527,8 +516,8 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
         "stats": {
             "domains": kinds["domain"],
             "entities": kinds["entity"],
-            "relations": kinds.get("relation", 0),
-            "facts": kinds["fact"] + kinds.get("relation", 0),
+            "relations": len(edges),
+            "facts": kinds["fact"],
             "chunks": kinds["chunk"],
             "notes": kinds["note"],
             "events": kinds["event"],

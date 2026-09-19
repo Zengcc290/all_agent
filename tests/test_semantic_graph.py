@@ -237,7 +237,7 @@ def test_graph_payload_carries_entity_aliases(manager: MemoryManager):
 
 
 def test_document_is_unique_satellite_of_related_entity(manager: MemoryManager):
-    """One source document hangs next to its entities once; no cloned 文档 planets."""
+    """One source document becomes its own planet once; connected to entities."""
 
     pipeline = RAGPipeline(manager, extractor=GraphExtractor())
     pipeline.ingest(Document("Qdrant用于语义检索。", id="doc-sat", metadata={"filename": "note.txt"}))
@@ -249,26 +249,30 @@ def test_document_is_unique_satellite_of_related_entity(manager: MemoryManager):
     assert all(node["kind"] == "chunk" for node in doc_nodes)
     assert all(not str(node["title"]).startswith("文档：") for node in payload["nodes"] if node["kind"] == "entity")
     qdrant = next(node for node in payload["nodes"] if node["kind"] == "entity" and node["title"] == "Qdrant")
-    parents = {node["parent"] for node in doc_nodes}
-    assert qdrant["id"] in parents
-    hub = next(node for node in payload["nodes"] if node["kind"] == "relation" and node["title"] == "用于")
-    assert any(edge["target"] == hub["id"] and edge["source"] == qdrant["id"] for edge in payload["edges"])
-    assert any(edge["relation"] == "用于" for edge in payload["edges"])
+    semantic = next(node for node in payload["nodes"] if node["kind"] == "entity" and node["title"] == "语义检索")
+    doc = doc_nodes[0]
+    # 原句作为独立行星挂在领域下
+    assert doc["parent"] == f"dom:{doc['domain']}"
+    # 提及边：原句 -> 所有实体
+    mentions = [edge for edge in payload["edges"] if edge["source"] == doc["id"]]
+    assert {edge["target"] for edge in mentions} >= {qdrant["id"], semantic["id"]}
+    assert all(edge["relation"] == "提及" for edge in mentions)
+    # 二元关系走有向边，不再有关系节点
+    assert all(node["kind"] != "relation" for node in payload["nodes"])
+    used = [edge for edge in payload["edges"] if edge["relation"] == "用于"]
+    assert len(used) == 1
+    assert used[0]["source"] == qdrant["id"] and used[0]["target"] == semantic["id"]
 
 
-def test_same_predicate_reuses_one_relation_node(manager: MemoryManager):
-    """小猫-小狗 与 小兔-小羊 共用同一个「亲兄弟」关系行星。"""
+def test_same_predicate_is_directed_edges_between_entities(manager: MemoryManager):
+    """小猫-小狗 与 小兔-小羊 用两条有向「亲兄弟」边，不再生成关系节点。"""
 
     manager.semantic.add_fact("小猫", "亲兄弟", "小狗", confidence=0.9)
     manager.semantic.add_fact("小兔", "亲兄弟", "小羊", confidence=0.9)
     payload = build_graph(manager)
-    hubs = [node for node in payload["nodes"] if node["kind"] == "relation" and node["title"] == "亲兄弟"]
-    assert len(hubs) == 1
-    hub_id = hubs[0]["id"]
+    assert all(node["kind"] != "relation" for node in payload["nodes"])
+    edges = [edge for edge in payload["edges"] if edge["relation"] == "亲兄弟"]
+    assert len(edges) == 2
     titles = {node["id"]: node["title"] for node in payload["nodes"]}
-    connected = {
-        titles.get(edge["source"])
-        for edge in payload["edges"]
-        if edge["target"] == hub_id
-    }
-    assert connected >= {"小猫", "小狗", "小兔", "小羊"}
+    pairs = {(titles.get(edge["source"]), titles.get(edge["target"])) for edge in edges}
+    assert pairs == {("小猫", "小狗"), ("小兔", "小羊")}
