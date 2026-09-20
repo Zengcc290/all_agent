@@ -762,26 +762,43 @@ class DeletionProposalStore:
             )
 
     def confirm(self, proposal_id: str, token: str) -> DeletionProposal:
-        """Mark a pending, unexpired proposal confirmed (token must match).
+        """Atomically mark a pending, unexpired proposal confirmed.
 
-        Returns the confirmed proposal; raises ``ValueError`` for a missing,
-        expired, already-confirmed or wrongly-tokened proposal — fail closed.
+        The state flip runs as a single guarded UPDATE so concurrent callers
+        cannot both observe ``pending`` and confirm twice: only one row change
+        wins. Raises ``ValueError`` for a missing, expired, already-confirmed
+        or wrongly-tokened proposal — fail closed.
         """
 
-        proposal = self.get(proposal_id)
-        if proposal is None:
-            raise ValueError(f"unknown proposal: {proposal_id}")
-        if proposal.status == "expired":
-            raise ValueError("proposal has expired")
-        if proposal.status != "pending":
-            raise ValueError(f"proposal is not pending (status={proposal.status})")
-        if not token or token != proposal.confirm_token:
+        if not token:
             raise ValueError("confirmation token does not match")
         confirmed_at = utc_now().isoformat()
-        self._set_status(proposal_id, "confirmed", confirmed_at)
-        proposal.status = "confirmed"
-        proposal.confirmed_at = confirmed_at
-        return proposal
+        with self._repo._connection_scope() as connection:
+            cursor = connection.execute(
+                "UPDATE delete_proposals SET status = 'confirmed', confirmed_at = ? "
+                "WHERE proposal_id = ? AND status = 'pending' AND confirm_token = ?",
+                (confirmed_at, proposal_id, token),
+            )
+            if cursor.rowcount == 0:
+                row = connection.execute(
+                    "SELECT * FROM delete_proposals WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"unknown proposal: {proposal_id}")
+                current = self._decode(row)
+                if current.status == "expired":
+                    raise ValueError("proposal has expired")
+                if current.status != "pending" or token != current.confirm_token:
+                    raise ValueError("confirmation token does not match")
+                raise ValueError(f"proposal is not pending (status={current.status})")
+            proposal = self._decode(
+                connection.execute(
+                    "SELECT * FROM delete_proposals WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
+            )
+            proposal.status = "confirmed"
+            proposal.confirmed_at = confirmed_at
+            return proposal
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> DeletionProposal:

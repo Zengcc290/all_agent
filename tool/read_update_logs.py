@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from constants import UPDATE_LOG_READ_RANGE_MAX
 from core import BaseTool, ToolSpec
 from core.update_log import UpdateLogRepository
 from tool.read_update_log import ReadUpdateLogOutput
@@ -34,6 +35,11 @@ class ReadUpdateLogsInput(BaseModel):
     def validate_range(self) -> ReadUpdateLogsInput:
         if self.end_id is not None and self.end_id < self.start_id:
             raise ValueError("end_id must be greater than or equal to start_id")
+        if self.end_id is not None and self.end_id - self.start_id + 1 > UPDATE_LOG_READ_RANGE_MAX:
+            raise ValueError(
+                "requested range exceeds the maximum of "
+                f"{UPDATE_LOG_READ_RANGE_MAX} records per call"
+            )
         return self
 
 
@@ -58,9 +64,10 @@ class ReadUpdateLogsTool(BaseTool):
     spec = ToolSpec(
         name="system.read_update_logs",
         description=(
-            "Read a contiguous range of project update-log records. The tool loops "
-            "over SQLite one ID at a time internally, then returns the records in "
-            "ascending order so a complete audit needs only one model tool call."
+            "Read a contiguous range of project update-log records (at most "
+            f"{UPDATE_LOG_READ_RANGE_MAX} per call). The tool loops over SQLite one "
+            "ID at a time internally, then returns the records in ascending order "
+            "so a complete audit needs only a few model tool calls."
         ),
         version="1.0",
         input_model=ReadUpdateLogsInput,

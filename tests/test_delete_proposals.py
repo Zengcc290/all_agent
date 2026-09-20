@@ -153,3 +153,45 @@ def test_propose_delete_tool_without_candidates_returns_note(manager: MemoryMana
 
     assert output.proposal_id == ""
     assert "没有检索到任何匹配" in output.note
+
+
+def test_concurrent_confirmation_confirms_exactly_once(manager, store):
+    """并发确认：原子状态翻转，只有一个调用能赢，且不会重复删/重复审计。"""
+
+    import threading
+
+    from memory.storage.document_repo import execute_deletion
+
+    item = manager.semantic.add_fact("并发", "确认", "原子", confidence=0.9)
+    proposal = store.create(requested_by="llm", reason="并发测试", item_ids=[item.id])
+    barrier = threading.Barrier(2)
+    results: list[dict] = []
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            results.append(execute_deletion(proposal.proposal_id, proposal.confirm_token, manager))
+        except Exception as exc:  # noqa: BLE001 - 并发测试收集异常
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert len(results) == 2
+    assert {result["already_confirmed"] for result in results} == {True, False}
+    deleted_sets = {tuple(result["deleted"]) for result in results}
+    assert (item.id,) in deleted_sets
+    assert () in deleted_sets
+    assert store.get(proposal.proposal_id).status == "confirmed"
+    assert manager.get(item.id) is None
+    audits = [
+        memory
+        for memory in manager.list(memory_type="episodic")
+        if memory.metadata.get("kind") == "deletion_audit"
+    ]
+    assert len(audits) == 1

@@ -141,3 +141,32 @@ async def test_update_log_tool_requires_only_generation_confirmation():
     assert allowed.results[0].ok
     assert allowed.results[0].data["update_id"] == 1
     repository.close()
+
+
+def test_read_update_logs_rejects_ranges_larger_than_the_safety_limit(tmp_path):
+    from constants import UPDATE_LOG_READ_RANGE_MAX
+
+    repository = UpdateLogRepository(tmp_path / "updates.sqlite3")
+    tool = ReadUpdateLogsTool(repository)
+
+    with pytest.raises(ValueError, match="exceeds the maximum"):
+        tool.execute(
+            ReadUpdateLogsInput(
+                start_id=1, end_id=UPDATE_LOG_READ_RANGE_MAX + 1
+            )
+        )
+
+
+def test_read_update_logs_accepts_range_at_the_safety_limit(tmp_path):
+    from constants import UPDATE_LOG_READ_RANGE_MAX
+
+    repository = UpdateLogRepository(tmp_path / "updates.sqlite3")
+    for _ in range(UPDATE_LOG_READ_RANGE_MAX):
+        repository.append(**_payload(), system_name="TestOS")
+    tool = ReadUpdateLogsTool(repository)
+
+    result = tool.execute(
+        ReadUpdateLogsInput(start_id=1, end_id=UPDATE_LOG_READ_RANGE_MAX)
+    )
+
+    assert len(result.records) == UPDATE_LOG_READ_RANGE_MAX
