@@ -316,17 +316,21 @@ class DocumentRepository:
             raise ValueError("page must be a positive integer")
         if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
             raise ValueError("page_size must be a positive integer")
-        where = (
-            "WHERE (? = '' OR EXISTS (SELECT 1 FROM json_each(documents.tags) WHERE json_each.value = ?))"
-            "  AND (? = '' OR status = ?)"
-        )
         params = (tag, tag, status, status)
         with self._connection_scope() as connection:
             total = connection.execute(
-                f"SELECT count(*) AS n FROM documents {where}", params
+                "SELECT count(*) AS n FROM documents "
+                "WHERE (? = '' OR EXISTS (SELECT 1 FROM json_each(documents.tags) "
+                "WHERE json_each.value = ?))"
+                "  AND (? = '' OR status = ?)",
+                params,
             ).fetchone()["n"]
             rows = connection.execute(
-                f"SELECT * FROM documents {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM documents "
+                "WHERE (? = '' OR EXISTS (SELECT 1 FROM json_each(documents.tags) "
+                "WHERE json_each.value = ?))"
+                "  AND (? = '' OR status = ?) "
+                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (*params, page_size, (page - 1) * page_size),
             ).fetchall()
         return [self._decode_document(row) for row in rows], int(total)

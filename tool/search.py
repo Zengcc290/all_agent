@@ -291,7 +291,7 @@ class SearchTool(BaseTool):
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(request, timeout=self.timeout) as response:  # nosec B310 - endpoint 已由 _search_endpoint 强制 http/https
                 raw_body = _read_response_body(response)
         except HTTPError as exc:
             # Very old AnySearch-compatible gateways exposed a GET endpoint.
@@ -309,7 +309,7 @@ class SearchTool(BaseTool):
                 },
                 method="GET",
             )
-            with urlopen(legacy_request, timeout=self.timeout) as response:
+            with urlopen(legacy_request, timeout=self.timeout) as response:  # nosec B310 - 继承 _search_endpoint 的 http/https 校验
                 raw_body = _read_response_body(response)
         try:
             payload = json.loads(

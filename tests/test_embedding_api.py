@@ -423,3 +423,16 @@ def test_services_toml_configuration_selects_the_openai_path(tmp_path, monkeypat
     assert embedding.api_key == "sf-key"
     assert embedding.multimodal is True
     assert embedding.dimension == 0      # 留空 = 首次响应自动识别
+
+
+def test_rejects_non_http_base_url():
+    for bad_url in ("file:///etc/passwd", "ftp://example.com/v1", "not-a-url", "//example.com/v1"):
+        with pytest.raises(ValueError, match="HTTP\\(S\\)"):
+            APIEmbedding(api_key="k", base_url=bad_url)
+
+
+def test_request_time_rejects_non_http_base_url():
+    instance = APIEmbedding(api_key="k", base_url=TEST_BASE_URL)
+    instance.base_url = "file:///etc/passwd"
+    with pytest.raises(ValueError, match="HTTP\\(S\\)"):
+        instance.embed("x")

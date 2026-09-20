@@ -27,6 +27,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlsplit
 
 from constants import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
@@ -152,6 +153,9 @@ class APIEmbedding(BaseEmbedding):
             raise ValueError("model must be a non-empty string")
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("base_url must be a non-empty string (config/services.toml [embedding].base_url)")
+        parsed_base_url = urlsplit(base_url.strip())
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
         if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
             raise ValueError("dimension must be a positive integer")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
@@ -323,6 +327,9 @@ def _request(embedding: APIEmbedding, values: list[Any]) -> Any:
         if callable(getattr(getattr(client, "embeddings", None), "create", None)):
             return client.embeddings.create(input=values, model=embedding.model)
         raise TypeError("client must be callable or expose embed()/embeddings.create()")
+    parsed_endpoint = urlsplit(embedding.base_url)
+    if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
+        raise ValueError("embedding base_url must be an absolute HTTP(S) URL")
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         f"{embedding.base_url}/embeddings",
@@ -334,7 +341,8 @@ def _request(embedding: APIEmbedding, values: list[Any]) -> Any:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=embedding.timeout) as response:
+        with urllib.request.urlopen(request, timeout=embedding.timeout) as response:  # nosec B310 - base_url 已强制 http/https
+
             try:
                 body = response.read(EMBEDDING_RESPONSE_MAX_BYTES + 1)
             except TypeError:
