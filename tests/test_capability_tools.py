@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from conftest import HashEmbedding
@@ -22,7 +23,7 @@ from constants import WEB_DOCUMENTS_PAGE_SIZE_MAX
 from core import ToolRegistry, discover_tools
 from memory import MemoryConfig, MemoryManager
 from memory.base import MemoryType
-from memory.rag import Document, RAGPipeline
+from memory.rag import Document, ExtractionResult, RAGPipeline
 from memory.rag.knowledge import EntityResolver
 from memory.storage.document_repo import DocumentRecord
 from memory.storage.vector import InMemoryVectorStore
@@ -68,6 +69,7 @@ from tool.import_knowledge import (
     import_items,
     parse_import_payload,
 )
+from tool.ingest_image import TEXT_ONLY_WARNING, IngestImageInput, IngestImageTool
 from tool.multi_recall import (
     MultiRecallInput,
     MultiRecallTool,
@@ -95,6 +97,9 @@ from tool.reconcile import (
 from tool.repair_drift import RepairDriftInput, RepairDriftTool, repair_drift
 from tool.seed_knowledge import SEED_MARK, SeedKnowledgeInput, SeedKnowledgeTool, seed
 
+#: 图片入库用例用的最小 PNG 头（内容由抽取器解释，不需要真图片）。
+PNG_BYTES = b"\x89PNG\r\n\x1a\nimage"
+
 CAPABILITY_TOOLS = (
     "knowledge.hybrid_index",
     "knowledge.hybrid_recall",
@@ -113,6 +118,7 @@ CAPABILITY_TOOLS = (
     "knowledge.document_revectorize",
     "knowledge.add_fact",
     "knowledge.seed",
+    "knowledge.ingest_image",
 )
 
 
@@ -216,6 +222,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         DocumentRevectorizeTool().spec,
         AddFactTool().spec,
         SeedKnowledgeTool().spec,
+        IngestImageTool().spec,
     )
 
     assert {spec.name for spec in read_tools} == {
@@ -239,6 +246,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.document_revectorize",
         "knowledge.add_fact",
         "knowledge.seed",
+        "knowledge.ingest_image",
     }
     assert all(spec.side_effect == "write" for spec in write_tools)
 
@@ -843,6 +851,53 @@ def test_document_revectorize_tool_only_touches_that_document(drift_pipeline) ->
     )
     with pytest.raises(ValueError, match="没有分块"):
         revectorize_document(manager, repository, "doc-empty")
+
+
+def test_ingest_image_tool_stores_payload_and_reads_the_file(manager, tmp_path, monkeypatch) -> None:
+    """图片入库：按路径读文件 → 感知记忆留下原始字节 → 视觉抽取器拿到图片与媒体类型。"""
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    image_path = tmp_path / "camera.png"
+    image_path.write_bytes(PNG_BYTES)
+    seen: list[tuple[Any, ...]] = []
+
+    class Extractor:
+        def extract(self, text, *, metadata=None, graph_context="", image=None, mime_type=""):
+            seen.append((text, metadata, image, mime_type))
+            return ExtractionResult()
+
+    pipeline = RAGPipeline(manager, extractor=Extractor())
+    tool = IngestImageTool(pipeline=pipeline)
+
+    output = tool.execute(
+        IngestImageInput(
+            path=str(image_path),
+            text="电脑在书桌上",
+            captured_at="2025-01-01T13:00:00+00:00",
+        )
+    )
+
+    item = manager.get(output.item_id)
+    assert item is not None
+    assert item.payload == PNG_BYTES
+    assert item.modality == "image"
+    assert output.modality == "image"
+    assert output.extraction.modality == "image"
+    # 媒体类型按扩展名推断（调用方没填 mime_type）
+    assert seen[0][3] == "image/png"
+    assert seen[0][2] == PNG_BYTES
+    assert pipeline.last_ingest_report["modality"] == "image"
+    # 非 VL 嵌入必须诚实提示，而不是假装多模态
+    assert output.extraction.multimodal_embedding is False
+    assert output.warning == TEXT_ONLY_WARNING
+
+    # 参数与文件错误如实报错，不静默成功
+    with pytest.raises(LookupError, match="图片文件不存在"):
+        tool.execute(IngestImageInput(path=str(tmp_path / "nope.png")))
+    bad = tmp_path / "note.txt"
+    bad.write_text("不是图片", encoding="utf-8")
+    with pytest.raises(ValueError, match="image media type"):
+        tool.execute(IngestImageInput(path=str(bad), mime_type="text/plain"))
 
 
 def test_add_fact_tool_writes_the_truth_row_and_the_graph_edge(manager) -> None:

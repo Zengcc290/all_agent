@@ -73,6 +73,7 @@ from tool.export_knowledge import export_filename, export_payload
 from tool.graph_snapshot import build_graph
 from tool.hybrid_recall import hybrid_recall
 from tool.import_knowledge import import_items, parse_import_payload
+from tool.ingest_image import ingest_image
 from tool.reconcile import fact_items, reconcile_report
 from tool.repair_drift import repair_drift
 from tool.seed_knowledge import seed
@@ -600,8 +601,10 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         }
         try:
             guard_embedding(confirm_rebuild=confirm_rebuild)
-            item = app.state.pipeline.ingest_media(
-                image,
+            # 图片入库的唯一实现在 tool/ingest_image.py（工具名 knowledge.ingest_image）。
+            result = ingest_image(
+                app.state.pipeline,
+                image=image,
                 text=text,
                 mime_type=mime_type,
                 metadata=metadata,
@@ -614,18 +617,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 raise HTTPException(status_code=422, detail=f"图片入库参数无效：{exc}") from exc
             raise
         invalidate_graph()
-        report = dict(app.state.pipeline.last_ingest_report)
-        return {
-            "ok": True,
-            "item_id": item.id,
-            "modality": "image",
-            "extraction": report,
-            "warning": (
-                "当前 embedding 不是 VL 模型，图片已留存且已识图，但向量只使用文字说明。"
-                if not report.get("multimodal_embedding")
-                else ""
-            ),
-        }
+        return {"ok": True, **result}
 
     # ------------------------------------------------------------------
     # 播种 / 导出 / 导入（课设硬性要求）

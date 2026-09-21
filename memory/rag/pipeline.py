@@ -49,7 +49,13 @@ class RetrievedChunk:
         return cls(result.item.content, result.score, result.item.id, result.item.metadata)
 
 
-def _accepts_parameter(extractor: KnowledgeExtractor, name: str) -> bool:
+def accepts_parameter(extractor: KnowledgeExtractor, name: str) -> bool:
+    """True when ``extractor.extract`` accepts ``name`` (or ``**kwargs``).
+
+    抽取器协议自省：图片入库（``tool/ingest_image.py``）与文本入库共用这一处判定，
+    所以它是公开的——不写第二份 ``inspect.signature`` 逻辑。
+    """
+
     try:
         parameters = inspect.signature(extractor.extract).parameters
     except (TypeError, ValueError):
@@ -67,7 +73,7 @@ def _accepts_graph_context(extractor: KnowledgeExtractor) -> bool:
     working; only implementations that opt in receive ``graph_context``.
     """
 
-    return _accepts_parameter(extractor, "graph_context")
+    return accepts_parameter(extractor, "graph_context")
 
 
 def _document_tags(metadata: Mapping[str, Any]) -> list[str]:
@@ -248,75 +254,19 @@ class RAGPipeline:
     ) -> MemoryItem:
         """Index one image and materialize vision-extracted n-ary observations.
 
-        The image bytes are the canonical perceptual payload and are embedded by
-        a VL-capable embedding backend. Knowledge graph edges come only from the
-        structured vision extractor, never from vector similarity.
+        实现已工具化（``tool/ingest_image.py``，工具名 ``knowledge.ingest_image``）；
+        这里保留薄委托，因为「图片入库」在本类上是一个公开入口（多模态测试与
+        Web 端点都用它），而规则细节（锁闸门顺序、抽取失败不回滚）只有一处实现。
         """
 
-        if not isinstance(image, bytes) or not image:
-            raise ValueError("image must be non-empty bytes")
-        if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
-            raise ValueError("mime_type must be an image media type")
-        details = dict(metadata or {})
-        details.setdefault("source", details.get("filename") or "图片入库")
-        details["modality"] = "image"
-        content = text.strip() if isinstance(text, str) else ""
-        if not content:
-            content = str(details.get("filename") or "图片观察")
-        apply_embedding_lock(self.manager, self.document_repo())
-        item = self.manager.add(
-            content,
-            memory_type=MemoryType.PERCEPTUAL,
-            metadata=details,
-            payload=image,
-            modality="image",
-            timestamp=details.get("captured_at") or None,
+        from tool.ingest_image import ingest_image
+
+        result = ingest_image(
+            self, image=image, text=text, mime_type=mime_type, metadata=dict(metadata or {})
         )
-        report = {
-            "chunks": 1,
-            "domains": [],
-            "entities": 0,
-            "relations": 0,
-            "superseded": 0,
-            "retracted": 0,
-            "skipped_relations": 0,
-            "errors": [],
-            "modality": "image",
-            "multimodal_embedding": bool(
-                getattr(self.manager.embedding, "multimodal", False)
-            ),
-        }
-        if self.auto_extract:
-            try:
-                resolver = EntityResolver(self.manager)
-                graph_context = build_graph_context(
-                    self.manager, content, resolver=resolver
-                )
-                kwargs: dict[str, Any] = {"metadata": details}
-                if _accepts_parameter(self.extractor, "graph_context"):
-                    kwargs["graph_context"] = graph_context
-                if _accepts_parameter(self.extractor, "image"):
-                    kwargs.update({"image": image, "mime_type": mime_type})
-                extraction = self.extractor.extract(content, **kwargs)
-                materialized = materialize_extraction(
-                    self.manager,
-                    extraction,
-                    source_item=item,
-                    source_metadata=details,
-                    resolver=resolver,
-                )
-                for key in (
-                    "entities",
-                    "relations",
-                    "superseded",
-                    "retracted",
-                    "skipped_relations",
-                ):
-                    report[key] = materialized[key]
-                report["domains"] = [materialized["domain"]]
-            except Exception as exc:  # noqa: BLE001 - keep indexed source on extraction failure
-                report["errors"].append(f"{type(exc).__name__}: {exc}")
-        self.last_ingest_report = report
+        item = self.manager.get(result["item_id"])
+        if item is None:  # pragma: no cover - add() 刚写入，取不到说明库被外部改动
+            raise RuntimeError(f"图片已入库但读不回：{result['item_id']}")
         return item
 
     def ingest_source(
