@@ -36,7 +36,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from constants import (
-    DEFAULT_DOMAIN,
     LOCALHOST,
     MAX_UPLOAD_BYTES,
     RAG_CHUNK_OVERLAP,
@@ -66,6 +65,7 @@ from memory.embedding_lock import (
 )
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
+from tool.add_fact import add_fact as write_fact
 from tool.document_get import get_document as document_payload
 from tool.document_list import list_documents as list_documents_payload
 from tool.document_revectorize import revectorize_document as revectorize_document_payload
@@ -75,9 +75,9 @@ from tool.hybrid_recall import hybrid_recall
 from tool.import_knowledge import import_items, parse_import_payload
 from tool.reconcile import fact_items, reconcile_report
 from tool.repair_drift import repair_drift
+from tool.seed_knowledge import seed
 
 from .ingest_queue import IngestJobQueue, job_to_dict
-from .seed import seed
 from .support import (
     SEARCH_TOOL_NAME,
     STATIC_DIR,
@@ -439,11 +439,14 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.post("/api/facts")
     def add_fact(body: FactBody) -> dict[str, Any]:
-        item = the_manager().semantic.add_fact(
-            body.subject,
-            body.predicate,
-            body.object,
-            metadata={"domain": body.domain or DEFAULT_DOMAIN, "note": body.note or ""},
+        # 事实写入的唯一实现在 tool/add_fact.py（工具名 knowledge.add_fact）。
+        item = write_fact(
+            the_manager(),
+            subject=body.subject,
+            predicate=body.predicate,
+            object=body.object,
+            domain=body.domain or "",
+            note=body.note or "",
             confidence=body.confidence,
         )
         invalidate_graph()

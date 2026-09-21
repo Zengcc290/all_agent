@@ -43,7 +43,6 @@ LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
 STATIC_DIR = WEB_DIR / "static"
-SEED_FILE = WEB_DIR / "seed_data.json"
 
 #: 统一记忆库路径：Web API 与 Agent 工具都读 memory.base.default_sqlite_path()
 #: （单一事实来源；``MEMORY_DB_PATH`` 是唯一保留的路径覆盖入口）。

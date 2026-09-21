@@ -26,6 +26,7 @@ from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityResolver
 from memory.storage.document_repo import DocumentRecord
 from memory.storage.vector import InMemoryVectorStore
+from tool.add_fact import AddFactInput, AddFactTool, add_fact
 from tool.document_get import DocumentGetInput, DocumentGetTool, get_document
 from tool.document_list import DocumentListInput, DocumentListTool, list_documents
 from tool.document_revectorize import (
@@ -92,6 +93,7 @@ from tool.reconcile import (
     reconcile_report,
 )
 from tool.repair_drift import RepairDriftInput, RepairDriftTool, repair_drift
+from tool.seed_knowledge import SEED_MARK, SeedKnowledgeInput, SeedKnowledgeTool, seed
 
 CAPABILITY_TOOLS = (
     "knowledge.hybrid_index",
@@ -109,6 +111,8 @@ CAPABILITY_TOOLS = (
     "knowledge.document_list",
     "knowledge.document_get",
     "knowledge.document_revectorize",
+    "knowledge.add_fact",
+    "knowledge.seed",
 )
 
 
@@ -190,7 +194,7 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """只读类免确认（召回/对账/导出/分类/孤儿/星图/文档读），写入类必须确认（索引/节点/自愈/导入/提案/重嵌入）。"""
+    """只读类免确认（召回/对账/导出/分类/孤儿/星图/文档读），写入类必须确认（索引/节点/自愈/导入/提案/重嵌入/事实/播种）。"""
 
     read_tools = (
         HybridRecallTool().spec,
@@ -210,6 +214,8 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         ImportKnowledgeTool().spec,
         ProposeCleanupTool().spec,
         DocumentRevectorizeTool().spec,
+        AddFactTool().spec,
+        SeedKnowledgeTool().spec,
     )
 
     assert {spec.name for spec in read_tools} == {
@@ -231,6 +237,8 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.import",
         "knowledge.propose_cleanup",
         "knowledge.document_revectorize",
+        "knowledge.add_fact",
+        "knowledge.seed",
     }
     assert all(spec.side_effect == "write" for spec in write_tools)
 
@@ -835,3 +843,78 @@ def test_document_revectorize_tool_only_touches_that_document(drift_pipeline) ->
     )
     with pytest.raises(ValueError, match="没有分块"):
         revectorize_document(manager, repository, "doc-empty")
+
+
+def test_add_fact_tool_writes_the_truth_row_and_the_graph_edge(manager) -> None:
+    """事实写入：三元组进真值源，图里同步长出同 id 的边；领域留空落兜底值。"""
+
+    output = AddFactTool(manager=manager).execute(
+        AddFactInput(
+            subject="星云", predicate="部署于", object="本机", domain="项目", confidence=0.8
+        )
+    )
+
+    item = manager.get(output.item_id)
+    assert item is not None
+    assert item.metadata["subject"] == "星云"
+    assert item.metadata["object"] == "本机"
+    assert item.metadata["domain"] == "项目"
+    assert manager.graph_store.relation_memory_ids() == [output.item_id]
+    assert output.confidence == 0.8
+
+    # 领域/备注留空时与旧端点一致：落到兜底领域，置信度默认 1.0
+    fallback = AddFactTool(manager=manager).execute(
+        AddFactInput(subject="甲", predicate="是", object="乙")
+    )
+    assert manager.get(fallback.item_id).metadata["domain"] == "未分类"
+    assert fallback.confidence == 1.0
+    assert add_fact(manager, subject="丙", predicate="是", object="丁").metadata["domain"] == "未分类"
+
+
+def test_seed_tool_is_idempotent_and_its_rows_are_not_orphans(drift_pipeline, tmp_path) -> None:
+    """播种：写入实体/关系/备注并打 seed 标记；第二次幂等跳过；seed 实体不算孤儿。"""
+
+    seed_file = tmp_path / "seed.json"
+    seed_file.write_text(
+        json.dumps(
+            {
+                "entities": [{"name": "星云", "domain": "项目"}, {"name": "尘埃"}],
+                "relations": [
+                    {"subject": "星云", "predicate": "部署于", "object": "本机", "confidence": 0.9}
+                ],
+                "notes": [{"content": "一条备注", "entity": "星云", "title": "档案"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    manager = drift_pipeline.manager
+    tool = SeedKnowledgeTool(manager=manager)
+
+    first = tool.execute(SeedKnowledgeInput(path=str(seed_file)))
+    assert first.seeded is True
+    assert (first.entities, first.relations, first.notes) == (2, 1, 1)
+    assert first.source == str(seed_file)
+
+    # 幂等：第二次全部跳过，并回报库内已有条目数
+    second = tool.execute(SeedKnowledgeInput(path=str(seed_file)))
+    assert second.seeded is False
+    assert "已播种过" in second.reason
+    assert second.existing >= 1
+
+    # 缺文件时如实说明原因，而不是静默成功
+    missing = tool.execute(SeedKnowledgeInput(path=str(tmp_path / "nope.json")))
+    assert missing.seeded is False
+    assert "种子文件不存在" in missing.reason
+
+    # 跨工具契约：seed 实体即使完全孤立也不能被当成垃圾候选
+    seeded_entities = {
+        item.metadata.get("title")
+        for item in manager.list(memory_type="semantic")
+        if item.metadata.get("seed") == SEED_MARK and item.metadata.get("kind") == "entity"
+    }
+    assert seeded_entities == {"星云", "尘埃"}
+    # 「尘埃」没有任何关系/提及/备注，仅靠 seed 标记逃过孤儿判定
+    orphans = OrphanEntitiesTool(manager=manager).execute(OrphanEntitiesInput())
+    assert orphans.count == 0
+    assert seed(manager, seed_file)["seeded"] is False
