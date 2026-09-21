@@ -97,12 +97,6 @@ from .support import (
 )
 
 
-def _reject_json_constant(value: str) -> None:
-    """Reject ``NaN``/``Infinity`` so imported JSON stays strictly finite."""
-
-    raise ValueError(f"invalid JSON constant: {value}")
-
-
 class ReconcileBody(BaseModel):
     """对账修复请求；``repair`` 为空表示只报告不修。"""
 
