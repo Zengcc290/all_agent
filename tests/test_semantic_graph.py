@@ -13,7 +13,7 @@ from conftest import HashEmbedding
 from memory import MemoryConfig, MemoryManager, Neo4jGraphStore
 from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityCandidate, ExtractionResult, RelationCandidate
-from web.graph_builder import build_graph
+from tool.graph_snapshot import build_graph
 
 
 @pytest.fixture()

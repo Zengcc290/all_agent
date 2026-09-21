@@ -1,25 +1,33 @@
-"""本地主题领域分类器：把知识块/文档内容自动归类到恒星系（领域）。
+"""本地主题领域分类工具：把文本/文档归类到恒星系（领域）。
 
-设计目标：
-- 零依赖、纯规则，不联网、不消耗 LLM key（未配置 DASHSCOPE/DEEPSEEK key 也能用）；
-- 确定性：同样的文本永远得到同样的领域（跨进程稳定，可测试）；
-- 轻量：一次遍历关键词表 O(len(keywords))，万级节点构建时可忽略不计。
+为什么这是一个独立能力
+======================
 
-用法：:
+"这段内容属于哪个领域"是纯函数、零依赖、确定性（同文本永远同结果），却被三处复用：
+星云图把知识块挂到领域恒星上、文档按多数领域归属、以及图检索往提示词里注入已知领域清单。
+原先它藏在 ``web/domain_classifier.py``（Web 层的一个私有模块），Agent 无法调用；
+现在它是 ``knowledge.classify_domain``，Web 层与记忆层都从同一份实现取用。
 
-    from web.domain_classifier import classify_domain
-    domain = classify_domain("Python 的函数与变量", title="c语言笔记.txt")
+设计约束（保持原样，未做改动）
+==============================
 
-返回 ``KNOWN_DOMAINS`` 中的领域名；命不中任何主题时返回 DEFAULT（"未分类"）。
+- 零依赖、纯规则：不联网、不消耗 LLM key，未配置任何云端 key 也能用；
+- 确定性：跨进程稳定，可测试（词表与权重都在 ``constants.py`` 里）；
+- 轻量：一次遍历关键词表，万级节点构建时可忽略不计。
+
+本模块是这段逻辑的**唯一实现**：``web/domain_classifier.py`` 已删除，
+``web/app.py`` 的图接口与 ``memory/rag/knowledge.build_graph_context`` 改为从这里取用。
 """
 
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from constants import DEFAULT_DOMAIN as DEFAULT
 from constants import DOMAIN_TITLE_WEIGHT
+from core import BaseTool, ToolSpec
 
-#: 兜底领域：任何主题关键词都没命中时的归宿（常量来源：constants.py）。
-#: （DEFAULT 是 DEFAULT_DOMAIN 的供应商别名，下方两处函数签名仍用 DEFAULT 以保持兼容。）
+TOOL_ENABLED = True
 
 #: 领域 → 命中关键词表（中英混合，按主题覆盖度维护）。
 #: 关键词按“主题区分度”人工挑选：太通用的词（如“数据”“系统”）容易串类，故不收录。
@@ -73,8 +81,8 @@ DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
 #: 暴露领域清单，供 UI/测试/文档使用。
 KNOWN_DOMAINS: tuple[str, ...] = tuple(DOMAIN_KEYWORDS.keys())
 
-#: 标题命中的加权系数（文件名常含主题词，如“c语言笔记.txt”）。
-#: （常量来源：constants.py 的 DOMAIN_TITLE_WEIGHT。）
+#: 兜底领域：任何主题关键词都没命中时的归宿（常量来源：constants.py）。
+DEFAULT_DOMAIN_NAME = DEFAULT
 
 
 def classify_domain(text: str, *, title: str = "", default: str = DEFAULT) -> str:
@@ -83,6 +91,7 @@ def classify_domain(text: str, *, title: str = "", default: str = DEFAULT) -> st
     打分规则：统计该领域关键词在 ``text`` 中出现的次数，标题命中额外加权；
     得分最高者胜出；全部为 0 → 返回 ``default``。
     """
+
     if not text and not title:
         return default
     text_lower = (text or "").lower()
@@ -103,9 +112,69 @@ def classify_domain(text: str, *, title: str = "", default: str = DEFAULT) -> st
 
 def majority_domain(domains: list[str], *, default: str = DEFAULT) -> str:
     """取众数领域（文档实体按多数知识块的领域挂恒星系）；空输入回退 default。"""
+
     if not domains:
         return default
     counts: dict[str, int] = {}
     for d in domains:
         counts[d] = counts.get(d, 0) + 1
     return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+class ClassifyDomainInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    text: str = Field(default="", description="要分类的正文（可与 title 一起给，也可只给一个）。")
+    title: str = Field(default="", description="标题或文件名；命中关键词时加权（文件名常含主题词）。")
+
+
+class ClassifyDomainOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    domain: str = Field(description="命中的领域名；无命中时为「未分类」。")
+    matched: bool = Field(description="false 表示所有领域关键词都没命中，domain 是兜底值。")
+    known_domains: list[str] = Field(default_factory=list, description="全部可选领域。")
+
+
+class ClassifyDomainTool(BaseTool):
+    spec = ToolSpec(
+        name="knowledge.classify_domain",
+        description=(
+            "Classify text into one of the local topic domains (编程开发/数学/物理/...)"
+            " with a deterministic, offline keyword rule. Returns 未分类 when nothing "
+            "matches. Use it to decide which star system a note belongs to."
+        ),
+        version="1.0.0",
+        input_model=ClassifyDomainInput,
+        output_model=ClassifyDomainOutput,
+        side_effect="read",
+        permissions=(),
+        timeout_seconds=30.0,
+        idempotent=True,
+        parallel_safe=True,
+        tags=("knowledge", "domain", "classify", "read"),
+    )
+
+    def execute(self, arguments: ClassifyDomainInput) -> ClassifyDomainOutput:
+        domain = classify_domain(arguments.text, title=arguments.title)
+        return ClassifyDomainOutput(
+            domain=domain,
+            matched=domain != DEFAULT,
+            known_domains=list(KNOWN_DOMAINS),
+        )
+
+
+def create_tool() -> BaseTool:
+    return ClassifyDomainTool()
+
+
+__all__ = [
+    "DOMAIN_KEYWORDS",
+    "KNOWN_DOMAINS",
+    "ClassifyDomainInput",
+    "ClassifyDomainOutput",
+    "ClassifyDomainTool",
+    "classify_domain",
+    "create_tool",
+    "majority_domain",
+]

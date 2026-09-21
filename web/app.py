@@ -68,12 +68,12 @@ from memory.embedding_lock import (
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
 from tool.export_knowledge import export_filename, export_payload
+from tool.graph_snapshot import build_graph
 from tool.hybrid_recall import hybrid_recall
 from tool.import_knowledge import import_items, parse_import_payload
 from tool.reconcile import fact_items, reconcile_report
 from tool.repair_drift import repair_drift
 
-from .graph_builder import build_graph
 from .ingest_queue import IngestJobQueue, job_to_dict
 from .seed import seed
 from .support import (

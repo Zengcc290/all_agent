@@ -1,4 +1,4 @@
-"""把四层记忆「压扁」成星云图需要的 nodes + edges JSON。
+"""星云图投影工具：把四层记忆「压扁」成星云图需要的 nodes + edges（只读）。
 
 映射规则（与前端 web/static/index.html 的布局约定一致）：
 - kind=domain  → 恒星   （level 1，前端做星系定位）
@@ -17,12 +17,25 @@
 3. metadata.kind == "note"                 → 实体备注
 4. metadata 含 document_id + chunk_index    → RAG 知识块
 5. 其余                                     → 事件（episodic/working 等）
+
+为什么这是一个独立能力
+======================
+
+"四层记忆 → 一张图"是一次纯读取的投影：拓扑来自图存储（Neo4j 或内存回退），
+原文/预览/事件卫星来自 SQLite，领域来自 ``knowledge.classify_domain``，
+孤儿统计来自 ``knowledge.orphan_entities``。它没有副作用、可以缓存、
+也可以被 Agent 直接调用（"现在知识图谱长什么样"）。
+
+本模块是这段逻辑的**唯一实现**：``web/graph_builder.py``（567 行）已删除，
+``GET /api/graph`` 只保留进程内缓存与增量（revision/unchanged）逻辑。
 """
 
 from __future__ import annotations
 
 import zlib
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from constants import (
     DEFAULT_DOMAIN,
@@ -31,14 +44,27 @@ from constants import (
     NEBULA_EVENT_TITLE_CHARS,
     NEBULA_PALETTE,
 )
+from core import BaseTool, ToolSpec
 from memory import MemoryItem, MemoryManager
-from web.cleanup import find_orphan_entities
-from web.domain_classifier import classify_domain, majority_domain
+
+from .domain_classify import classify_domain, majority_domain
+from .orphan_entities import find_orphan_entities
+
+TOOL_ENABLED = True
 
 
 def domain_color(name: str) -> str:
     """领域 → 稳定颜色（crc32，跨进程稳定，Python 内建 hash 不稳定）。"""
+
     return NEBULA_PALETTE[zlib.crc32((name or DEFAULT_DOMAIN).encode("utf-8")) % len(NEBULA_PALETTE)]
+
+
+def _date(item: MemoryItem) -> str:
+    created = item.created_at
+    try:
+        return created.date().isoformat()
+    except AttributeError:
+        return str(created)[:NEBULA_DATE_CHARS]
 
 
 def _node(node_id: str, kind: str, title: str, *, content: str = "", domain: str = "",
@@ -556,12 +582,115 @@ def build_graph(manager: MemoryManager, *, at: str | None = None) -> dict[str, A
     }
 
 
-def _date(item: MemoryItem) -> str:
-    created = item.created_at
-    try:
-        return created.date().isoformat()
-    except AttributeError:
-        return str(created)[:NEBULA_DATE_CHARS]
+class GraphSnapshotInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    at: str = Field(
+        default="",
+        description="可选的时间点（ISO 8601）：只影响图存储的时序拓扑，留空表示当前状态。",
+    )
+    include_nodes: bool = Field(
+        default=True,
+        description="false 时只返回统计（大图放进模型上下文前先看规模）。",
+    )
+    max_nodes: int = Field(
+        default=200,
+        ge=1,
+        le=5000,
+        description="最多返回多少个节点/边（stats 始终是完整数量）。",
+    )
 
 
-__all__ = ["NEBULA_PALETTE", "build_graph", "domain_color"]
+class GraphStats(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    domains: int
+    entities: int
+    relations: int
+    facts: int
+    chunks: int
+    notes: int
+    events: int
+    edges: int
+    historical_facts: int = Field(description="已失效（active=false）的历史事实数。")
+    orphan_entities: int = Field(description="完全孤立的实体数（复用 knowledge.orphan_entities）。")
+    total: int = Field(description="节点总数。")
+
+
+class GraphSnapshotOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    graph_source: str = Field(description="拓扑来源：图存储的 mode，或 sqlite-fallback。")
+    as_of: str = Field(description="实际生效的时间点；空串表示当前状态。")
+    stats: GraphStats
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = Field(description="true 表示节点/边被 max_nodes 截断，只有 stats 是全量。")
+
+
+class GraphSnapshotTool(BaseTool):
+    spec = ToolSpec(
+        name="knowledge.graph_snapshot",
+        description=(
+            "Project the four memory layers into the star-map graph (nodes + edges) "
+            "with statistics: domains as stars, entities/documents as planets, "
+            "facts/notes/events as moons. Read-only. Relations come from the graph "
+            "store; source text and previews come from SQLite."
+        ),
+        version="1.0.0",
+        input_model=GraphSnapshotInput,
+        output_model=GraphSnapshotOutput,
+        side_effect="read",
+        permissions=(),
+        timeout_seconds=180.0,
+        idempotent=True,
+        parallel_safe=True,
+        tags=("knowledge", "graph", "nebula", "snapshot", "read"),
+    )
+
+    def __init__(self, manager: MemoryManager | None = None) -> None:
+        self._manager = manager
+
+    @property
+    def manager(self) -> MemoryManager:
+        if self._manager is None:
+            from ._memory import build_default_manager
+
+            self._manager = build_default_manager()
+        return self._manager
+
+    def execute(self, arguments: GraphSnapshotInput) -> GraphSnapshotOutput:
+        payload = build_graph(self.manager, at=arguments.at or None)
+        nodes = list(payload["nodes"])
+        edges = list(payload["edges"])
+        truncated = False
+        if not arguments.include_nodes:
+            truncated = bool(nodes or edges)
+            nodes, edges = [], []
+        elif len(nodes) > arguments.max_nodes or len(edges) > arguments.max_nodes:
+            truncated = True
+            nodes = nodes[: arguments.max_nodes]
+            edges = edges[: arguments.max_nodes]
+        return GraphSnapshotOutput(
+            graph_source=str(payload["graph_source"]),
+            as_of=str(payload["as_of"]),
+            stats=GraphStats(**payload["stats"]),
+            nodes=nodes,
+            edges=edges,
+            truncated=truncated,
+        )
+
+
+def create_tool() -> BaseTool:
+    return GraphSnapshotTool()
+
+
+__all__ = [
+    "GraphSnapshotInput",
+    "GraphSnapshotOutput",
+    "GraphSnapshotTool",
+    "GraphStats",
+    "build_graph",
+    "create_tool",
+    "domain_color",
+]

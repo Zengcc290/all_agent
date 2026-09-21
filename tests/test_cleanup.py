@@ -13,7 +13,8 @@ from conftest import HashEmbedding
 
 from memory import MemoryConfig, MemoryManager, Neo4jGraphStore
 from memory.storage.document_repo import DeletionProposalStore
-from web.cleanup import find_orphan_entities, propose_orphan_cleanup
+from tool.orphan_entities import find_orphan_entities
+from tool.propose_cleanup import propose_orphan_cleanup
 
 
 @pytest.fixture()

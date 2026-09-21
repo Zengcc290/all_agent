@@ -18,7 +18,7 @@ Qdrant/Neo4j 端点）；云端服务与部署密钥的覆盖入口是 ``config/
     的 DDL 同源，改表结构就得改它，分开会漂移。
   - 各工具自己的协议上限（``tool/*.py`` 的 ``MAX_*``、``tool/_shared.py`` 的
     ``*_ENV``）：只被该工具读取，属工具契约的一部分。
-  - ``web/domain_classifier.py`` 的 ``DOMAIN_KEYWORDS`` 词表、
+  - ``tool/domain_classify.py`` 的 ``DOMAIN_KEYWORDS`` 词表、
     ``web/seed.py`` 的 ``SEED_MARK``、``agents/message_utils.py`` 的
     ``DEFAULT_TOOL_NAME`` / ``MAX_TOOL_*``、``scripts/*.py`` 的 ``ROOT``：
     分别是词表数据、种子标记、消息清洗上限与脚本自身锚点。
@@ -303,8 +303,8 @@ WEB_QA_EXTRACT = True
 WEB_QA_EXTRACT_SYNC = False
 
 # ---------------------------------------------------------------------------
-# 星图构建（web/graph_builder.py）
-#   所在文件：web/graph_builder.py
+# 星图构建（tool/graph_snapshot.py）
+#   所在文件：tool/graph_snapshot.py
 # ---------------------------------------------------------------------------
 
 #: 领域配色板（与 Aetheria 深空青紫主题协调）。
@@ -328,8 +328,8 @@ NEBULA_EVENT_TITLE_CHARS = 24
 NEBULA_DATE_CHARS = 10
 
 # ---------------------------------------------------------------------------
-# 领域分类器（web/domain_classifier.py）
-#   所在文件：web/domain_classifier.py
+# 领域分类器（tool/domain_classify.py）
+#   所在文件：tool/domain_classify.py
 # ---------------------------------------------------------------------------
 
 #: 标题命中的加权系数（文件名常含主题词，如“c语言笔记.txt”）。

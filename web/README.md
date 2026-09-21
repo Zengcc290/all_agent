@@ -55,8 +55,12 @@ memory.rag_search / memory.rag                  （恒星=领域 行星=实体 �
 ## 结构
 
 - `app.py` —— FastAPI 路由与应用工厂（`create_app(manager=None)` 可注入测试内存库）
-- `graph_builder.py` —— 记忆项 → 星云 nodes/edges 的映射规则
 - `support.py` —— 单例、聊天可用性与嵌入装配（离线降级实现由 `memory.embedding.HashEmbedding` 提供）
 - `seed.py` —— Aetheria 种子数据播种（幂等；自动播种开关在 `constants.WEB_AUTOSEED`，默认开）
+- `ingest_queue.py` —— 后台入库任务队列（上传即返回，任务状态由 `/api/knowledge/jobs` 查询）
 - `static/index.html` —— 星云图前端（改造自 Aetheria 单文件 HTML）
 - `seed_data.json` —— 种子数据（从原 HTML 的 celestialTree 提取）
+
+> 记忆项 → 星云 `nodes/edges` 的映射规则、领域分类、孤儿实体统计与清理提案都已工具化，
+> 见 `tool/graph_snapshot.py`、`tool/domain_classify.py`、`tool/orphan_entities.py`、
+> `tool/propose_cleanup.py`（`GET /api/graph` 只保留进程内缓存与增量逻辑）。

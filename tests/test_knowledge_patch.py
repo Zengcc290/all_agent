@@ -343,7 +343,7 @@ def test_five_step_endpoint_story_converges_on_one_planet_per_entity():
 
 
 def test_graph_projection_keeps_history_satellite_but_drops_stale_edge():
-    from web.graph_builder import build_graph
+    from tool.graph_snapshot import build_graph
 
     manager = _manager()
     manager.semantic.add_fact(

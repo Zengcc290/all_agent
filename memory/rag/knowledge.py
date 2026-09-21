@@ -890,10 +890,10 @@ def build_graph_context(
 
 
 def _known_domains() -> list[str]:
-    """已知领域清单（同步 web/domain_classifier 的 KNOWN_DOMAINS）。"""
+    """已知领域清单（同步 tool/domain_classify 的 KNOWN_DOMAINS）。"""
 
     try:
-        from web.domain_classifier import KNOWN_DOMAINS
+        from tool.domain_classify import KNOWN_DOMAINS
     except Exception:  # noqa: BLE001 - 顺便导入失败时返回常规集
         return ["未分类"]
     return list(KNOWN_DOMAINS)

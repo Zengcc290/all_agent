@@ -19,8 +19,8 @@ from memory.rag import (
     RelationCandidate,
     RelationRole,
 )
+from tool.graph_snapshot import build_graph
 from web import create_app
-from web.graph_builder import build_graph
 
 PNG = b"\x89PNG\r\n\x1a\nimage"
 

@@ -24,6 +24,13 @@ from memory.base import MemoryType
 from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityResolver
 from memory.storage.vector import InMemoryVectorStore
+from tool.domain_classify import (
+    KNOWN_DOMAINS,
+    ClassifyDomainInput,
+    ClassifyDomainTool,
+    classify_domain,
+    majority_domain,
+)
 from tool.export_knowledge import (
     EXPORT_FORMAT,
     ExportKnowledgeInput,
@@ -36,6 +43,12 @@ from tool.graph_node_update import (
     GraphNodeUpdateTool,
     find_entity_node,
     update_entity_node,
+)
+from tool.graph_snapshot import (
+    GraphSnapshotInput,
+    GraphSnapshotTool,
+    build_graph,
+    domain_color,
 )
 from tool.hybrid_index import HybridIndexInput, HybridIndexTool, index_chunk, repository_for
 from tool.hybrid_recall import HybridRecallInput, HybridRecallTool, hybrid_recall
@@ -52,6 +65,16 @@ from tool.multi_recall import (
     build_decomposer,
     graph_recall_multi,
     hybrid_recall_multi,
+)
+from tool.orphan_entities import (
+    OrphanEntitiesInput,
+    OrphanEntitiesTool,
+    find_orphan_entities,
+)
+from tool.propose_cleanup import (
+    ProposeCleanupInput,
+    ProposeCleanupTool,
+    propose_orphan_cleanup,
 )
 from tool.reconcile import (
     ReconcileInput,
@@ -70,6 +93,10 @@ CAPABILITY_TOOLS = (
     "knowledge.repair_drift",
     "knowledge.export",
     "knowledge.import",
+    "knowledge.classify_domain",
+    "knowledge.orphan_entities",
+    "knowledge.propose_cleanup",
+    "knowledge.graph_snapshot",
 )
 
 
@@ -151,19 +178,23 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """召回/对账/导出类只读（免确认），索引/节点更新/漂移修复/导入类写入（必须确认）。"""
+    """只读类免确认（召回/对账/导出/分类/孤儿/星图），写入类必须确认（索引/节点/自愈/导入/提案）。"""
 
     read_tools = (
         HybridRecallTool().spec,
         MultiRecallTool().spec,
         ReconcileTool().spec,
         ExportKnowledgeTool().spec,
+        ClassifyDomainTool().spec,
+        OrphanEntitiesTool().spec,
+        GraphSnapshotTool().spec,
     )
     write_tools = (
         HybridIndexTool().spec,
         GraphNodeUpdateTool().spec,
         RepairDriftTool().spec,
         ImportKnowledgeTool().spec,
+        ProposeCleanupTool().spec,
     )
 
     assert {spec.name for spec in read_tools} == {
@@ -171,6 +202,9 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.multi_recall",
         "knowledge.reconcile",
         "knowledge.export",
+        "knowledge.classify_domain",
+        "knowledge.orphan_entities",
+        "knowledge.graph_snapshot",
     }
     assert all(spec.side_effect == "read" for spec in read_tools)
     assert {spec.name for spec in write_tools} == {
@@ -178,6 +212,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.graph_node_update",
         "knowledge.repair_drift",
         "knowledge.import",
+        "knowledge.propose_cleanup",
     }
     assert all(spec.side_effect == "write" for spec in write_tools)
 
@@ -605,3 +640,102 @@ def test_import_tool_reports_per_item_reasons_within_the_cap(manager) -> None:
     assert len(result["errors"]) == 2
     assert "不是 JSON 对象" in result["errors"][0]
     assert manager.get("ok-1") is not None
+
+
+def test_classify_domain_tool_is_offline_and_deterministic() -> None:
+    """领域分类工具：纯规则、可离线、同输入同输出，并如实报告「未命中」。"""
+
+    tool = ClassifyDomainTool()
+    hit = tool.execute(ClassifyDomainInput(text="Python 的函数与变量", title="c语言笔记.txt"))
+    assert hit.domain == "编程开发"
+    assert hit.matched is True
+    assert hit.known_domains == list(KNOWN_DOMAINS)
+
+    # 同一输入必须永远同一结果（跨进程稳定，词表与权重都在 constants 里）
+    assert classify_domain("微分方程与矩阵特征值") == "数学"
+    assert classify_domain("微分方程与矩阵特征值") == classify_domain("微分方程与矩阵特征值")
+    assert majority_domain(["数学", "数学", "物理"]) == "数学"
+
+    # 命不中任何关键词时如实返回兜底领域，且 matched=false
+    miss = tool.execute(ClassifyDomainInput(text="今天天气很好，出门散步"))
+    assert miss.matched is False
+    assert miss.domain == "未分类"
+    assert majority_domain([]) == "未分类"
+
+
+def test_graph_snapshot_tool_projects_the_four_layers(drift_pipeline) -> None:
+    """星图投影：文档→行星、领域→恒星、事实→边，统计与节点自洽，可截断但不骗计数。"""
+
+    manager = drift_pipeline.manager
+    _ingest(drift_pipeline, "Python 的函数定义与变量作用域。" * 8, "doc-graph")
+    manager.semantic.add_fact("星云", "部署于", "本机", confidence=0.9)
+
+    output = GraphSnapshotTool(manager=manager).execute(GraphSnapshotInput())
+
+    kinds = {node["kind"] for node in output.nodes}
+    assert "chunk" in kinds
+    assert "domain" in kinds
+    assert output.stats.chunks >= 1
+    assert output.stats.domains >= 1
+    assert output.stats.edges == len(output.edges)
+    assert output.stats.total == len(output.nodes)
+    assert output.as_of == ""
+    assert output.truncated is False
+    # 领域配色必须跨进程稳定（crc32，不是内建 hash）
+    assert domain_color("编程开发") == domain_color("编程开发")
+
+    # 只要统计时节点清空但 stats 仍是全量，且如实标注截断
+    stats_only = GraphSnapshotTool(manager=manager).execute(
+        GraphSnapshotInput(include_nodes=False)
+    )
+    assert stats_only.nodes == []
+    assert stats_only.edges == []
+    assert stats_only.truncated is True
+    assert stats_only.stats.total == output.stats.total
+
+    # max_nodes 只截断节点/边，不改统计口径
+    capped = GraphSnapshotTool(manager=manager).execute(GraphSnapshotInput(max_nodes=1))
+    assert capped.truncated is True
+    assert len(capped.nodes) == 1
+    assert capped.stats.total == output.stats.total
+    # Web 端仍直接调用纯函数，返回结构不变（revision/unchanged 由 app.py 追加）
+    assert set(build_graph(manager)) == {"graph_source", "as_of", "stats", "nodes", "edges"}
+
+
+def test_orphan_entities_tool_matches_the_cleanup_criteria(manager) -> None:
+    """孤儿检测工具：只有「完全孤立」的实体才算，且工具只读不删。"""
+
+    manager.add("尘埃", memory_type="semantic", metadata={"kind": "entity", "title": "尘埃"})
+    manager.add("恒星", memory_type="semantic", metadata={"kind": "entity", "title": "恒星"})
+    manager.semantic.add_fact("恒星", "照亮", "行星", confidence=0.9)
+
+    output = OrphanEntitiesTool(manager=manager).execute(OrphanEntitiesInput())
+
+    assert output.count == 1
+    assert [entity.name for entity in output.entities] == ["尘埃"]
+    assert len(find_orphan_entities(manager)) == 1
+    # 只读：实体还在
+    assert manager.get(output.entities[0].id) is not None
+
+
+def test_propose_cleanup_tool_never_leaks_the_confirm_token(manager) -> None:
+    """清理提案工具：只开待确认提案、绝不删除；且刻意不把确认令牌交给模型。"""
+
+    manager.add("尘埃", memory_type="semantic", metadata={"kind": "entity", "title": "尘埃"})
+
+    output = ProposeCleanupTool(manager=manager).execute(ProposeCleanupInput())
+
+    assert output.count == 1
+    assert output.proposal_id
+    assert output.requires_human_confirmation is True
+    # 令牌只走人类/脚本通道（函数仍返回它），工具输出里绝不能出现
+    assert "confirm_token" not in output.model_dump()
+    assert propose_orphan_cleanup(manager)["confirm_token"]
+    # 提案是 pending，数据一条没删
+    from memory.storage.document_repo import DeletionProposalStore
+
+    store = DeletionProposalStore(
+        manager.document_store.path, connection=manager.document_store.connection
+    )
+    assert store.get(output.proposal_id).status == "pending"
+    assert manager.get(output.item_ids[0]) is not None
