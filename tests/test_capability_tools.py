@@ -21,6 +21,7 @@ from memory import MemoryConfig, MemoryManager
 from memory.base import MemoryType
 from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityResolver
+from memory.storage.vector import InMemoryVectorStore
 from tool.graph_node_update import (
     GraphNodeUpdateInput,
     GraphNodeUpdateTool,
@@ -37,13 +38,52 @@ from tool.multi_recall import (
     graph_recall_multi,
     hybrid_recall_multi,
 )
+from tool.reconcile import (
+    ReconcileInput,
+    ReconcileTool,
+    fact_items,
+    reconcile_report,
+)
+from tool.repair_drift import RepairDriftInput, RepairDriftTool, repair_drift
 
 CAPABILITY_TOOLS = (
     "knowledge.hybrid_index",
     "knowledge.hybrid_recall",
     "knowledge.multi_recall",
     "knowledge.graph_node_update",
+    "knowledge.reconcile",
+    "knowledge.repair_drift",
 )
+
+
+class EnumerableVectorStore(InMemoryVectorStore):
+    """``InMemoryVectorStore`` + Qdrant 形状的 ``list_ids`` / ``upsert_chunk``。
+
+    三库对账要求投影「可枚举」（``list_ids``），漂移自愈要求投影「能按 chunk 写回」
+    （``upsert_chunk``）——这两个方法只有 ``QdrantVectorStore`` 实现，所以对账与自愈
+    天然是「远程投影」路径。测试用这个双替身把同一契约搬到内存里，从而在不依赖
+    Qdrant 的前提下验证真实代码路径。
+    """
+
+    def list_ids(self) -> list[str]:
+        with self._lock:
+            return list(self._vectors)
+
+    def upsert_chunk(
+        self,
+        chunk_id: str,
+        vector: list[float],
+        *,
+        document_id: str,
+        chunk_index: int,
+        source: str = "",
+        memory_type: MemoryType | str | None = None,
+    ) -> None:
+        with self._lock:
+            self._vectors[chunk_id] = (
+                list(vector),
+                MemoryType(memory_type) if memory_type is not None else MemoryType.SEMANTIC,
+            )
 
 
 @pytest.fixture()
@@ -65,6 +105,22 @@ def _ingest(pipeline: RAGPipeline, text: str, document_id: str) -> None:
     pipeline.ingest(Document(text, id=document_id), chunk_size=120, overlap=20)
 
 
+@pytest.fixture()
+def drift_pipeline(tmp_path):
+    """带「可枚举向量投影」的管道：三库对账需要能列出向量库里的 id。"""
+
+    manager = MemoryManager(
+        MemoryConfig(sqlite_path=str(tmp_path / "memory.sqlite3")),
+        embedding=HashEmbedding(),
+        vector_store=EnumerableVectorStore(),
+    )
+    instance = RAGPipeline(manager, auto_extract=False)
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
 def test_capability_tools_are_discovered_and_registered() -> None:
     """四个能力工具必须能被自动发现注册，且发现过程零错误。"""
 
@@ -78,19 +134,25 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """召回类只读（免确认），索引与节点更新类写入（必须确认）。"""
+    """召回/对账类只读（免确认），索引/节点更新/漂移修复类写入（必须确认）。"""
 
-    read_tools = (HybridRecallTool().spec, MultiRecallTool().spec)
-    write_tools = (HybridIndexTool().spec, GraphNodeUpdateTool().spec)
+    read_tools = (HybridRecallTool().spec, MultiRecallTool().spec, ReconcileTool().spec)
+    write_tools = (
+        HybridIndexTool().spec,
+        GraphNodeUpdateTool().spec,
+        RepairDriftTool().spec,
+    )
 
     assert {spec.name for spec in read_tools} == {
         "knowledge.hybrid_recall",
         "knowledge.multi_recall",
+        "knowledge.reconcile",
     }
     assert all(spec.side_effect == "read" for spec in read_tools)
     assert {spec.name for spec in write_tools} == {
         "knowledge.hybrid_index",
         "knowledge.graph_node_update",
+        "knowledge.repair_drift",
     }
     assert all(spec.side_effect == "write" for spec in write_tools)
 
@@ -327,3 +389,94 @@ def test_entity_resolver_shares_the_node_update_implementation(manager) -> None:
     assert stored.metadata["domain"] == "项目"
     assert stored.metadata["aliases"] == ["Nebula", "知识库"]
     assert stored.importance == pytest.approx(0.9)
+
+
+def test_reconcile_tool_reports_clean_three_store_counts(drift_pipeline) -> None:
+    """对账工具：真值源/向量/图三库计数一致时 consistent=true。"""
+
+    _ingest(drift_pipeline, "设备编号 abc-123 的对账基线。" * 8, "doc-clean")
+    repository = repository_for(drift_pipeline.manager)
+    assert repository is not None
+
+    output = ReconcileTool(manager=drift_pipeline.manager).execute(ReconcileInput())
+
+    assert output.consistent is True
+    assert output.drift == []
+    assert output.counts.chunks == len(repository.chunk_ids())
+    assert output.counts.chunks_indexed_sqlite == output.counts.chunks
+    assert output.counts.qdrant_points == output.counts.chunks
+    assert output.counts.facts == 0
+
+    # include_ids=false 只影响 id 列表，不影响计数（长列表可省）
+    without_ids = reconcile_report(
+        drift_pipeline.manager, repository, include_ids=False
+    )
+    assert all(entry["ids"] == [] for entry in without_ids["drift"]) or not without_ids["drift"]
+
+
+def test_repair_drift_tool_rebuilds_a_missing_vector_projection(drift_pipeline) -> None:
+    """漂移自愈：真值源标了 indexed 但向量缺失 → 重嵌入补回，且幂等。"""
+
+    _ingest(drift_pipeline, "设备编号 abc-123 的三库对账与自愈。" * 8, "doc-drift")
+    manager = drift_pipeline.manager
+    repository = repository_for(manager)
+    assert repository is not None
+    total = len(repository.chunk_ids())
+    missing_id = repository.chunk_ids()[0]
+    assert repository.chunk_ids(vector_status="indexed") == repository.chunk_ids()
+
+    # 模拟投影丢失：真值源仍标 indexed，但向量库里已经没有这一条
+    assert manager.vector_store.delete(missing_id) is True
+
+    report = reconcile_report(manager, repository)
+    assert report["counts"]["chunks_indexed_sqlite"] == total
+    assert report["counts"]["qdrant_points"] == total - 1
+    assert [(entry["kind"], entry["count"]) for entry in report["drift"]] == [
+        ("missing_vector", 1)
+    ]
+
+    tool = RepairDriftTool(manager=manager)
+    repaired = tool.execute(RepairDriftInput(repair=["missing_vector"]))
+    assert repaired.repaired.missing_vector == 1
+    assert repaired.repaired.missing_edge == 0
+
+    # 幂等：再修一次补 0 条，对账恢复干净
+    assert tool.execute(RepairDriftInput(repair=["missing_vector"])).repaired.missing_vector == 0
+    assert reconcile_report(manager, repository)["drift"] == []
+
+
+def test_repair_drift_only_accepts_self_healing_kinds(drift_pipeline) -> None:
+    """未知类型与不可逆的 orphan_vector 都必须被拒绝，而不是悄悄扩大副作用面。"""
+
+    with pytest.raises(ValueError, match="不支持的修复类型"):
+        repair_drift(drift_pipeline.manager, None, ["不存在的类型"])
+    with pytest.raises(ValueError, match="不支持的修复类型"):
+        repair_drift(drift_pipeline.manager, None, ["orphan_vector"])
+    # 空清单是合法的「只报告不修」
+    assert repair_drift(drift_pipeline.manager, None, [])["repaired"] == {
+        "missing_vector": 0,
+        "missing_edge": 0,
+    }
+
+
+def test_repair_drift_replays_missing_graph_edges(drift_pipeline) -> None:
+    """missing_edge：语义层有 fact 但图里没有关系 → 用同一 item_id 重放，幂等。"""
+
+    manager = drift_pipeline.manager
+    item = manager.semantic.add_fact(
+        "星云", "部署于", "本机", confidence=0.9, item_id="fact:nebula"
+    )
+    assert [fact.id for fact in fact_items(manager)] == [item.id]
+    # add_fact 同时写了图投影；这里把它删掉以模拟「真值源有、图里没有」
+    assert manager.graph_store.relation_memory_ids() == [item.id]
+    assert manager.graph_store.delete_memory_relation(item.id) is True
+
+    repository = repository_for(manager)
+    report = reconcile_report(manager, repository)
+    assert [entry["kind"] for entry in report["drift"]] == ["missing_edge"]
+
+    output = RepairDriftTool(manager=manager).execute(
+        RepairDriftInput(repair=["missing_edge"])
+    )
+    assert output.repaired.missing_edge == 1
+    assert reconcile_report(manager, repository)["drift"] == []

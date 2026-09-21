@@ -69,6 +69,8 @@ from memory.embedding_lock import (
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
 from tool.hybrid_recall import hybrid_recall
+from tool.reconcile import fact_items, reconcile_report
+from tool.repair_drift import repair_drift
 
 from .graph_builder import build_graph
 from .ingest_queue import IngestJobQueue, job_to_dict
@@ -101,13 +103,6 @@ class ReconcileBody(BaseModel):
     """对账修复请求；``repair`` 为空表示只报告不修。"""
 
     repair: list[str] = Field(default_factory=list)
-
-
-def _is_fact_item(item: Any) -> bool:
-    """A semantic row that represents one (subject, predicate, object) fact."""
-
-    metadata = getattr(item, "metadata", {}) or {}
-    return all(metadata.get(key) for key in ("subject", "predicate", "object"))
 
 
 def embedding_config_hint(manager: MemoryManager) -> str:
@@ -770,6 +765,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------
     # 文档中心与三库对账（documents/chunks 真值源 → 向量/图投影）
+    #
+    # 对账与漂移自愈的逻辑本身已收敛到 tool/reconcile.py 与 tool/repair_drift.py
+    # （各自是可被 Agent 调用的独立工具），这里只保留 HTTP 边界与错误码映射。
     # ------------------------------------------------------------------
     def the_repository() -> DocumentRepository:
         """复用管道缓存的那个仓储：同一 sqlite 文件、自带锁、每作用域独立连接。"""
@@ -781,116 +779,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                 detail="当前记忆库是内存模式（:memory:），没有 documents/chunks 真值源",
             )
         return repository
-
-    def fact_items() -> list[Any]:
-        return [item for item in the_manager().semantic.facts() if _is_fact_item(item)]
-
-    def projected_vector_ids() -> set[str] | None:
-        """Qdrant 里的 app 级 id 集合；无法枚举（存储不支持或不可达）时返回 None。"""
-
-        list_ids = getattr(the_manager().vector_store, "list_ids", None)
-        if not callable(list_ids):
-            return None
-        try:
-            return {str(value) for value in list_ids()}
-        except Exception:  # noqa: BLE001 - 读不到就跳过向量对账，不误报漂移
-            return None
-
-    def projected_edge_ids() -> set[str] | None:
-        """图投影里的 memory_id 集合（内存回退与 Neo4j 都实现同一方法）。"""
-
-        relation_ids = getattr(the_manager().graph_store, "relation_memory_ids", None)
-        if not callable(relation_ids):
-            return None
-        try:
-            return {str(value) for value in relation_ids() if str(value)}
-        except Exception:  # noqa: BLE001 - 同上
-            return None
-
-    def reconcile_report() -> dict[str, Any]:
-        """三库计数与漂移（只看不改）：真值源 ↔ 向量投影 ↔ 图投影。"""
-
-        manager = the_manager()
-        repository = app.state.pipeline.document_repo()
-        chunk_ids = set(repository.chunk_ids()) if repository is not None else set()
-        indexed = set(repository.chunk_ids(vector_status="indexed")) if repository is not None else set()
-        memory_ids = {item.id for item in manager.document_store.list(include_expired=True)}
-        facts = fact_items()
-        vectors = projected_vector_ids()
-        edges = projected_edge_ids()
-
-        drift: list[dict[str, Any]] = []
-        if vectors is not None:
-            missing = sorted(indexed - vectors)
-            orphan = sorted(vectors - chunk_ids - memory_ids)
-            if missing:
-                drift.append({"kind": "missing_vector", "count": len(missing), "ids": missing})
-            if orphan:
-                drift.append({"kind": "orphan_vector", "count": len(orphan), "ids": orphan})
-        if edges is not None:
-            missing_edges = sorted({item.id for item in facts} - edges)
-            if missing_edges:
-                drift.append({"kind": "missing_edge", "count": len(missing_edges), "ids": missing_edges})
-        return {
-            "counts": {
-                "chunks": len(chunk_ids),
-                "chunks_indexed_sqlite": len(indexed),
-                "qdrant_points": len(vectors) if vectors is not None else -1,
-                "facts": len(facts),
-                "neo4j_edges": len(edges) if edges is not None else -1,
-            },
-            "drift": drift,
-        }
-
-    def repair_drift(kinds: list[str]) -> dict[str, Any]:
-        """幂等自愈：只补缺失的投影，绝不删除或改写真值源。"""
-
-        requested = list(dict.fromkeys(kinds or []))
-        unknown = [kind for kind in requested if kind not in {"missing_vector", "missing_edge"}]
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"不支持的修复类型：{', '.join(unknown)}")
-        repository = app.state.pipeline.document_repo()
-        manager = the_manager()
-        entries = {entry["kind"]: entry["ids"] for entry in reconcile_report()["drift"]}
-        repaired = {"missing_vector": 0, "missing_edge": 0}
-
-        if "missing_vector" in requested and entries.get("missing_vector"):
-            ids = entries["missing_vector"]
-            chunks = [chunk for chunk in (repository.get_chunk(chunk_id) for chunk_id in ids) if chunk is not None]
-            if chunks:
-                vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
-                for chunk, vector in zip(chunks, vectors, strict=True):
-                    manager.vector_store.upsert_chunk(
-                        chunk.chunk_id,
-                        vector,
-                        document_id=chunk.document_id,
-                        chunk_index=chunk.chunk_index,
-                        source="",
-                        memory_type=MemoryType.SEMANTIC.value,
-                    )
-                    repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
-                repaired["missing_vector"] = len(chunks)
-                for document_id in {chunk.document_id for chunk in chunks}:
-                    document = repository.get_document(document_id)
-                    if document is not None and document.status == "parsed":
-                        repository.set_status(document_id, "vectorized")
-
-        if "missing_edge" in requested and entries.get("missing_edge"):
-            wanted = set(entries["missing_edge"])
-            for item in fact_items():
-                if item.id not in wanted:
-                    continue
-                manager.semantic.add_fact(
-                    str(item.metadata["subject"]),
-                    str(item.metadata["predicate"]),
-                    str(item.metadata["object"]),
-                    metadata=item.metadata,
-                    confidence=float(item.importance),
-                    item_id=item.id,
-                )
-                repaired["missing_edge"] += 1
-
-        return {"repaired": repaired}
 
     @app.get("/api/documents")
     def list_documents(tag: str = "", status: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
@@ -997,17 +885,22 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         counts = repository.stats() if repository is not None else {"documents": 0, "chunks": 0, "chunks_indexed": 0}
         return {
             **counts,
-            "facts": len(fact_items()),
+            "facts": len(fact_items(manager)),
             "memories_total": len(manager.document_store.list(include_expired=True)),
         }
 
     @app.get("/api/reconcile")
     def reconcile() -> dict[str, Any]:
-        return reconcile_report()
+        return reconcile_report(the_manager(), app.state.pipeline.document_repo())
 
     @app.post("/api/reconcile")
     def reconcile_repair(body: ReconcileBody) -> dict[str, Any]:
-        return repair_drift(body.repair)
+        try:
+            return repair_drift(
+                the_manager(), app.state.pipeline.document_repo(), body.repair
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/api/embedding/rebuild")
     def rebuild_embedding(confirm_rebuild: bool = Query(default=False)) -> dict[str, Any]:
