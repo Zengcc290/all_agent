@@ -19,6 +19,7 @@ from .parser import parse_openai_tool_calls, parse_tool_calls
 from .registry import BaseTool, ToolRegistry
 from .repository import ToolSpecRepository
 from .runtime import ToolExecutionManager
+from .tool_docs import render_tool_catalog, render_tool_catalog_text, render_tool_entry
 from .tool_loop import ToolLoop
 from .update_log import DEFAULT_UPDATE_LOG_FILENAME, UpdateLogRepository
 
@@ -45,4 +46,7 @@ __all__ = [
     "discover_tools",
     "parse_openai_tool_calls",
     "parse_tool_calls",
+    "render_tool_catalog",
+    "render_tool_catalog_text",
+    "render_tool_entry",
 ]

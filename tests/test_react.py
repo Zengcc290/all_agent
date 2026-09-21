@@ -339,8 +339,8 @@ async def test_lazy_catalog_loads_all_resolved_specs_and_sends_schemas():
     assert agent.is_tool_registered("web.search")
     second_system_prompt = llm.requests[1][0]["content"]
     assert "Loaded tool input schemas:" in second_system_prompt
-    assert "system.current_time:" in second_system_prompt
-    assert "web.search:" in second_system_prompt
+    assert "- system.current_time" in second_system_prompt
+    assert "- web.search" in second_system_prompt
     repository.close()
 
 
@@ -509,12 +509,15 @@ async def test_react_exposes_registered_names_and_catalog_schema_by_default():
         "All registered tool names: system.tool_catalog, "
         "test.react_echo" in first_instruction
     )
-    assert "- system.tool_catalog:" in first_instruction
-    assert "Action Input schema:" in first_instruction
-    assert "- test.react_echo:" not in first_instruction
+    assert "- system.tool_catalog@" in first_instruction
+    # 完整契约（用途 + 逐变量说明 + 输出字段 + 副作用）而不是原始 JSON Schema
+    assert "输入变量:" in first_instruction
+    assert "输出字段:" in first_instruction
+    assert "副作用与确认:" in first_instruction
+    assert "- test.react_echo@" not in first_instruction
     assert "already registered and usable" in first_instruction
     second_instruction = llm.requests[1][0]["content"]
-    assert "test.react_echo:" in second_instruction
+    assert "- test.react_echo@" in second_instruction
     assert "test.react_echo" in agent.tools
 
 
@@ -560,7 +563,7 @@ async def test_recommended_preceding_tool_is_advisory_only():
         "model news in the last two days",
     ]
     first_instruction = llm.requests[0][0]["content"]
-    assert "Recommended preceding tools (advisory only; not enforced): system.current_time." in first_instruction
+    assert "推荐前置: system.current_time" in first_instruction
     first_observation = llm.requests[1][-1]["content"]
     assert '"ok": true' in first_observation
     assert "TEMPORAL_CONTEXT_REQUIRED" not in first_observation
@@ -581,9 +584,9 @@ async def test_catalog_lookup_does_not_inject_tools_from_user_wording():
 
     assert answer == "done"
     second_instruction = llm.requests[1][0]["content"]
-    assert "web.search:" in second_instruction
-    assert "Recommended preceding tools (advisory only; not enforced): system.current_time." in second_instruction
-    assert "system.current_time:" not in second_instruction
+    assert "- web.search@" in second_instruction
+    assert "推荐前置: system.current_time" in second_instruction
+    assert "- system.current_time@" not in second_instruction
 
 
 @pytest.mark.asyncio

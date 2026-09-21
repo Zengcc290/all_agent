@@ -126,15 +126,18 @@ def test_hot_zone_lines_render_schema_only_for_recent_tools():
     rendered = "\n".join(lines)
 
     assert lines[0].startswith("Hot-loaded tools")
-    # The four most recent hot tools keep full schemas; the oldest degrades.
-    assert "- test.react_echo: Echo one integer (loud description)." in rendered
+    # The four most recent hot tools keep full contracts; the oldest degrades.
+    assert "- test.react_echo@" in rendered
+    assert "[只读 · 免确认" in rendered
+    assert "Echo one integer (loud description)." in rendered
     roster = [
         line
         for line in rendered.splitlines()
         if line.startswith("- test.extra0:")
     ]
     assert roster == ["- test.extra0: (see schema above or via catalog)"]
-    assert "- test.extra1: Extra tool 1." in rendered
+    assert "- test.extra1@" in rendered
+    assert "Extra tool 1." in rendered
     assert QuietEchoTool().spec.schema_hash in agent.tools.confirmation_key("test.extra1")
 
 
@@ -219,7 +222,8 @@ async def test_hot_tool_is_callable_after_hot_reload():
     last_message = agent.llm.requests[0][-1]
     assert last_message["role"] == "system"
     assert "Hot-loaded tools" in last_message["content"]
-    assert "test.react_echo: Echo one integer (loud description)." in last_message["content"]
+    assert "- test.react_echo@" in last_message["content"]
+    assert "Echo one integer (loud description)." in last_message["content"]
 
 
 @pytest.mark.asyncio
@@ -244,7 +248,7 @@ async def test_frozen_inventory_stays_stable_after_hot_reload():
     first_inventory = agent.llm.requests[0][0]["content"]
     second_inventory = agent.llm.requests[1][0]["content"]
     assert first_inventory == second_inventory
-    assert "test.react_echo: Echo one integer (loud description)." not in first_inventory
+    assert "- test.react_echo@" not in first_inventory
     assert "Hot-loaded tools" in agent.llm.requests[1][-1]["content"]
 
 

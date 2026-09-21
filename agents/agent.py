@@ -37,6 +37,7 @@ from core import (
 from core import discover_tools as discover_tool_modules
 from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
+from core.tool_docs import render_tool_catalog
 
 from .llm import LLM, EchoMode
 from .message_utils import (
@@ -589,7 +590,7 @@ class Agent(ABC):
             response = await asyncio.to_thread(
                 self._dispatch_model_call,
                 completion_llm,
-                self._with_registered_tool_names(conversation),
+                self._with_registered_tool_names(conversation, registrations),
                 completion_options,
                 round_number=round_number,
                 echo_mode=echo_mode,
@@ -716,23 +717,41 @@ class Agent(ABC):
         return messages
 
     def _with_registered_tool_names(
-        self, conversation: list[dict[str, Any]]
+        self,
+        conversation: list[dict[str, Any]],
+        registrations: Mapping[str, tuple[BaseTool, int]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Add all known tool names to every model request.
+        """Add the tool inventory and the full contract of every callable tool.
 
         The inventory intentionally includes repository-only tools used by
         lazy loading, even when their full schemas are not yet supplied in the
         provider's tool definitions.
+
+        ``registrations`` (the tools actually callable in this request) are
+        additionally rendered as **variable-level contracts** — purpose, usage
+        rules, every input variable with type/required/default/constraints and
+        its description, output fields, and whether the tool needs human
+        confirmation. The provider's ``tools`` field carries the same schemas
+        in machine form; putting the human-readable contract in the prompt as
+        well is what lets a model use the tools correctly even when it ignores
+        or mis-reads the function-calling payload.
         """
 
         names = set(self.tools.snapshot())
         if self.repository is not None:
             names.update(self.repository.active_tool_names())
         inventory = ", ".join(sorted(names)) or "(none)"
+        content = ["All registered tool names: " + inventory]
+        if registrations:
+            header = (
+                "Tool contracts (full variable-level specification of the tools "
+                "callable in this request):"
+            )
+            content.extend(("", header, *render_tool_catalog(registrations)))
         prefix: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": "All registered tool names: " + inventory,
+                "content": "\n".join(content),
             }
         ]
         return [*prefix, *conversation]

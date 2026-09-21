@@ -137,7 +137,13 @@ async def test_every_model_request_includes_all_registered_tool_names():
     )
     for request in llm.requests:
         inventory = request[0]
-        assert inventory == {"role": "system", "content": expected_inventory}
+        assert inventory["role"] == "system"
+        # 清单之后紧跟每个可调用工具的**逐变量完整契约**（见 core/tool_docs.py）
+        assert inventory["content"].startswith(expected_inventory)
+        assert "Tool contracts (full variable-level specification" in inventory["content"]
+        assert f"- {tool.spec.name}@" in inventory["content"]
+        assert "输入变量:" in inventory["content"]
+        assert "输出字段:" in inventory["content"]
 
 
 def test_tool_definitions_are_schema_driven():

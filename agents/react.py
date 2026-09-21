@@ -53,6 +53,7 @@ from core.activity_log import (
 )
 from core.parser import loads_model_json, parse_openai_tool_calls
 from core.registry import BaseTool
+from core.tool_docs import render_schema_block, render_tool_entry
 
 from .agent import (
     Agent,
@@ -1002,18 +1003,13 @@ class ReActAgent(Agent):
         if not prefix_registrations:
             lines.append("(No tools are currently available; answer directly.)")
         else:
-            for name, (tool, _) in prefix_registrations.items():
-                schema = self._strict_react_schema(tool.spec.input_schema)
-                lines.append(f"- {name}: {tool.spec.model_description}")
-                lines.append(
-                    "  Action Input schema: "
-                    + json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                )
+            # 每个工具都渲染成「用途 / 使用规范 / 输入变量（类型·必填·默认·约束·说明）/
+            # 输出字段 / 副作用与确认」的完整契约，而不是只给一句描述 + 原始 JSON Schema：
+            # 模型必须能直接从 prompt 里读到每个变量怎么填、哪些必填、写操作要不要确认。
+            # 渲染顺序（工具名排序 + 字段定义顺序）逐字节稳定，因此前缀缓存仍然可复用。
+            for name in sorted(prefix_registrations):
+                tool, _ = prefix_registrations[name]
+                lines.extend(render_tool_entry(name, tool.spec))
         resolved_schemas = {
             name: schema
             for name, schema in (loaded_tool_schemas or {}).items()
@@ -1022,17 +1018,8 @@ class ReActAgent(Agent):
         if resolved_schemas:
             lines.extend(("", "Loaded tool input schemas:"))
             for name in sorted(resolved_schemas):
-                schema = self._strict_react_schema(
-                    dict(resolved_schemas[name])
-                )
-                lines.append(
-                    f"- {name}: "
-                    + json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
+                lines.extend(
+                    render_schema_block(name, dict(resolved_schemas[name]))
                 )
         instruction = {"role": "system", "content": "\n".join(lines)}
         return [instruction, *conversation]
@@ -1067,18 +1054,9 @@ class ReActAgent(Agent):
         full_names = set(renderable[-max_full:])
         for name in renderable:
             tool, _ = hot_snapshot[name]
-            schema = self._strict_react_schema(tool.spec.input_schema)
             if name in full_names:
-                lines.append(f"- {name}: {tool.spec.model_description}")
-                lines.append(
-                    "  Action Input schema: "
-                    + json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                )
+                # 热加载工具的完整契约（含使用规范与逐变量说明），与 Available tools 同源。
+                lines.extend(render_tool_entry(name, tool.spec))
             else:
                 lines.append(f"- {name}: (see schema above or via catalog)")
         for name in sorted(set(roster) - set(renderable)):

@@ -85,6 +85,13 @@ class ToolSpec:
     ``recommended_before_tools`` is advisory metadata for the model.  It is
     deliberately not an executable dependency graph and is never enforced by
     the runtime.
+
+    ``guidance`` is the tool's **prompt-level 使用规范**: when to use it, when
+    NOT to use it, and which hard constraints the model must respect. It is
+    rendered into the prompt next to the tool's variables (see
+    ``core/tool_docs.py``) and is deliberately **not** part of ``schema_hash``:
+    it changes how the model is told to behave, not the executable contract,
+    so editing it must not invalidate stored confirmations or tool caches.
     """
 
     name: str
@@ -100,6 +107,7 @@ class ToolSpec:
     max_concurrency: int | None = None
     tags: tuple[str, ...] = ()
     recommended_before_tools: tuple[str, ...] = ()
+    guidance: str = ""
     _schema_hash: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -177,6 +185,11 @@ class ToolSpec:
             )
         if self.name in self.recommended_before_tools:
             raise ValueError("a tool cannot recommend itself as a preceding tool")
+        if not isinstance(self.guidance, str) or len(self.guidance) > 1200:
+            raise TypeError(
+                "guidance must be a string of at most 1200 characters "
+                "(it is rendered into the prompt, so it must stay short)"
+            )
         if self.max_concurrency is not None and (
             isinstance(self.max_concurrency, bool)
             or not isinstance(self.max_concurrency, int)
@@ -221,6 +234,7 @@ class ToolSpec:
             "max_concurrency": self.max_concurrency,
             "tags": list(self.tags),
             "recommended_before_tools": list(self.recommended_before_tools),
+            "guidance": self.guidance,
         }
 
     @property
