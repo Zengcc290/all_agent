@@ -201,6 +201,10 @@ class IngestImageTool(BaseTool):
         idempotent=False,
         parallel_safe=False,
         tags=("knowledge", "image", "multimodal", "write"),
+        guidance=(
+            "用户给出本地图片路径并希望它进入知识库时使用。图片会作为感知记忆留存，图上的边只能来自视觉抽取器。path 必须位于工作区内，越界会被拒绝。"
+            "非 VL 嵌入时返回的 warning 必须如实告知用户（向量只用了文字说明）；抽取失败不会回滚已入库的图片，此时要在回答里说明这一点。"
+        ),
     )
 
     def __init__(self, pipeline: RAGPipeline | None = None) -> None:

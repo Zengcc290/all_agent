@@ -316,6 +316,10 @@ class MultiRecallTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("memory", "recall", "multi", "graph", "rrf", "read"),
+        guidance=(
+            "问题涉及多个实体或关系（谁和谁、为什么、关联链路）时用它：它把问题拆成多条子查询再融合名次。单一明确问句用 knowledge.hybrid_recall 即可，不要为省事把所有问题都走多路（更慢）。"
+            "需要图证据时 mode 传 graph 或 both，纯文本召回用 hybrid。"
+        ),
     )
 
     def __init__(self, pipeline: Any = None, decomposer: QueryDecomposer | None = None) -> None:

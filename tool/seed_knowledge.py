@@ -162,6 +162,10 @@ class SeedKnowledgeTool(BaseTool):
         idempotent=True,
         parallel_safe=False,
         tags=("knowledge", "seed", "demo", "write"),
+        guidance=(
+            "只有在用户要求灌演示数据或初始化星图时调用。它是幂等的，重复调用会返回跳过原因，不要因为 seeded 为 false 就重试。"
+            "种子数据默认取仓库内的 web/seed_data.json，要换数据源才传 path。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

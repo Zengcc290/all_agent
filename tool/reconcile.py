@@ -183,6 +183,9 @@ class ReconcileTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "reconcile", "storage", "drift", "read"),
+        guidance=(
+            "怀疑三库不一致时（召回缺结果、图里少边、统计对不上）先跑它拿证据；它是只读的，可以随时运行。要修复再调 knowledge.repair_drift，并且只传它报告的漂移类别，不要自己猜类别名。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

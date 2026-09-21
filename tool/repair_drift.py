@@ -141,6 +141,10 @@ class RepairDriftTool(BaseTool):
         idempotent=True,
         parallel_safe=False,
         tags=("knowledge", "reconcile", "repair", "storage", "write"),
+        guidance=(
+            "只在 knowledge.reconcile 报告了漂移、且用户同意修复时调用。它只补投影、绝不删除或改写真值源；orphan_vector 会被明确拒绝，因为删除必须由人决定。"
+            "修复后再跑一次 reconcile 验证归零。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

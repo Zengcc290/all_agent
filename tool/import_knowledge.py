@@ -187,6 +187,10 @@ class ImportKnowledgeTool(BaseTool):
         idempotent=True,
         parallel_safe=False,
         tags=("knowledge", "import", "restore", "write"),
+        guidance=(
+            "把 knowledge.export 产出的载荷（或等价的 items 数组）灌回库时使用。它是幂等的：已存在的 id 与重复三元组会被跳过，因此可以安全重试。"
+            "载荷里的 NaN/Infinity 会被拒绝；逐条失败原因在返回里，不要因为个别条目失败就整批重复导入。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

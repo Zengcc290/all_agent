@@ -233,6 +233,10 @@ class ExampleTool(BaseTool):
         parallel_safe=True,
         max_concurrency=8,
         tags=("text", "statistics", "count"),
+        guidance=(
+            "模板示例：把这段 guidance 换成该工具自己的使用规范——什么情况下用、什么情况下不要用（并指出应该改用哪个工具）、以及必须遵守的硬约束。"
+            "guidance 会原样渲染进提示词，因此要写成给模型看的祈使句，长度控制在 1200 字以内。"
+        ),
     )
 
     def execute(self, arguments: ExampleInput) -> ExampleOutput:

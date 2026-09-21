@@ -229,6 +229,10 @@ class HybridRecallTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("memory", "recall", "hybrid", "rrf", "fts5", "read"),
+        guidance=(
+            "回答『知识库里是怎么说的』这类问题时**首先**用它，不要凭模型记忆作答；精确编号/术语与改述问法都适用。只需要分块命中时用它；"
+            "要看某篇文档的完整原文请接着用 knowledge.document_get。向量端点不可用时它会降级为纯关键词并在 note 里说明，此时必须在回答里如实告知检索已降级。"
+        ),
     )
 
     def __init__(self, pipeline: Any = None) -> None:

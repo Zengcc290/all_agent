@@ -153,6 +153,10 @@ class ClassifyDomainTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "domain", "classify", "read"),
+        guidance=(
+            "需要把一段文字归到本地领域体系时用它；纯规则、离线、结果可复现。它只分类不写库，分类结果要落库请走 memory.rag 或 knowledge.hybrid_index 的元数据。"
+            "文字不属于任何已知领域时会返回未分类，这是正确结果，不要强行套一个领域。"
+        ),
     )
 
     def execute(self, arguments: ClassifyDomainInput) -> ClassifyDomainOutput:

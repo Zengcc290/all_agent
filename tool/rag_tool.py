@@ -67,6 +67,10 @@ class RAGTool(BaseTool):
         idempotent=False,
         parallel_safe=False,
         tags=("memory", "rag", "ingest", "write"),
+        guidance=(
+            "把新内容（一段文字或工作区文件路径）入库并做知识抽取时使用，这是让资料变成可检索知识的主入口。"
+            "它不负责回答检索问题（那用 memory.rag_search 或 knowledge.hybrid_recall）。同一资料重复入库会重复抽取，先确认是否已经存在。"
+        ),
     )
 
     def __init__(self, pipeline: RAGPipeline | None = None) -> None:

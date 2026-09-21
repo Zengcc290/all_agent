@@ -56,6 +56,9 @@ class CurrentTimeTool(BaseTool):
         parallel_safe=True,
         max_concurrency=None,
         tags=("system", "time", "clock", "datetime"),
+        guidance=(
+            "需要『现在几点、今天几号』或做时间推理（近两天、本周）时先调用它拿到真实时间，不要凭模型内部的时间作答。它不接受任何参数。"
+        ),
     )
 
     def execute(self, arguments: CurrentTimeInput) -> CurrentTimeOutput:

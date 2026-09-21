@@ -89,6 +89,9 @@ class ReadUpdateLogTool(BaseTool):
         parallel_safe=True,
         max_concurrency=8,
         tags=("update-log", "audit", "read", "project"),
+        guidance=(
+            "需要看某一条更新记录的完整内容时用它；要连续读一段用 system.read_update_logs。返回值里带当前最大 ID，可据此从 1 顺序读完。"
+        ),
     )
 
     def __init__(self, repository: UpdateLogRepository | None = None) -> None:

@@ -120,6 +120,9 @@ class UpdateLogTool(BaseTool):
         parallel_safe=False,
         max_concurrency=1,
         tags=("update-log", "audit", "project", "mandatory"),
+        guidance=(
+            "每次对项目做出真实修改后必须调用一次，写完整、可核查的记录：改了哪些文件、为什么改、怎么验证的。它只写记录、不读历史。不要用它记录打算做什么——它记的是已经发生的事。"
+        ),
     )
 
     def __init__(self, repository: UpdateLogRepository | None = None) -> None:

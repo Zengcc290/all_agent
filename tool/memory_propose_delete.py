@@ -64,6 +64,9 @@ class MemoryProposeDeleteTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("memory", "admin"),
+        guidance=(
+            "用户要求删除某条记忆、而删除需要人工确认时，用它生成待确认提案；它本身不删除任何数据。真正的删除由 memory.manage 在拿到确认后执行。不要用它顺便清理，只有用户明确要求删除时才提议。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

@@ -248,6 +248,10 @@ class GraphNodeUpdateTool(BaseTool):
         idempotent=True,
         parallel_safe=False,
         tags=("graph", "entity", "node", "update", "write"),
+        guidance=(
+            "只用于修正或丰富**已存在**的实体节点（领域/类型/描述/别名/重要度）。绝不用它创建新实体或新关系——新知识走 memory.rag 入库或 knowledge.add_fact。"
+            "别名只增不减、重要度只升不降，因此不要指望用空值清掉已有字段；create_if_missing 默认 false，找不到节点会明确报错而不是新建。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

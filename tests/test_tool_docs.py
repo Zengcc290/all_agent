@@ -184,3 +184,41 @@ def test_every_registered_tool_renders_its_full_contract() -> None:
         for field in spec.output_schema.get("properties", {}):
             assert f"- {field}:" in block, f"{name} 缺少输出字段 {field}"
     assert text.count("- knowledge.") >= 18
+
+
+def test_every_registered_tool_declares_its_own_usage_guidance() -> None:
+    """每个工具都必须写自己的使用规范：何时用、何时不用、硬约束。
+
+    这是「按不同功能加强规范与约束、强化专门性」的落点——guidance 会原样进提示词，
+    因此缺失或互相抄同一段都算缺陷。
+    """
+
+    registry = ToolRegistry()
+    report = discover_tools(registry)
+    assert report.ok, [record.error for record in report.errors]
+
+    snapshot = registry.snapshot()
+    missing = [
+        name for name, (tool, _) in snapshot.items() if not tool.spec.guidance.strip()
+    ]
+    assert missing == [], f"这些工具缺少使用规范：{missing}"
+
+    seen: dict[str, str] = {}
+    for name, (tool, _) in snapshot.items():
+        guidance = tool.spec.guidance
+        assert 10 <= len(guidance) <= 1200, name
+        assert guidance not in seen, f"{name} 与 {seen.get(guidance)} 的使用规范完全相同"
+        seen[guidance] = name
+        rendered = "\n".join(render_tool_entry(name, tool.spec))
+        assert f"使用规范: {guidance}" in rendered
+
+
+def test_catalog_tool_also_carries_guidance() -> None:
+    """catalog 工具由 agent 注册（不在自动发现里），它的规范同样必须进提示词。"""
+
+    from core import ToolCatalogTool
+
+    spec = ToolCatalogTool(ToolRegistry()).spec
+    assert spec.guidance.strip()
+    assert "intent" in spec.guidance
+    assert "使用规范: " in "\n".join(render_tool_entry(spec.name, spec))

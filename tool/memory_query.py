@@ -76,6 +76,10 @@ class MemoryQueryTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("memory", "search", "read"),
+        guidance=(
+            "查『记忆里存了什么』时用它：跨四层搜索、按类型或标签列表、看单条详情。它是记忆层的通用读取口；"
+            "要找文档分块的语义或关键词命中用 knowledge.hybrid_recall，要图事实或拼好的上下文块用 memory.rag_search。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

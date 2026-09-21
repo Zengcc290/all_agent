@@ -113,6 +113,10 @@ class DocumentRevectorizeTool(BaseTool):
         idempotent=True,
         parallel_safe=False,
         tags=("knowledge", "document", "embedding", "write"),
+        guidance=(
+            "只在真值源有分块而向量投影缺失或落后时使用（通常由 knowledge.reconcile 报告），它按文档粒度重嵌入。嵌入空间不一致时会明确失败："
+            "确认要重建向量空间才传 confirm_rebuild=true，不要用它掩盖配置错误。没有分块的文档会被拒绝。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

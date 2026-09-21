@@ -646,6 +646,10 @@ class GraphSnapshotTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "graph", "nebula", "snapshot", "read"),
+        guidance=(
+            "需要整张星图（节点加边加统计）用于展示或宏观分析时使用；它包含只存在于图投影里的边，比只看记忆行更完整。回答具体事实请用召回或图检索工具，不要用整图快照代替检索（慢且噪声大）。"
+            "max_nodes 会截断节点列表，截断时以返回的统计与 truncated 标记为准。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

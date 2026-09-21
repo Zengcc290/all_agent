@@ -172,6 +172,11 @@ class HybridIndexTool(BaseTool):
         idempotent=True,
         parallel_safe=False,
         tags=("memory", "index", "hybrid", "fts5", "vector", "write"),
+        guidance=(
+            "需要让一段原文同时可被关键词与语义检索时使用。"
+            "不要用它写记忆条目或抽知识（那走 memory.rag 与 knowledge.add_fact），也不要用它改图节点属性（走 knowledge.graph_node_update）。"
+            "同一 chunk_id 重复索引是覆盖写、幂等；换 document_id 会产生新的分块行。写操作需要人工确认钥匙。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

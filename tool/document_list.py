@@ -123,6 +123,10 @@ class DocumentListTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "document", "list", "read"),
+        guidance=(
+            "要『先看看库里有哪些文档、各自什么状态、多少分块』时用它，它是检索与重嵌入之前的第一跳。tag/status 过滤与分页参数都有上限，超限会报错。"
+            "要看某篇的正文请接着调 knowledge.document_get。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

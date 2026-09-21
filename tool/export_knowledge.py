@@ -118,6 +118,10 @@ class ExportKnowledgeTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "export", "backup", "read"),
+        guidance=(
+            "用户要备份、迁移或把整库交给外部工具消费时使用。默认不导出过期项，要全量传 limit=0。它是只读的，不会改动任何数据。"
+            "导出载荷的形状与 knowledge.import 的入参一致，导出后可以直接导回。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

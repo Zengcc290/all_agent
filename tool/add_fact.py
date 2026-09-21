@@ -98,6 +98,10 @@ class AddFactTool(BaseTool):
         idempotent=False,
         parallel_safe=False,
         tags=("knowledge", "fact", "graph", "write"),
+        guidance=(
+            "用户明确陈述一条事实（谁-怎么样-谁或什么）时用它，它同时写语义记忆与图上的边。要写一段内容让系统去抽取知识请用 memory.rag；只写普通文本用 memory.add。三元组三项都必须非空；"
+            "关系有更新时写新事实（旧值会被取代），不要试图改写历史。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

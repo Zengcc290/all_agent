@@ -128,6 +128,10 @@ class OrphanEntitiesTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "graph", "orphan", "health", "read"),
+        guidance=(
+            "做知识库健康检查、找完全孤立实体时使用。判定包含四项：没有关系边、没有被分块提及、没有备注、且不是种子数据，所以种子实体不会被误判成垃圾。"
+            "要清理必须走 knowledge.propose_cleanup（人工确认），不要自行删除。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

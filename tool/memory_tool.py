@@ -62,6 +62,9 @@ class MemoryManageTool(BaseTool):
         idempotent=False,
         parallel_safe=False,
         tags=("memory", "storage", "admin"),
+        guidance=(
+            "删除单条记忆或清空整层记忆，破坏性操作，必须已获得用户确认。清空整层前必须让用户明确说出层名；不确定时先用 memory.query 列出候选。不要在无人确认的情况下批量删除。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

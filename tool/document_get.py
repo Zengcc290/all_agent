@@ -97,6 +97,10 @@ class DocumentGetTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("knowledge", "document", "detail", "read"),
+        guidance=(
+            "引用或核对某篇文档的原文时使用（先用 knowledge.document_list 拿 id）。"
+            "max_chunks 只裁剪返回的分块列表，chunk_count 仍是全量，判断是否读完要看 truncated。文档不存在会明确报错，不要反复重试同一个 id。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

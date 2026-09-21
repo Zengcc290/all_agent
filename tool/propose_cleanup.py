@@ -112,6 +112,10 @@ class ProposeCleanupTool(BaseTool):
         idempotent=False,
         parallel_safe=False,
         tags=("knowledge", "graph", "cleanup", "proposal", "write"),
+        guidance=(
+            "在 knowledge.orphan_entities 列出孤儿实体、且用户希望清理时使用。它只创建待确认提案，绝不删除数据；"
+            "返回里没有确认令牌，因此你无法自行确认，必须把提案 id 交给用户走人工确认流程。不要重复提交同一批提案。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:

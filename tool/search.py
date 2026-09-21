@@ -204,6 +204,9 @@ class SearchTool(BaseTool):
         max_concurrency=8,
         tags=("web", "search"),
         recommended_before_tools=("system.current_time",),
+        guidance=(
+            "需要当前公开网络信息（新闻、最新版本、实时事实）时使用，只在联网模式下可用。与用户知识库或记忆相关的问题优先用本地检索工具，不要用网络搜索代替本地知识。引用结果时要给出标题与链接。"
+        ),
     )
 
     def __init__(

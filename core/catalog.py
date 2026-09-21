@@ -56,6 +56,11 @@ class ToolCatalogTool(BaseTool):
         output_model=CatalogOutput,
         side_effect="read",
         tags=("catalog", "discovery"),
+        guidance=(
+            "只在本次请求没有给出某个工具的完整契约（惰性加载）时用它先 resolve 出输入 schema。"
+            "intent 要写能力描述（例如 web search、read a file、send email），绝对不要写用户的具体问题内容。"
+            "已经列出完整契约的工具直接调用，不要先 resolve 一次；resolve 只取回契约，不代表已注册或已授权。"
+        ),
     )
 
     def __init__(

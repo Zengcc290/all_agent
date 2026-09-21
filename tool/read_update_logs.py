@@ -79,6 +79,9 @@ class ReadUpdateLogsTool(BaseTool):
         parallel_safe=True,
         max_concurrency=4,
         tags=("update-log", "audit", "read", "batch", "project"),
+        guidance=(
+            "需要连续审计一段历史时用它（单次最多 100 条、升序返回），比逐条调用省轮次。只看一条用 system.read_update_log。"
+        ),
     )
 
     def __init__(self, repository: UpdateLogRepository | None = None) -> None:

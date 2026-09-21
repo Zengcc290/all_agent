@@ -59,6 +59,10 @@ class RAGSearchTool(BaseTool):
         idempotent=True,
         parallel_safe=True,
         tags=("memory", "rag", "retrieval", "read"),
+        guidance=(
+            "需要图事实、路径或现成的上下文块来支撑回答时用它；action 决定返回向量命中、图检索结果还是拼好的上下文。纯分块召回用 knowledge.hybrid_recall。"
+            "回答用户问题前应先用它检索，检索不到再如实说明。"
+        ),
     )
 
     def __init__(self, pipeline: RAGPipeline | None = None) -> None:

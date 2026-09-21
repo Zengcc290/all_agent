@@ -73,6 +73,10 @@ class MemoryAddTool(BaseTool):
         idempotent=False,
         parallel_safe=False,
         tags=("memory", "storage", "write"),
+        guidance=(
+            "用户明确要求『记住这件事』时写入（默认 episodic）。它写内容不抽知识；要抽取实体与关系用 memory.rag，要断言结构化事实用 knowledge.add_fact。"
+            "写入前先把用户的话整理成一句自洽的陈述。"
+        ),
     )
 
     def __init__(self, manager: MemoryManager | None = None) -> None:
