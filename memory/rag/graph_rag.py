@@ -145,43 +145,6 @@ class GraphRAGPipeline:
             max_chars=max_chars
         )
 
-    def retrieve_multi(
-        self,
-        queries: list[str],
-        *,
-        limit: int = RAG_RETRIEVE_LIMIT,
-        hops: int = RAG_GRAPH_HOPS,
-        threshold: float | None = None,
-        path_limit: int = RAG_GRAPH_PATH_LIMIT,
-    ) -> GraphRAGResult:
-        """F3：每条子查询各做 seed+expand，路径按 effective 合并去重。"""
-
-        queries = [query for query in queries if isinstance(query, str) and query.strip()]
-        if not queries:
-            raise ValueError("queries must be a non-empty list of strings")
-        if len(queries) == 1:
-            return self.retrieve(queries[0], limit=limit, hops=hops, threshold=threshold, path_limit=path_limit)
-        evidence: dict[str, MemorySearchResult] = {}
-        paths: dict[tuple[tuple[str, ...], tuple[str, ...]], GraphPath] = {}
-        seeds: list[str] = []
-        for query in queries:
-            result = self.retrieve(query, limit=limit, hops=hops, threshold=threshold, path_limit=path_limit)
-            for item in result.evidence:
-                evidence.setdefault(item.item.id, item)
-            seeds.extend(result.entities)
-            for path in result.paths:
-                key = (path.entities, path.relations)
-                existing = paths.get(key)
-                if existing is None or path.effective > existing.effective:
-                    paths[key] = path
-        merged = sorted(paths.values(), key=lambda path: (-path.effective, len(path.relations), path.target))[:path_limit]
-        return GraphRAGResult(
-            query=" | ".join(queries),
-            evidence=list(evidence.values())[:limit],
-            paths=merged,
-            entities=list(dict.fromkeys(seeds)),
-        )
-
     def _find_seed_entities(
         self, query: str, evidence: list[MemorySearchResult]
     ) -> list[str]:

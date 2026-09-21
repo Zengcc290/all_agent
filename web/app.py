@@ -68,6 +68,7 @@ from memory.embedding_lock import (
 )
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
+from tool.hybrid_recall import hybrid_recall
 
 from .graph_builder import build_graph
 from .ingest_queue import IngestJobQueue, job_to_dict
@@ -358,12 +359,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             from memory.rag.graph_rag import GraphRAGResult
 
             retrieval = GraphRAGResult(query=body.message)
-        # U4 溯源：同一句问话再走一遍混合检索（向量 × FTS5 RRF），把每条的
+        # U4 溯源：同一句问话再走一遍混合召回（向量 × FTS5 RRF），把每条的
         # 向量分/关键词分/融合分交给前端做「依据」面板；网关不可用时这里退化为
         # 纯关键词，正好让降级原因对用户可见，而不是只显示一个空来源列表。
-        hybrid = app.state.pipeline.hybrid_retrieve(body.message, limit=RAG_RETRIEVE_LIMIT)
+        # 混合召回的唯一实现在 tool/hybrid_recall.py。
+        hybrid = hybrid_recall(app.state.pipeline, body.message, limit=RAG_RETRIEVE_LIMIT)
         retrieval_report = {
-            "note": app.state.pipeline.last_retrieval_note,
+            "note": hybrid.note,
             "hits": [
                 {
                     "chunk_id": hit.memory_id,
@@ -375,7 +377,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
                     "vector_score": hit.detail.get("vector_score"),
                     "keyword_score": hit.detail.get("keyword_score"),
                 }
-                for hit in hybrid
+                for hit in hybrid.chunks
             ],
         }
         return {

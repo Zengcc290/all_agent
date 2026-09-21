@@ -375,6 +375,61 @@ class Neo4jGraphStore:
         elif known:
             entity["aliases"] = known
 
+    def update_entity(
+        self,
+        name: str,
+        *,
+        domain: str | None = None,
+        aliases: list[str] | None = None,
+        importance: float | None = None,
+    ) -> bool:
+        """Refresh the attributes of an **existing** entity node.
+
+        Only ``MATCH`` (never ``MERGE``): this is the explicit "edit a graph
+        node" entry point, so it must not create nodes as a side effect — node
+        creation stays with :meth:`add_relation` / :meth:`add_observation`.
+        Returns whether a node was found and updated. ``None`` means "leave the
+        current value alone"; an empty ``aliases`` list is also ignored so a
+        caller cannot wipe aliases by omission.
+        """
+
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty string")
+        if importance is not None and (
+            isinstance(importance, bool) or not isinstance(importance, (int, float))
+        ):
+            raise ValueError("importance must be a number or None")
+        if self.driver is None:
+            entity = self._entities.get(name)
+            if entity is None:
+                return False
+            if domain:
+                entity["domain"] = domain
+            if aliases:
+                entity["aliases"] = list(aliases)
+            if importance is not None:
+                entity["importance"] = float(importance)
+            return True
+        query = (
+            "MATCH (e:MemoryEntity {name: $name}) "
+            "SET e.domain = CASE WHEN $domain = '' THEN e.domain ELSE $domain END, "
+            "e.aliases = CASE WHEN size($aliases) = 0 THEN e.aliases ELSE $aliases END, "
+            "e.importance = CASE WHEN $importance IS NULL THEN e.importance ELSE $importance END "
+            "RETURN 1 AS updated"
+        )
+
+        def _run(session):
+            record = session.run(
+                query,
+                name=name,
+                domain=str(domain or ""),
+                aliases=list(aliases or []),
+                importance=importance,
+            ).single()
+            return record is not None
+
+        return bool(self._with_session(_run))
+
     def _bump_relation(self, source: str, relation: str, target: str) -> bool:
         """F1 回忆强化：给已存在的边 +1 次回忆、权重×增长倍数（有上限）。
 

@@ -15,9 +15,10 @@ from conftest import HashEmbedding
 from memory import MemoryConfig, MemoryManager
 from memory.base import MemoryItem, MemoryType
 from memory.rag import Document
-from memory.rag.pipeline import RAGPipeline, _rrf_fuse
+from memory.rag.pipeline import RAGPipeline
 from memory.storage.document_repo import ChunkRecord, DocumentRecord, DocumentRepository
 from memory.storage.qdrant import QdrantVectorStore
+from tool.hybrid_recall import hybrid_recall, rrf_fuse
 
 
 class FakeQdrantClient:
@@ -284,11 +285,11 @@ def test_keyword_search_ignores_blank_query_and_rejects_bad_limit(repo: Document
 
 
 def test_rrf_fuse_prefers_common_hits():
-    fused = _rrf_fuse([["a", "b", "c"], ["b", "a"]])
+    fused = rrf_fuse([["a", "b", "c"], ["b", "a"]])
 
     assert [chunk_id for chunk_id, _ in fused] == ["a", "b", "c"]
     assert fused[0][1] == pytest.approx(1 / 61 + 1 / 62)  # hit by both paths
-    assert _rrf_fuse([[], []]) == []
+    assert rrf_fuse([[], []]) == []
 
 
 def _break_vector_search(pipeline: RAGPipeline, monkeypatch) -> None:
@@ -319,25 +320,26 @@ def test_hybrid_retrieve_uses_both_paths(tmp_path):
             overlap=20,
         )
 
-        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+        recall = hybrid_recall(pipeline, "abc-123", limit=3)
+        results = recall.chunks
 
         assert results
         assert any("abc-123" in result.content for result in results)
         assert results[0].metadata["document_id"] == "doc-hybrid"
-        assert pipeline.last_retrieval_note == ""
+        assert recall.note == ""
     finally:
         pipeline.close()
 
 
 def test_hybrid_falls_back_to_vector_when_disabled(tmp_path, monkeypatch):
-    import memory.rag.pipeline as rag_pipeline
+    import tool.hybrid_recall as hybrid_recall_module
 
-    monkeypatch.setattr(rag_pipeline, "MEMORY_HYBRID", False)
+    monkeypatch.setattr(hybrid_recall_module, "MEMORY_HYBRID", False)
     pipeline = build_pipeline(tmp_path, HashEmbedding())
     try:
         pipeline.ingest(Document("关闭混合检索后走纯向量路径。" * 8, id="doc-off"), chunk_size=120, overlap=20)
 
-        assert [chunk.memory_id for chunk in pipeline.hybrid_retrieve("纯向量路径", limit=3)] == [
+        assert [chunk.memory_id for chunk in hybrid_recall(pipeline, "纯向量路径", limit=3).chunks] == [
             chunk.memory_id for chunk in pipeline.retrieve("纯向量路径", limit=3)
         ]
     finally:
@@ -352,11 +354,12 @@ def test_hybrid_degrades_to_keyword_when_embedding_down(tmp_path, monkeypatch):
         pipeline.ingest(Document("设备编号 abc-123 的降级检索。" * 8, id="doc-down"), chunk_size=120, overlap=20)
         _break_vector_search(pipeline, monkeypatch)
 
-        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+        recall = hybrid_recall(pipeline, "abc-123", limit=3)
+        results = recall.chunks
 
         assert results and "abc-123" in results[0].content
-        assert "降级" in pipeline.last_retrieval_note
-        assert "向量检索失败" in pipeline.last_retrieval_note
+        assert "降级" in recall.note
+        assert "向量检索失败" in recall.note
     finally:
         pipeline.close()
 
@@ -377,7 +380,8 @@ def test_hybrid_retrieve_exposes_per_path_scores(tmp_path):
             overlap=20,
         )
 
-        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+        recall = hybrid_recall(pipeline, "abc-123", limit=3)
+        results = recall.chunks
 
         assert results
         top = results[0]
@@ -401,7 +405,8 @@ def test_hybrid_detail_marks_the_missing_path_when_degraded(tmp_path, monkeypatc
         pipeline.ingest(Document("设备编号 abc-123 的降级检索。" * 8, id="doc-score-down"), chunk_size=120, overlap=20)
         _break_vector_search(pipeline, monkeypatch)
 
-        results = pipeline.hybrid_retrieve("abc-123", limit=3)
+        recall = hybrid_recall(pipeline, "abc-123", limit=3)
+        results = recall.chunks
 
         assert results
         assert results[0].detail["vector_score"] is None

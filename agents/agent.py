@@ -54,7 +54,7 @@ from .message_utils import (
 from .message_utils import (
     safe_tool_name as _safe_tool_name,
 )
-from .providers import ProviderProfile, ProviderRegistry
+from .providers import ProviderRegistry
 
 
 class Agent(ABC):
@@ -813,37 +813,6 @@ class Agent(ABC):
         ).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()[:48]
         return f"{PROMPT_CACHE_KEY_VERSION}-{digest}"
-
-    @property
-    def profiles(self) -> Mapping[str, ProviderProfile]:
-        """Configured provider profiles (without resolved API keys)."""
-
-        return self.provider_registry.profiles
-
-    def set_active_profile(self, profile_name: str) -> None:
-        """Select the default profile for subsequent requests."""
-
-        profile = self.provider_registry.get(profile_name)
-        self.active_profile = profile.name
-        self.provider_registry.active_profile = profile.name
-
-    def reload_provider_profiles(self) -> None:
-        """Reload TOML and environment-backed credentials.
-
-        Existing clients are discarded so URL/key changes take effect on the
-        next request. Conversation history remains isolated per profile.
-        """
-
-        self.provider_registry.reload()
-        self.active_profile = self.provider_registry.active_profile
-        self._profile_clients.clear()
-
-    def profile_info(self, profile_name: str | None = None) -> dict[str, Any]:
-        selected = profile_name or self.active_profile
-        return self.provider_registry.get(selected).public_info()
-
-    def list_profiles(self) -> list[dict[str, Any]]:
-        return [profile.public_info() for profile in self.provider_registry.profiles.values()]
 
     def _completion_target(
         self,

@@ -71,14 +71,6 @@ class ToolDiscoveryReport:
             None,
         )
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "package": self.package,
-            "ok": self.ok,
-            "records": [record.as_dict() for record in self.records],
-        }
-
-
 class ToolDiscoveryError(RuntimeError):
     """Raised after a strict scan if one or more modules could not be loaded."""
 

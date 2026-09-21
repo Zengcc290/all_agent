@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from constants import (
-    MEMORY_HYBRID,
     RAG_CHUNK_OVERLAP,
     RAG_CHUNK_SIZE,
     RAG_CONTEXT_MAX_CHARS,
@@ -22,7 +21,6 @@ from ..embedding_lock import apply_embedding_lock
 from ..manager import MemoryManager
 from ..storage.document_repo import (
     PERMISSIONS,
-    ChunkRecord,
     DocumentRecord,
     DocumentRepository,
 )
@@ -88,31 +86,6 @@ def _document_permission(metadata: Mapping[str, Any]) -> str:
     return permission if permission in PERMISSIONS else "private"
 
 
-def _hybrid_enabled() -> bool:
-    """混合检索开关（constants.MEMORY_HYBRID，默认开；关闭即回到纯向量）。"""
-
-    return MEMORY_HYBRID
-
-
-def _rrf_fuse(rank_lists: list[list[str]], *, k: int = 60) -> list[tuple[str, float]]:
-    """Reciprocal Rank Fusion: 只按名次计分，避免余弦与 bm25 两套量纲混算。"""
-
-    scores: dict[str, float] = {}
-    for hits in rank_lists:
-        for rank, chunk_id in enumerate(hits, start=1):
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
-    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
-
-
-def _chunk_metadata(chunk: ChunkRecord) -> dict[str, Any]:
-    return {
-        "document_id": chunk.document_id,
-        "chunk_index": chunk.chunk_index,
-        "char_start": chunk.char_start,
-        "char_end": chunk.char_end,
-    }
-
-
 class RAGPipeline:
     def __init__(
         self,
@@ -129,8 +102,6 @@ class RAGPipeline:
         self.graph = GraphRAGPipeline(self.manager)
         self.last_ingest_report: dict[str, Any] = {}
         self._repository: DocumentRepository | None = None
-        #: 最近一次混合检索的降级说明（空串表示向量路正常），供 UI/健康检查展示。
-        self.last_retrieval_note = ""
 
     def document_repo(self) -> DocumentRepository | None:
         """The ``documents``/``chunks`` source of truth, or ``None`` if unavailable.
@@ -196,24 +167,24 @@ class RAGPipeline:
                     chunk = span.chunk
                     metadata = dict(chunk.metadata)
                     metadata.setdefault("source", source)
-                    # 先写真值源（原文与分块边界）再写向量：反过来的话，向量写成功而
-                    # 真值行失败就会留下无法解释的孤立向量。
-                    if repository is not None:
-                        repository.upsert_chunk(
-                            ChunkRecord(
-                                chunk_id=chunk.id,
-                                document_id=document.id,
-                                chunk_index=int(chunk.metadata["chunk_index"]),
-                                char_start=span.char_start,
-                                char_end=span.char_end,
-                                text=chunk.content,
-                            )
-                        )
-                    item = self.manager.add(chunk.content, memory_type=MemoryType.SEMANTIC, metadata=metadata, item_id=chunk.id)
+                    # 混合索引（先写真值源再写向量、再置 vector_status）的唯一实现
+                    # 在 tool/hybrid_index.py；函数内导入避免 memory.rag -> tool 的
+                    # 模块级初始化环。
+                    from tool.hybrid_index import index_chunk
+
+                    item = index_chunk(
+                        self.manager,
+                        repository,
+                        chunk_id=chunk.id,
+                        document_id=document.id,
+                        chunk_index=int(chunk.metadata["chunk_index"]),
+                        char_start=span.char_start,
+                        char_end=span.char_end,
+                        text=chunk.content,
+                        metadata=metadata,
+                    )
                     items.append(item)
                     report["chunks"] += 1
-                    if repository is not None:
-                        repository.set_chunk_vector_status(chunk.id, "indexed")
                     if not self.auto_extract:
                         continue
                     try:
@@ -384,109 +355,6 @@ class RAGPipeline:
                 )
         return results
 
-    def _vector_hits(self, query: str, *, limit: int, threshold: float | None, metadata: Mapping[str, Any] | None) -> list[tuple[str, float]]:
-        """向量路 ``(chunk_id, 相似度)``；不可用时返回空表（并写下降级原因）。
-
-        不再做请求前的 TCP 可达性探测（历史隧道网关的产物）：云端端点一次
-        urlopen 的代价与探测相同，失败时异常本身就是降级信号。
-        """
-
-        try:
-            results = self.manager.search(query, memory_type=MemoryType.SEMANTIC, limit=limit, threshold=threshold, metadata=metadata)
-        except (ConnectionError, OSError, RuntimeError) as exc:
-            self.last_retrieval_note = f"向量检索失败，本次检索降级为纯关键词（FTS5）：{type(exc).__name__}: {exc}"
-            return []
-        return [(result.item.id, float(result.score)) for result in results]
-
-    def hybrid_retrieve(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
-        """向量路 × FTS5 关键词路，RRF 融合；向量不可用时退化为纯关键词（D8）。
-
-        精确词（型号、编号、代码标识符）向量区分度差，转述又只有向量能召回，
-        两路互补；任一投影不可用都不能让检索整体失败。
-        """
-
-        repository = self.document_repo()
-        if not _hybrid_enabled() or repository is None:
-            return self.retrieve(query, limit=limit, threshold=threshold, metadata=metadata)
-        self.last_retrieval_note = ""
-        vector_hits = self._vector_hits(query, limit=limit * 2, threshold=threshold, metadata=metadata)
-        keyword_hits = [
-            (chunk_id, float(score))
-            for chunk_id, score in repository.search_keywords(query, limit=limit * 2)
-        ]
-        # U4：两路的原始分数在融合前留一份，否则 RRF 只留下名次、贡献不可见。
-        vector_scores = dict(vector_hits)
-        keyword_scores = dict(keyword_hits)
-        results: list[RetrievedChunk] = []
-        fused = _rrf_fuse([[chunk_id for chunk_id, _ in vector_hits],
-                           [chunk_id for chunk_id, _ in keyword_hits]])[:limit]
-        for chunk_id, score in fused:
-            chunk = repository.get_chunk(chunk_id)
-            if chunk is not None:  # 真值源没有的分块不返回（孤立向量不外泄）
-                results.append(
-                    RetrievedChunk(
-                        chunk.text, score, chunk.chunk_id, _chunk_metadata(chunk),
-                        detail={
-                            # 与对外 score 同源同值（不在这里四舍五入，展示精度交给前端）
-                            "rrf_score": float(score),
-                            "vector_score": vector_scores.get(chunk_id),
-                            "keyword_score": keyword_scores.get(chunk_id),
-                        },
-                    )
-                )
-        return results
-
-    def hybrid_retrieve_multi(self, queries: list[str], *, limit: int = RAG_RETRIEVE_LIMIT, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[RetrievedChunk]:
-        """F3：每条子查询各跑向量+关键词路，N 路 rank 列表一起丢给 RRF 融合。"""
-
-        queries = [query for query in queries if isinstance(query, str) and query.strip()]
-        if not queries:
-            return []
-        if len(queries) == 1:
-            return self.hybrid_retrieve(queries[0], limit=limit, threshold=threshold, metadata=metadata)
-        repository = self.document_repo()
-        if not _hybrid_enabled() or repository is None:
-            results: list[RetrievedChunk] = []
-            seen: set[str] = set()
-            for query in queries:
-                for chunk in self.retrieve(query, limit=limit, threshold=threshold, metadata=metadata):
-                    if chunk.memory_id in seen:
-                        continue
-                    seen.add(chunk.memory_id)
-                    results.append(chunk)
-            return results[:limit]
-        self.last_retrieval_note = ""
-        vector_rank_lists: list[list[str]] = []
-        keyword_rank_lists: list[list[str]] = []
-        vector_scores: dict[str, float] = {}
-        keyword_scores: dict[str, float] = {}
-        for query in queries:
-            vector_hits = self._vector_hits(query, limit=limit * 2, threshold=threshold, metadata=metadata)
-            keyword_hits = [
-                (chunk_id, float(score))
-                for chunk_id, score in repository.search_keywords(query, limit=limit * 2)
-            ]
-            vector_rank_lists.append([chunk_id for chunk_id, _ in vector_hits])
-            keyword_rank_lists.append([chunk_id for chunk_id, _ in keyword_hits])
-            vector_scores.update(vector_hits)
-            keyword_scores.update(keyword_hits)
-        fused = _rrf_fuse([*(vector_rank_lists), *(keyword_rank_lists)])[:limit]
-        results = []
-        for chunk_id, score in fused:
-            chunk = repository.get_chunk(chunk_id)
-            if chunk is not None:  # 真值源没有的分块不返回（孤立向量不外泄）
-                results.append(
-                    RetrievedChunk(
-                        chunk.text, score, chunk.chunk_id, _chunk_metadata(chunk),
-                        detail={
-                            "rrf_score": float(score),
-                            "vector_score": vector_scores.get(chunk_id),
-                            "keyword_score": keyword_scores.get(chunk_id),
-                        },
-                    )
-                )
-        return results
-
     def build_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, separator: str = "\n\n") -> str:
         if not isinstance(separator, str):
             raise TypeError("separator must be a string")
@@ -501,11 +369,6 @@ class RAGPipeline:
         at: str | None = None,
     ) -> GraphRAGResult:
         return self.graph.retrieve(query, limit=limit, hops=hops, at=at)
-
-    def graph_retrieve_multi(self, queries: list[str], *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS) -> GraphRAGResult:
-        """F3：多路图检索（分解后的子查询分别查，路径融合）。"""
-
-        return self.graph.retrieve_multi(queries, limit=limit, hops=hops)
 
     def graph_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS, max_chars: int = RAG_CONTEXT_MAX_CHARS) -> str:
         return self.graph.build_context(query, limit=limit, hops=hops, max_chars=max_chars)

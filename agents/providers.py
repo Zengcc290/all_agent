@@ -74,12 +74,6 @@ class ProviderProfile:
     adapter: str = "openai_compatible"
     tool_mode: str = "native_strict"
 
-    @property
-    def api_url(self) -> str:
-        """Public spelling for the normalized URL used by the client."""
-
-        return self.base_url
-
     def public_info(self) -> dict[str, Any]:
         """Return inspectable profile metadata without resolving its secret."""
 
@@ -170,38 +164,6 @@ class ProviderRegistry:
                 f"{profile.api_key_env}"
             )
         raise ValueError(f"provider profile '{profile.name}' has an empty api_key")
-
-    def register_ephemeral(
-        self,
-        name: str,
-        *,
-        api_key: str,
-        base_url: str,
-        default_model: str,
-    ) -> None:
-        """Register an in-memory profile for legacy integrations.
-
-        New applications should put metadata and credentials in TOML. This
-        escape hatch exists only for callers that inject
-        credentials programmatically (for example test doubles).
-        """
-
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ValueError("api_key must be a non-empty string")
-        profile = _parse_profile(
-            name,
-            {
-                "base_url": base_url,
-                "api_key": api_key,
-                "default_model": default_model,
-                "models": [default_model],
-            },
-        )
-        profiles = dict(self._profiles)
-        if name in profiles:
-            raise ValueError(f"provider profile '{name}' already exists")
-        profiles[name] = profile
-        self._profiles = MappingProxyType(profiles)
 
 
 def _parse_document(

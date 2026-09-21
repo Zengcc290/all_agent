@@ -47,7 +47,6 @@ class _FinalAnswerEchoer:
         write: Callable[[str], None] | None,
         prefix: str = "\nAI：",
     ) -> None:
-        self._mode = mode
         self._write = write or _default_echo_write
         self._prefix = prefix
         self._buffer = ""

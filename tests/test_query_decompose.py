@@ -3,8 +3,8 @@
 覆盖：
 - NullQueryDecomposer 返回原句（LLM 关掉时结果与今天一致）；
 - LLMQueryDecomposer 解析合法 JSON、原句永远第一条、去重、截断；
-- hybrid_retrieve_multi 多路融合召回高于单路（A/B 对比）；
-- graph_retrieve_multi 路径按 effective 合并去重。
+- hybrid_recall_multi 多路融合召回高于单路（A/B 对比）；
+- graph_recall_multi 路径按 effective 合并去重。
 """
 
 from __future__ import annotations
@@ -13,10 +13,13 @@ import pytest
 from conftest import HashEmbedding
 
 from memory import MemoryConfig, MemoryManager, Neo4jGraphStore
-from memory.rag import Document, GraphRAGPipeline, RAGPipeline
-from memory.rag.knowledge import (
+from memory.rag import Document, RAGPipeline
+from tool.hybrid_recall import hybrid_recall
+from tool.multi_recall import (
     LLMQueryDecomposer,
     NullQueryDecomposer,
+    graph_recall_multi,
+    hybrid_recall_multi,
 )
 
 
@@ -101,10 +104,10 @@ def test_hybrid_retrieve_multi_recalls_more_than_single(manager: MemoryManager):
     )
     assert DocumentRepository(str(db)) is not None
 
-    single = pipeline.hybrid_retrieve("DSV4.1 部署在哪", limit=3)
-    multi = pipeline.hybrid_retrieve_multi(
-        ["DSV4.1 部署在哪", "DSV4.1", "部署位置"], limit=3
-    )
+    single = hybrid_recall(pipeline, "DSV4.1 部署在哪", limit=3).chunks
+    multi = hybrid_recall_multi(
+        pipeline, ["DSV4.1 部署在哪", "DSV4.1", "部署位置"], limit=3
+    ).chunks
 
     assert [chunk.memory_id for chunk in multi] == [chunk.memory_id for chunk in multi]
     assert len(multi) >= len(single)
@@ -118,7 +121,7 @@ def test_graph_retrieve_multi_merges_paths_by_effective(manager: MemoryManager):
     manager.semantic.add_fact("B", "knows", "C", confidence=0.8)
     manager.semantic.add_fact("D", "knows", "C", confidence=0.95)
 
-    result = GraphRAGPipeline(manager).retrieve_multi(["A", "D"], limit=5, hops=2)
+    result = graph_recall_multi(RAGPipeline(manager), ["A", "D"], limit=5, hops=2)
 
     assert result.paths
     assert len({path.entities for path in result.paths}) == len(result.paths)  # 去重
@@ -128,11 +131,11 @@ def test_graph_retrieve_multi_merges_paths_by_effective(manager: MemoryManager):
 
 def test_retrieve_multi_rejects_empty_queries(manager: MemoryManager):
     with pytest.raises(ValueError, match="queries"):
-        GraphRAGPipeline(manager).retrieve_multi([])
+        graph_recall_multi(RAGPipeline(manager), [])
 
 
 def test_hybrid_retrieve_multi_empty_queries(manager: MemoryManager):
     pipeline = RAGPipeline(manager)
 
-    assert pipeline.hybrid_retrieve_multi([]) == []
-    assert pipeline.hybrid_retrieve_multi(["", "   "]) == []
+    assert hybrid_recall_multi(pipeline, []).chunks == []
+    assert hybrid_recall_multi(pipeline, ["", "   "]).chunks == []

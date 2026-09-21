@@ -200,6 +200,44 @@ class NullKnowledgeExtractor:
         return ExtractionResult()
 
 
+def response_content(response: Any) -> str:
+    """Read the assistant text out of a chat-completion response (or a raw string).
+
+    Shared by the extractor and by ``tool/multi_recall``'s query decomposer, so
+    both accept the same provider response shapes.
+    """
+
+    if isinstance(response, str):
+        return response
+    choices = response.get("choices") if isinstance(response, Mapping) else getattr(response, "choices", None)
+    if not choices:
+        raise ValueError("knowledge extraction response contained no choices")
+    message = choices[0].get("message") if isinstance(choices[0], Mapping) else getattr(choices[0], "message", None)
+    content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("knowledge extraction response contained no text")
+    return content
+
+
+def parse_json_object(raw: str) -> dict[str, Any]:
+    """Parse a JSON object, tolerating ```json fences and surrounding prose."""
+
+    candidate = raw.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate).strip()
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("knowledge extraction response was not valid JSON")
+        value = json.loads(candidate[start : end + 1])
+    if not isinstance(value, dict):
+        raise TypeError("knowledge extraction response must be a JSON object")
+    return value
+
+
 class LLMKnowledgeExtractor:
     """Extract structured knowledge through an OpenAI-compatible chat client."""
 
@@ -313,8 +351,8 @@ class LLMKnowledgeExtractor:
             timeout=self.timeout,
             stream=False,
         )
-        raw = self._content(response)
-        return ExtractionResult.model_validate(self._parse_json(raw))
+        raw = response_content(response)
+        return ExtractionResult.model_validate(parse_json_object(raw))
 
     @staticmethod
     def _image_data_url(image: Any, mime_type: str) -> str:
@@ -324,115 +362,6 @@ class LLMKnowledgeExtractor:
         if isinstance(image, str) and image.strip():
             return image.strip()
         raise TypeError("image must be bytes or a non-empty URL/data URI")
-
-    @staticmethod
-    def _content(response: Any) -> str:
-        if isinstance(response, str):
-            return response
-        choices = response.get("choices") if isinstance(response, Mapping) else getattr(response, "choices", None)
-        if not choices:
-            raise ValueError("knowledge extraction response contained no choices")
-        message = choices[0].get("message") if isinstance(choices[0], Mapping) else getattr(choices[0], "message", None)
-        content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("knowledge extraction response contained no text")
-        return content
-
-    @staticmethod
-    def _parse_json(raw: str) -> dict[str, Any]:
-        candidate = raw.strip()
-        if candidate.startswith("```"):
-            candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
-            candidate = re.sub(r"\s*```$", "", candidate).strip()
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            start, end = candidate.find("{"), candidate.rfind("}")
-            if start < 0 or end <= start:
-                raise ValueError("knowledge extraction response was not valid JSON")
-            value = json.loads(candidate[start : end + 1])
-        if not isinstance(value, dict):
-            raise TypeError("knowledge extraction response must be a JSON object")
-        return value
-
-
-class QueryDecomposer(Protocol):
-    """F3：把一句话拆成多种待测查询（协议，与 KnowledgeExtractor 同构）。"""
-
-    def decompose(self, query: str) -> list[str]: ...
-
-
-class NullQueryDecomposer:
-    """LLM 不可用时的安全降级：永不因分解失败而答不出来，返回原句。"""
-
-    def decompose(self, query: str) -> list[str]:
-        return [query.strip()] if isinstance(query, str) and query.strip() else []
-
-
-class LLMQueryDecomposer:
-    """Decompose one question into multiple probe queries through the chat client."""
-
-    SYSTEM_PROMPT = (
-        "你是检索问句分解器。只输出一个合法 JSON 对象，不要 Markdown、解释或额外文字。\n"
-        "任务：把用户的问句拆成若干更短的待测查询，交给检索工具分别执行后融合。\n"
-        "\n"
-        "【要求】\n"
-        "1. sub_queries 里每项是一条更短的查询；第一条必须是原句本身。\n"
-        "2. 最多 6 条；去重；不要添加原文没有的实体或数字。\n"
-        "3. 针对关系词、别称、上位词各给一条变体（如「小红的亲戚是谁」→「小红」、"
-        "「小红 亲戚」、「小红 亲属 关系」）。\n"
-        "\n"
-        "字段格式：{\"sub_queries\": string[]}。"
-    )
-
-    MAX_SUB_QUERIES = 6
-
-    def __init__(
-        self,
-        complete: Callable[..., Any],
-        *,
-        model: str | None = None,
-        timeout: float = 60.0,
-    ) -> None:
-        if not callable(complete):
-            raise TypeError("complete must be callable")
-        self.complete = complete
-        self.model = model
-        self.timeout = timeout
-
-    def decompose(self, query: str) -> list[str]:
-        if not isinstance(query, str) or not query.strip():
-            return []
-        messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps({"query": query}, ensure_ascii=False)},
-        ]
-        try:
-            response = self.complete(
-                messages,
-                model=self.model,
-                temperature=0.0,
-                timeout=self.timeout,
-                stream=False,
-            )
-            raw = LLMKnowledgeExtractor._content(response)
-            value = LLMKnowledgeExtractor._parse_json(raw)
-        except Exception:  # noqa: BLE001 - 分解失败也不能丢原句（永不因分解失败而答不出来）
-            return [query]
-        return self._normalize(query, value)
-
-    def _normalize(self, query: str, value: dict[str, Any]) -> list[str]:
-        """原句永远第一条；去重、截断——分解失败也不能丢原句。"""
-
-        items = value.get("sub_queries") if isinstance(value, dict) else None
-        if not isinstance(items, list):
-            return [query]
-        cleaned = [
-            _clean_text(item, max_length=500)
-            for item in items
-            if isinstance(item, str) and _clean_text(item, max_length=500)
-        ]
-        return [query, *dict.fromkeys(cleaned)][: self.MAX_SUB_QUERIES]
 
 
 def _entity_similarity(left: str, right: str, aliases: list[str] | None = None) -> float:
@@ -486,15 +415,6 @@ class EntityResolver:
     def _exact(self, key: str) -> MemoryItem | None:
         return self._entities.get(key) or self._index.get(key)
 
-    def _alias(self, key: str) -> MemoryItem | None:
-        item = self._index.get(key)
-        if item is None:
-            return None
-        canonical = _normalize_for_match(
-            str(item.metadata.get("canonical_name") or item.content)
-        )
-        return item if key != canonical else None
-
     def _prefix_candidate(self, key: str) -> MemoryItem | None:
         """Longest full-prefix match wins; partial character overlap never does.
 
@@ -524,15 +444,16 @@ class EntityResolver:
         """
 
         canonical = str(item.metadata.get("canonical_name") or item.content)
-        metadata = dict(item.metadata)
-        aliases = {
-            str(value) for value in metadata.get("aliases", []) if str(value).strip()
-        }
-        aliases.add(name)
-        metadata["aliases"] = sorted(aliases)
-        stored = self.manager.semantic.add(
-            canonical,
-            metadata=metadata,
+        # 属性合并/写回/图投影的唯一实现在 tool/graph_node_update.py。
+        # 函数内导入：``tool.graph_node_update`` 属于上层能力模块，模块级导入会
+        # 形成 memory.rag -> tool -> memory 的初始化环。
+        from tool.graph_node_update import update_entity_node
+
+        stored = update_entity_node(
+            self.manager,
+            name,
+            existing=item,
+            aliases=[name],
             importance=item.importance,
             item_id=item.id,
         )
@@ -548,11 +469,7 @@ class EntityResolver:
         key = _normalize_for_match(name)
         if not key:
             return None
-        return (
-            self._exact(key)
-            or self._alias(key)
-            or self._prefix_candidate(key)
-        )
+        return self._exact(key) or self._prefix_candidate(key)
 
     def resolve(
         self,
@@ -569,7 +486,7 @@ class EntityResolver:
         key = _normalize_for_match(name)
         if not key:
             raise ValueError("entity name must not be empty")
-        existing = self._exact(key) or self._alias(key)
+        existing = self._exact(key)
         # Only an exact canonical/alias hit may donate the written name as a new
         # alias, so a lookalike name never pollutes the entity it resembles.
         name_is_known = existing is not None
@@ -586,41 +503,26 @@ class EntityResolver:
                 if _entity_similarity(name, canonical, known_aliases) >= self.similarity_threshold:
                     existing = item
                     break
-        item_id = existing.id if existing is not None else entity_id_for(name)
-        metadata = dict(existing.metadata if existing is not None else {})
-        canonical = str(metadata.get("canonical_name") or (existing.content if existing else name))
-        known_aliases = {
-            str(value) for value in metadata.get("aliases", []) if str(value).strip()
-        }
-        if name != canonical and name_is_known:
-            known_aliases.add(name)
-        if aliases:
-            known_aliases.update(str(value).strip() for value in aliases if str(value).strip() and str(value).strip() != canonical)
-        source_ids = {
-            str(value) for value in metadata.get("source_ids", []) if str(value).strip()
-        }
-        if source_id:
-            source_ids.add(source_id)
-        metadata.update(
-            {
-                "kind": "entity",
-                "title": canonical,
-                "canonical_name": canonical,
-                "entity_type": entity_type or metadata.get("entity_type", "概念"),
-                "description": description or metadata.get("description", ""),
-                "domain": domain or metadata.get("domain", DEFAULT_DOMAIN),
-                "aliases": sorted(known_aliases),
-                "source_ids": sorted(source_ids),
-            }
+        # 节点属性（domain/type/description/aliases/importance/source_ids）的合并与
+        # 写回已收敛到 tool/graph_node_update.py 的 update_entity_node：这里是唯一的
+        # 属性更新实现，本类只负责「名字 -> 已有实体」的匹配。
+        from tool.graph_node_update import update_entity_node
+
+        stored = update_entity_node(
+            self.manager,
+            name,
+            existing=existing,
+            domain=domain,
+            entity_type=entity_type,
+            description=description,
+            aliases=aliases,
+            importance=confidence,
+            source_id=source_id,
+            add_written_name=name_is_known,
+            item_id=existing.id if existing is not None else entity_id_for(name),
         )
-        item = self.manager.semantic.add(
-            canonical,
-            metadata=metadata,
-            importance=max(float(confidence), float(existing.importance) if existing else 0.0),
-            item_id=item_id,
-        )
-        self._remember(item)
-        return canonical
+        self._remember(stored)
+        return str(stored.metadata.get("canonical_name") or stored.content)
 
 
 def materialize_extraction(
@@ -1025,6 +927,8 @@ __all__ = [
     "is_prefix_match",
     "materialize_extraction",
     "normalize_entity_name",
+    "parse_json_object",
     "predicate_key_for",
     "relation_id_for",
+    "response_content",
 ]

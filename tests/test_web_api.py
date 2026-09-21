@@ -993,12 +993,15 @@ def test_cloud_down_keeps_read_paths_alive(tmp_path: Path, monkeypatch: pytest.M
         assert listing["total"] == 1
         assert client.get("/api/stats").status_code == 200
 
-        # 关键词路仍然召回，且检索管道明确记录降级原因（不返回空、不伪造相似度）
-        hits = app.state.pipeline.hybrid_retrieve("abc-123", limit=3)
+        # 关键词路仍然召回，且混合召回明确返回降级原因（不返回空、不伪造相似度）
+        from tool.hybrid_recall import hybrid_recall
+
+        recall = hybrid_recall(app.state.pipeline, "abc-123", limit=3)
+        hits = recall.chunks
         assert hits and "abc-123" in hits[0].content
         assert hits[0].detail["vector_score"] is None       # 没有假装有向量分
         assert hits[0].detail["keyword_score"] is not None
-        assert "降级" in app.state.pipeline.last_retrieval_note
+        assert "降级" in recall.note
     manager.close()
 
 

@@ -318,7 +318,6 @@ class MemoryConfig:
     #: 本地转发代理（http://host:port）。显式配置覆盖默认值；云端 Qdrant/Neo4j
     #: 未配置时由 MemoryManager 使用 constants.DEFAULT_PROXY_URL（7890）。
     proxy_url: str | None = None
-    extra: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.working_memory_capacity, bool) or not isinstance(self.working_memory_capacity, int) or self.working_memory_capacity < 1:
@@ -362,8 +361,6 @@ class MemoryConfig:
             raise ValueError("qdrant_api_key must be a non-empty string or None")
         if not isinstance(self.proxy_url, (str, type(None))) or (isinstance(self.proxy_url, str) and not self.proxy_url.strip()):
             raise ValueError("proxy_url must be a non-empty string or None")
-        if not isinstance(self.extra, dict):
-            self.extra = dict(self.extra)
 
     @classmethod
     def from_config(cls) -> MemoryConfig:
@@ -378,12 +375,6 @@ class MemoryConfig:
         values: dict[str, object] = {}
         _merge_services_into(values, load_services_config())
         return cls(**values)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            key: (str(value) if isinstance(value, Path) else value)
-            for key, value in self.__dict__.items()
-        }
 
 
 class BaseMemory:
@@ -431,7 +422,6 @@ class BaseMemory:
         metadata: Mapping[str, Any] | None = None,
         importance: float = 0.5,
         ttl_seconds: float | None = None,
-        expires_at: datetime | str | None = None,
         timestamp: datetime | str | None = None,
         item_id: str | None = None,
         payload: Any = None,
@@ -440,8 +430,8 @@ class BaseMemory:
     ) -> MemoryItem:
         if not isinstance(content, str):
             content = str(content)
-        if expires_at is not None and ttl_seconds is not None:
-            raise ValueError("provide either ttl_seconds or expires_at, not both")
+        #: TTL 是唯一的过期入口（``expires_at`` 由它派生），没有直传的调用方。
+        expires_at: datetime | None = None
         if ttl_seconds is None and self.memory_type == MemoryType.WORKING:
             ttl_seconds = self.config.default_ttl_seconds
         if ttl_seconds is not None:
