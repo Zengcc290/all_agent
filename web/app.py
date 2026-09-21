@@ -54,7 +54,6 @@ from constants import (
     WEB_FACT_SUBJECT_MAX,
     WEB_GRAPH_RAG_LIMIT_MAX,
     WEB_GRAPH_RAG_QUERY_MAX,
-    WEB_IMPORT_ERRORS_MAX,
     WEB_INGEST_CHUNK_SIZE,
     WEB_KNOWLEDGE_MAX_CHARS,
 )
@@ -68,7 +67,9 @@ from memory.embedding_lock import (
 )
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
+from tool.export_knowledge import export_filename, export_payload
 from tool.hybrid_recall import hybrid_recall
+from tool.import_knowledge import import_items, parse_import_payload
 from tool.reconcile import fact_items, reconcile_report
 from tool.repair_drift import repair_drift
 
@@ -632,28 +633,13 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     @app.get("/api/export")
     def export(request: Request) -> JSONResponse:
-        manager = the_manager()
-        items = [item.to_dict() for item in manager.list(include_expired=False)]
-        payload = {
-            "format": "knowledge-nebula-export/v1",
-            "exported_at": datetime.now(UTC).isoformat(),
-            "counts": {
-                "total": len(items),
-                "semantic": sum(
-                    1 for item in items if item["memory_type"] == "semantic"
-                ),
-                "episodic": sum(
-                    1 for item in items if item["memory_type"] == "episodic"
-                ),
-            },
-            "items": items,
-        }
+        # 载荷构造的唯一实现在 tool/export_knowledge.py（limit=0 表示全量导出）。
+        payload = export_payload(the_manager(), limit=0)
         # 导出文件名用本地时间戳（面向用户，非持久化时间语义）。
-        stamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
         return JSONResponse(
             payload,
             headers={
-                "Content-Disposition": f'attachment; filename="knowledge_export_{stamp}.json"'
+                "Content-Disposition": f'attachment; filename="{export_filename()}"'
             },
         )
 
@@ -664,104 +650,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             raw = tmp_path.read_bytes()
         finally:
             tmp_path.unlink(missing_ok=True)
+        # 解析与逐条写入的唯一实现在 tool/import_knowledge.py；非法 JSON 仍是 400。
         try:
-            # 导入文件严格 JSON：拒绝 NaN/Infinity，避免把非有限数值写进记忆库
-            # （项目的模型/API 全链路都用 reject_json_constant 保证严格有限）。
-            data = json.loads(
-                raw.decode("utf-8"),
-                parse_constant=_reject_json_constant,
-            )
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"不是合法的 JSON：{exc}")
-        entries = data.get("items") if isinstance(data, dict) else data
-        if not isinstance(entries, list):
-            raise HTTPException(status_code=400, detail="JSON 中找不到 items 数组")
-
-        manager = the_manager()
-        existing_facts = {
-            (
-                item.metadata.get("subject"),
-                item.metadata.get("predicate"),
-                item.metadata.get("object"),
-            )
-            for item in manager.list(memory_type=MemoryType.SEMANTIC)
-            if item.metadata.get("subject")
-            and item.metadata.get("predicate")
-            and item.metadata.get("object")
-        }
-        imported = skipped = 0
-        errors: list[str] = []
-
-        def note_error(message: str) -> None:
-            """Keep the response bounded: first WEB_IMPORT_ERRORS_MAX reasons."""
-            if len(errors) < WEB_IMPORT_ERRORS_MAX:
-                errors.append(message)
-
-        for position, raw_item in enumerate(entries, start=1):
-            if not isinstance(raw_item, dict):
-                skipped += 1
-                note_error(f"第 {position} 项：不是 JSON 对象")
-                continue
-            item_id = raw_item.get("id")
-            content = raw_item.get("content") or ""
-            if not item_id or not content:
-                skipped += 1
-                note_error(
-                    f"第 {position} 项（id={item_id or '缺失'}）：缺少 id 或 content"
-                )
-                continue
-            if manager.get(item_id) is not None:
-                skipped += 1
-                continue
-            md = raw_item.get("metadata") or {}
-            if not isinstance(md, dict):
-                skipped += 1
-                note_error(f"{item_id}: metadata 必须是 JSON 对象")
-                continue
-            memory_type = raw_item.get("memory_type") or "semantic"
-            if not isinstance(memory_type, str) or memory_type not in set(
-                type_.value for type_ in MemoryType
-            ):
-                skipped += 1
-                note_error(f"{item_id}: 未知 memory_type：{memory_type!r}")
-                continue
-            importance = raw_item.get("importance", 0.5)
-            subject, predicate, obj = (
-                md.get("subject"),
-                md.get("predicate"),
-                md.get("object"),
-            )
-            try:
-                if subject and predicate and obj:
-                    # 事实：按三元组幂等，避免重复导入时长出重边。
-                    if (subject, predicate, obj) in existing_facts:
-                        skipped += 1
-                        continue
-                    existing_facts.add((subject, predicate, obj))
-                    manager.semantic.add_fact(
-                        subject,
-                        predicate,
-                        obj,
-                        metadata=md,
-                        confidence=float(importance),
-                    )
-                else:
-                    manager.add(
-                        content,
-                        memory_type=memory_type,
-                        metadata=md,
-                        item_id=item_id,
-                        importance=float(importance),
-                    )
-                imported += 1
-            except Exception as exc:  # noqa: BLE001 - 单条失败只跳过该条并记录原因
-                # 历史上这里静默吞掉所有异常，用户只看到 skipped 计数却不知道
-                # 哪些条目失败、为什么失败。
-                skipped += 1
-                note_error(f"{item_id}: {type(exc).__name__}: {exc}")
-        if imported:
+            entries = parse_import_payload(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = import_items(the_manager(), entries)
+        if result["imported"]:
             invalidate_graph()
-        return {"imported": imported, "skipped": skipped, "errors": errors}
+        return result
 
     # ------------------------------------------------------------------
     # 文档中心与三库对账（documents/chunks 真值源 → 向量/图投影）

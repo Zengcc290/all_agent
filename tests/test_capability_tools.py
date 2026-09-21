@@ -1,17 +1,19 @@
-"""能力工具契约：混合索引 / 混合召回 / 多路混合召回 / 图节点更新。
+"""能力工具契约：混合索引 / 混合召回 / 多路召回 / 图节点更新 / 三库对账 / 导出导入。
 
-这四个能力原先内嵌在 ``RAGPipeline``（``hybrid_retrieve``/``hybrid_retrieve_multi``/
-``_vector_hits``/``_rrf_fuse``/``ingest`` 里的双写）、``GraphRAGPipeline.retrieve_multi``
-和 ``EntityResolver.resolve`` 里，只能整条管道调用。拆到 ``tool/`` 下成为独立工具后
-必须同时满足三件事：
+这些能力原先内嵌在 ``RAGPipeline``（``hybrid_retrieve``/``hybrid_retrieve_multi``/
+``_vector_hits``/``_rrf_fuse``/``ingest`` 里的双写）、``GraphRAGPipeline.retrieve_multi``、
+``EntityResolver.resolve`` 与 ``web/app.py``（三库对账、漂移自愈、导出/导入）里，
+只能整条管道或整个 HTTP 端点调用。拆到 ``tool/`` 下成为独立工具后必须同时满足三件事：
 
 1. 能被 ``core.discover_tools`` 自动发现并注册（``TOOL_ENABLED`` + ``create_tool``）；
 2. 读/写副作用标注正确——只读召回不得要求写确认，索引与节点更新必须要求；
-3. 管道内部仍调用同一份实现（不允许出现第二份拷贝），因此这些用例同时是
-   「管道行为不变」的回归。
+3. 管道与 Web 层内部仍调用同一份实现（不允许出现第二份拷贝），因此这些用例同时是
+   「原有行为不变」的回归。
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 from conftest import HashEmbedding
@@ -22,6 +24,13 @@ from memory.base import MemoryType
 from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityResolver
 from memory.storage.vector import InMemoryVectorStore
+from tool.export_knowledge import (
+    EXPORT_FORMAT,
+    ExportKnowledgeInput,
+    ExportKnowledgeTool,
+    export_filename,
+    export_payload,
+)
 from tool.graph_node_update import (
     GraphNodeUpdateInput,
     GraphNodeUpdateTool,
@@ -30,6 +39,12 @@ from tool.graph_node_update import (
 )
 from tool.hybrid_index import HybridIndexInput, HybridIndexTool, index_chunk, repository_for
 from tool.hybrid_recall import HybridRecallInput, HybridRecallTool, hybrid_recall
+from tool.import_knowledge import (
+    ImportKnowledgeInput,
+    ImportKnowledgeTool,
+    import_items,
+    parse_import_payload,
+)
 from tool.multi_recall import (
     MultiRecallInput,
     MultiRecallTool,
@@ -53,6 +68,8 @@ CAPABILITY_TOOLS = (
     "knowledge.graph_node_update",
     "knowledge.reconcile",
     "knowledge.repair_drift",
+    "knowledge.export",
+    "knowledge.import",
 )
 
 
@@ -134,25 +151,33 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """召回/对账类只读（免确认），索引/节点更新/漂移修复类写入（必须确认）。"""
+    """召回/对账/导出类只读（免确认），索引/节点更新/漂移修复/导入类写入（必须确认）。"""
 
-    read_tools = (HybridRecallTool().spec, MultiRecallTool().spec, ReconcileTool().spec)
+    read_tools = (
+        HybridRecallTool().spec,
+        MultiRecallTool().spec,
+        ReconcileTool().spec,
+        ExportKnowledgeTool().spec,
+    )
     write_tools = (
         HybridIndexTool().spec,
         GraphNodeUpdateTool().spec,
         RepairDriftTool().spec,
+        ImportKnowledgeTool().spec,
     )
 
     assert {spec.name for spec in read_tools} == {
         "knowledge.hybrid_recall",
         "knowledge.multi_recall",
         "knowledge.reconcile",
+        "knowledge.export",
     }
     assert all(spec.side_effect == "read" for spec in read_tools)
     assert {spec.name for spec in write_tools} == {
         "knowledge.hybrid_index",
         "knowledge.graph_node_update",
         "knowledge.repair_drift",
+        "knowledge.import",
     }
     assert all(spec.side_effect == "write" for spec in write_tools)
 
@@ -480,3 +505,103 @@ def test_repair_drift_replays_missing_graph_edges(drift_pipeline) -> None:
     )
     assert output.repaired.missing_edge == 1
     assert reconcile_report(manager, repository)["drift"] == []
+
+
+def test_export_tool_serializes_a_self_describing_payload(drift_pipeline) -> None:
+    """导出：带 format 版本号与计数口径的纯 JSON，且 limit 只截断 items 不骗 counts。"""
+
+    manager = drift_pipeline.manager
+    _ingest(drift_pipeline, "设备编号 abc-123 的导出基线。" * 8, "doc-export")
+    manager.semantic.add_fact("星云", "部署于", "本机", confidence=0.9)
+
+    output = ExportKnowledgeTool(manager=manager).execute(ExportKnowledgeInput())
+
+    assert output.format == EXPORT_FORMAT
+    assert output.exported_at
+    assert output.filename.startswith("knowledge_export_")
+    assert output.filename.endswith(".json")
+    assert output.counts.total == len(output.items)
+    # 计数口径必须与 items 自洽（导入方先验后写，不靠猜）
+    assert output.counts.semantic == sum(
+        1 for item in output.items if item["memory_type"] == "semantic"
+    )
+    assert output.counts.semantic >= 1
+    assert output.counts.episodic == 0
+    assert all(isinstance(item, dict) for item in output.items)
+
+    # 全量导出（HTTP /api/export 走 limit=0）与记忆库条目数一致
+    full = export_payload(manager, limit=0)
+    assert full["counts"]["total"] == len(list(manager.list(include_expired=False)))
+    assert export_filename(stamp="20260101-000000") == "knowledge_export_20260101-000000.json"
+
+
+def test_export_tool_limit_is_bounded_for_tool_results(drift_pipeline) -> None:
+    """工具默认 limit=100：导出结果要能被塞进模型上下文，不能无界增长。"""
+
+    for index in range(3):
+        drift_pipeline.manager.add(f"条目 {index}", memory_type=MemoryType.WORKING)
+
+    bounded = ExportKnowledgeTool(manager=drift_pipeline.manager).execute(
+        ExportKnowledgeInput(limit=2)
+    )
+    assert bounded.counts.total == 2
+    assert len(bounded.items) == 2
+
+
+def test_import_tool_round_trips_and_is_idempotent(drift_pipeline) -> None:
+    """导出 → 导入到另一个库：事实与普通条目都回得来；重复导入不产生重复/重边。"""
+
+    source = drift_pipeline.manager
+    _ingest(drift_pipeline, "设备编号 abc-123 的导入基线。" * 8, "doc-import")
+    source.semantic.add_fact("星云", "部署于", "本机", confidence=0.9)
+    exported = export_payload(source, limit=0)
+    payload = json.dumps(exported, ensure_ascii=False)
+
+    target = MemoryManager(MemoryConfig(), embedding=HashEmbedding())
+    tool = ImportKnowledgeTool(manager=target)
+    first = tool.execute(ImportKnowledgeInput(payload=payload))
+    second = tool.execute(ImportKnowledgeInput(payload=payload))
+
+    assert first.imported == len(exported["items"])
+    assert first.skipped == 0
+    assert first.errors == []
+    # 幂等：第二次全部按 id / 三元组跳过
+    assert second.imported == 0
+    assert second.skipped == first.imported
+    assert len(list(target.list(include_expired=False))) == len(
+        list(source.list(include_expired=False))
+    )
+
+
+def test_import_tool_rejects_non_finite_and_malformed_payloads() -> None:
+    """严格 JSON：NaN/Infinity、缺 items、坏 UTF-8 都必须是 ValueError（HTTP 层映射 400）。"""
+
+    with pytest.raises(ValueError, match="不是合法的 JSON"):
+        parse_import_payload(b'{"items": [{"id": "x", "importance": NaN}]}')
+    with pytest.raises(ValueError, match="找不到 items 数组"):
+        parse_import_payload(b'{"format": "x"}')
+    with pytest.raises(ValueError, match="不是合法的 JSON"):
+        parse_import_payload(b"\xff\xfe\x00")
+    # 裸数组是合法的（历史导出文件没有外层包装）
+    assert parse_import_payload(b'[{"id": "a", "content": "b"}]') == [
+        {"id": "a", "content": "b"}
+    ]
+
+
+def test_import_tool_reports_per_item_reasons_within_the_cap(manager) -> None:
+    """单条失败不拖垮整批：能写的照写，失败原因有上限且逐条说明。"""
+
+    entries = [
+        "不是对象",
+        {"id": "", "content": "缺 id"},
+        {"id": "ok-1", "content": "正常条目", "memory_type": "working"},
+        {"id": "bad-type", "content": "x", "memory_type": "不存在的层"},
+        {"id": "ok-2", "content": "又一条", "metadata": "不是对象"},
+    ]
+    result = import_items(manager, entries, max_errors=2)
+
+    assert result["imported"] == 1
+    assert result["skipped"] == 4
+    assert len(result["errors"]) == 2
+    assert "不是 JSON 对象" in result["errors"][0]
+    assert manager.get("ok-1") is not None
