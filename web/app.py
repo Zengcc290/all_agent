@@ -74,7 +74,8 @@ from tool.graph_snapshot import build_graph
 from tool.hybrid_recall import hybrid_recall
 from tool.import_knowledge import import_items, parse_import_payload
 from tool.ingest_image import ingest_image
-from tool.reconcile import fact_items, reconcile_report
+from tool.knowledge_stats import knowledge_stats
+from tool.reconcile import reconcile_report
 from tool.repair_drift import repair_drift
 from tool.seed_knowledge import seed
 
@@ -715,14 +716,9 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     @app.get("/api/stats")
     def stats() -> dict[str, Any]:
-        manager = the_manager()
-        repository = app.state.pipeline.document_repo()
-        counts = repository.stats() if repository is not None else {"documents": 0, "chunks": 0, "chunks_indexed": 0}
-        return {
-            **counts,
-            "facts": len(fact_items(manager)),
-            "memories_total": len(manager.document_store.list(include_expired=True)),
-        }
+        # 统计口径的唯一实现在 tool/knowledge_stats.py（knowledge.stats 工具）：
+        # 同一个函数既服务这个端点，也能被 LLM 直接调用。
+        return knowledge_stats(the_manager(), app.state.pipeline.document_repo()).model_dump()
 
     @app.get("/api/reconcile")
     def reconcile() -> dict[str, Any]:

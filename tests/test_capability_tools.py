@@ -70,6 +70,7 @@ from tool.import_knowledge import (
     parse_import_payload,
 )
 from tool.ingest_image import TEXT_ONLY_WARNING, IngestImageInput, IngestImageTool
+from tool.knowledge_stats import KnowledgeStatsInput, KnowledgeStatsTool, knowledge_stats
 from tool.multi_recall import (
     MultiRecallInput,
     MultiRecallTool,
@@ -119,6 +120,7 @@ CAPABILITY_TOOLS = (
     "knowledge.add_fact",
     "knowledge.seed",
     "knowledge.ingest_image",
+    "knowledge.stats",
 )
 
 
@@ -200,7 +202,7 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """只读类免确认（召回/对账/导出/分类/孤儿/星图/文档读），写入类必须确认（索引/节点/自愈/导入/提案/重嵌入/事实/播种）。"""
+    """只读类免确认（召回/对账/导出/分类/孤儿/星图/文档读/统计），写入类必须确认（索引/节点/自愈/导入/提案/重嵌入/事实/播种/图片）。"""
 
     read_tools = (
         HybridRecallTool().spec,
@@ -212,6 +214,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         GraphSnapshotTool().spec,
         DocumentListTool().spec,
         DocumentGetTool().spec,
+        KnowledgeStatsTool().spec,
     )
     write_tools = (
         HybridIndexTool().spec,
@@ -235,6 +238,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.graph_snapshot",
         "knowledge.document_list",
         "knowledge.document_get",
+        "knowledge.stats",
     }
     assert all(spec.side_effect == "read" for spec in read_tools)
     assert {spec.name for spec in write_tools} == {
@@ -973,3 +977,38 @@ def test_seed_tool_is_idempotent_and_its_rows_are_not_orphans(drift_pipeline, tm
     orphans = OrphanEntitiesTool(manager=manager).execute(OrphanEntitiesInput())
     assert orphans.count == 0
     assert seed(manager, seed_file)["seeded"] is False
+
+
+def test_stats_tool_matches_the_three_store_truth(drift_pipeline) -> None:
+    """统计工具：计数口径必须与真值源/记忆层一致，且只给计数不给内容。"""
+
+    manager = drift_pipeline.manager
+    tool = KnowledgeStatsTool(manager=manager)
+    empty = tool.execute(KnowledgeStatsInput())
+    assert (empty.documents, empty.chunks, empty.chunks_indexed, empty.facts) == (0, 0, 0, 0)
+
+    # 走真实入库路径（建 documents 行 + 分块 + 向量投影），统计口径才有的可数
+    _ingest(drift_pipeline, "统计口径：一段用于计数的正文。" * 6, "doc-stats")
+    AddFactTool(manager=manager).execute(
+        AddFactInput(subject="星", predicate="属于", object="云")
+    )
+
+    stats = tool.execute(KnowledgeStatsInput())
+    repository = repository_for(manager)
+    assert repository is not None
+    counts = repository.stats()
+    assert stats.documents == counts["documents"] == 1
+    assert stats.chunks == counts["chunks"] >= 1
+    assert stats.chunks_indexed == counts["chunks_indexed"] == stats.chunks
+    assert stats.facts == 1
+    assert stats.memories_total == len(manager.document_store.list(include_expired=True))
+    # 只给计数：输出模型里没有任何内容正文字段
+    assert "统计口径" not in stats.model_dump_json()
+
+    # 函数式入口与工具入口同源（web 的 /api/stats 走的就是这个函数）
+    assert knowledge_stats(manager, repository) == stats
+    assert knowledge_stats(manager, None).documents == 0
+
+    spec = tool.spec
+    assert (spec.side_effect, spec.idempotent, spec.parallel_safe) == ("read", True, True)
+    assert spec.guidance.strip()
