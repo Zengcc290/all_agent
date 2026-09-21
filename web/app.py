@@ -46,7 +46,6 @@ from constants import (
     RAG_RETRIEVE_LIMIT,
     WEB_AUTOSEED,
     WEB_CHAT_MAX_CHARS,
-    WEB_DOCUMENTS_PAGE_SIZE_MAX,
     WEB_FACT_DOMAIN_MAX,
     WEB_FACT_NOTE_MAX,
     WEB_FACT_OBJECT_MAX,
@@ -58,7 +57,7 @@ from constants import (
     WEB_KNOWLEDGE_MAX_CHARS,
 )
 from core import ExecutionContext
-from memory import MemoryManager, MemoryType
+from memory import MemoryManager
 from memory.embedding_lock import (
     EmbeddingLockMismatch,
     apply_embedding_lock,
@@ -67,6 +66,9 @@ from memory.embedding_lock import (
 )
 from memory.rag import RAGPipeline
 from memory.storage.document_repo import DocumentRepository
+from tool.document_get import get_document as document_payload
+from tool.document_list import list_documents as list_documents_payload
+from tool.document_revectorize import revectorize_document as revectorize_document_payload
 from tool.export_knowledge import export_filename, export_payload
 from tool.graph_snapshot import build_graph
 from tool.hybrid_recall import hybrid_recall
@@ -679,64 +681,21 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
     @app.get("/api/documents")
     def list_documents(tag: str = "", status: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
-        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= WEB_DOCUMENTS_PAGE_SIZE_MAX:
-            raise HTTPException(
-                status_code=422,
-                detail=f"page_size 必须是 1 到 {WEB_DOCUMENTS_PAGE_SIZE_MAX} 之间的整数",
-            )
-        repository = the_repository()
+        # 列表逻辑的唯一实现在 tool/document_list.py（含 page_size 上限校验）。
         try:
-            items, total = repository.list_documents(tag=tag, status=status, page=page, page_size=page_size)
+            return list_documents_payload(
+                the_repository(), tag=tag, status=status, page=page, page_size=page_size
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        counts = repository.chunk_counts()
-        return {
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "items": [
-                {
-                    "document_id": item.document_id,
-                    "title": item.title,
-                    "source": item.source,
-                    "tags": item.tags,
-                    "status": item.status,
-                    "chunk_count": counts.get(item.document_id, 0),
-                    "created_at": item.created_at,
-                }
-                for item in items
-            ],
-        }
 
     @app.get("/api/documents/{document_id}")
     def get_document(document_id: str) -> dict[str, Any]:
-        repository = the_repository()
-        document = repository.get_document(document_id)
-        if document is None:
-            raise HTTPException(status_code=404, detail="文档不存在")
-        return {
-            "document_id": document.document_id,
-            "title": document.title,
-            "raw_text": document.raw_text,
-            "source": document.source,
-            "tags": document.tags,
-            "permission": document.permission,
-            "status": document.status,
-            "error": document.error,
-            "created_at": document.created_at,
-            "updated_at": document.updated_at,
-            "chunks": [
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "chunk_index": chunk.chunk_index,
-                    "char_start": chunk.char_start,
-                    "char_end": chunk.char_end,
-                    "text": chunk.text,
-                    "vector_status": chunk.vector_status,
-                }
-                for chunk in repository.list_chunks(document_id)
-            ],
-        }
+        # 详情逻辑的唯一实现在 tool/document_get.py。
+        try:
+            return document_payload(the_repository(), document_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/documents/{document_id}/revectorize")
     def revectorize_document(
@@ -745,35 +704,25 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """重建该文档的向量投影；网关不可达时明确失败，绝不切换到别的向量空间（D8）。"""
 
-        guard_embedding(confirm_rebuild=confirm_rebuild)
-        repository = the_repository()
-        document = repository.get_document(document_id)
-        if document is None:
-            raise HTTPException(status_code=404, detail="文档不存在")
-        chunks = repository.list_chunks(document_id)
-        if not chunks:
-            raise HTTPException(status_code=422, detail="该文档没有分块，无法重嵌入")
-        manager = the_manager()
+        # 重嵌入的唯一实现在 tool/document_revectorize.py（锁闸门顺序也一致）。
         try:
-            vectors = manager.embedding.embed_batch([chunk.text for chunk in chunks])
-            for chunk, vector in zip(chunks, vectors, strict=True):
-                manager.vector_store.upsert_chunk(
-                    chunk.chunk_id,
-                    vector,
-                    document_id=chunk.document_id,
-                    chunk_index=chunk.chunk_index,
-                    source=document.source,
-                    memory_type=MemoryType.SEMANTIC.value,
-                )
-                repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
+            return revectorize_document_payload(
+                the_manager(),
+                the_repository(),
+                document_id,
+                confirm_rebuild=confirm_rebuild,
+            )
+        except EmbeddingLockMismatch as exc:
+            raise HTTPException(status_code=409, detail=exc.to_detail()) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except HTTPException:
             raise
         except Exception as exc:
             raise_embedding_http(exc)
             raise HTTPException(status_code=502, detail=f"重嵌入失败：{type(exc).__name__}: {exc}") from exc
-        status = "extracted" if document.status == "extracted" else "vectorized"
-        repository.set_status(document_id, status)
-        return {"document_id": document_id, "chunks_reindexed": len(chunks), "status": status}
 
     @app.get("/api/stats")
     def stats() -> dict[str, Any]:

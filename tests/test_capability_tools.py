@@ -18,12 +18,21 @@ import json
 import pytest
 from conftest import HashEmbedding
 
+from constants import WEB_DOCUMENTS_PAGE_SIZE_MAX
 from core import ToolRegistry, discover_tools
 from memory import MemoryConfig, MemoryManager
 from memory.base import MemoryType
 from memory.rag import Document, RAGPipeline
 from memory.rag.knowledge import EntityResolver
+from memory.storage.document_repo import DocumentRecord
 from memory.storage.vector import InMemoryVectorStore
+from tool.document_get import DocumentGetInput, DocumentGetTool, get_document
+from tool.document_list import DocumentListInput, DocumentListTool, list_documents
+from tool.document_revectorize import (
+    DocumentRevectorizeInput,
+    DocumentRevectorizeTool,
+    revectorize_document,
+)
 from tool.domain_classify import (
     KNOWN_DOMAINS,
     ClassifyDomainInput,
@@ -97,6 +106,9 @@ CAPABILITY_TOOLS = (
     "knowledge.orphan_entities",
     "knowledge.propose_cleanup",
     "knowledge.graph_snapshot",
+    "knowledge.document_list",
+    "knowledge.document_get",
+    "knowledge.document_revectorize",
 )
 
 
@@ -178,7 +190,7 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """只读类免确认（召回/对账/导出/分类/孤儿/星图），写入类必须确认（索引/节点/自愈/导入/提案）。"""
+    """只读类免确认（召回/对账/导出/分类/孤儿/星图/文档读），写入类必须确认（索引/节点/自愈/导入/提案/重嵌入）。"""
 
     read_tools = (
         HybridRecallTool().spec,
@@ -188,6 +200,8 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         ClassifyDomainTool().spec,
         OrphanEntitiesTool().spec,
         GraphSnapshotTool().spec,
+        DocumentListTool().spec,
+        DocumentGetTool().spec,
     )
     write_tools = (
         HybridIndexTool().spec,
@@ -195,6 +209,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         RepairDriftTool().spec,
         ImportKnowledgeTool().spec,
         ProposeCleanupTool().spec,
+        DocumentRevectorizeTool().spec,
     )
 
     assert {spec.name for spec in read_tools} == {
@@ -205,6 +220,8 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.classify_domain",
         "knowledge.orphan_entities",
         "knowledge.graph_snapshot",
+        "knowledge.document_list",
+        "knowledge.document_get",
     }
     assert all(spec.side_effect == "read" for spec in read_tools)
     assert {spec.name for spec in write_tools} == {
@@ -213,6 +230,7 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.repair_drift",
         "knowledge.import",
         "knowledge.propose_cleanup",
+        "knowledge.document_revectorize",
     }
     assert all(spec.side_effect == "write" for spec in write_tools)
 
@@ -739,3 +757,81 @@ def test_propose_cleanup_tool_never_leaks_the_confirm_token(manager) -> None:
     )
     assert store.get(output.proposal_id).status == "pending"
     assert manager.get(output.item_ids[0]) is not None
+
+
+def test_document_tools_read_the_truth_source(drift_pipeline) -> None:
+    """文档列表/详情：读真值源；分页上限与缺失文档都如实报错，截断不骗计数。"""
+
+    _ingest(drift_pipeline, "设备编号 abc-123 的文档中心基线。" * 8, "doc-center")
+    manager = drift_pipeline.manager
+    repository = repository_for(manager)
+    assert repository is not None
+
+    listing = DocumentListTool(manager=manager).execute(DocumentListInput(page_size=10))
+    assert listing.total == 1
+    assert listing.page == 1
+    assert [item.document_id for item in listing.items] == ["doc-center"]
+    assert listing.items[0].chunk_count >= 1
+    assert listing.items[0].status
+
+    detail = DocumentGetTool(manager=manager).execute(
+        DocumentGetInput(document_id="doc-center")
+    )
+    assert detail.chunk_count == len(detail.chunks) == listing.items[0].chunk_count
+    assert detail.raw_text
+    assert all(chunk.vector_status == "indexed" for chunk in detail.chunks)
+    assert detail.truncated is False
+
+    # max_chunks 只裁剪列表，chunk_count 始终是全量
+    capped = DocumentGetTool(manager=manager).execute(
+        DocumentGetInput(document_id="doc-center", max_chunks=1)
+    )
+    assert capped.chunk_count == detail.chunk_count
+    assert len(capped.chunks) == 1
+    assert capped.truncated is (detail.chunk_count > 1)
+
+    with pytest.raises(LookupError, match="文档不存在"):
+        get_document(repository, "不存在的文档")
+    with pytest.raises(ValueError, match="page_size"):
+        list_documents(repository, page_size=WEB_DOCUMENTS_PAGE_SIZE_MAX + 1)
+
+
+def test_document_revectorize_tool_only_touches_that_document(drift_pipeline) -> None:
+    """重嵌入：只重灌指定文档的分块，另一篇一条不动；缺文档/缺分块都如实报错。"""
+
+    _ingest(drift_pipeline, "设备编号 abc-123 的重嵌入基线。" * 8, "doc-revec")
+    _ingest(drift_pipeline, "另一篇文档，用于验证互不影响。" * 8, "doc-other")
+    manager = drift_pipeline.manager
+    repository = repository_for(manager)
+    assert repository is not None
+    other_before = [chunk.chunk_id for chunk in repository.list_chunks("doc-other")]
+
+    # 模拟投影落后：把目标文档的分块标回待投影
+    for chunk in repository.list_chunks("doc-revec"):
+        repository.set_chunk_vector_status(chunk.chunk_id, "pending")
+
+    output = DocumentRevectorizeTool(manager=manager).execute(
+        DocumentRevectorizeInput(document_id="doc-revec")
+    )
+
+    assert output.document_id == "doc-revec"
+    assert output.chunks_reindexed == len(repository.list_chunks("doc-revec"))
+    assert output.status == "vectorized"
+    assert all(
+        chunk.vector_status == "indexed" for chunk in repository.list_chunks("doc-revec")
+    )
+    # 另一篇文档一条不动
+    assert [chunk.chunk_id for chunk in repository.list_chunks("doc-other")] == other_before
+    assert all(
+        chunk.vector_status == "indexed" for chunk in repository.list_chunks("doc-other")
+    )
+
+    with pytest.raises(LookupError, match="文档不存在"):
+        revectorize_document(manager, repository, "不存在")
+
+    # 没有分块的文档必须明确拒绝（422 语义），而不是静默成功
+    repository.upsert_document(
+        DocumentRecord(document_id="doc-empty", raw_text="正文", source="e.txt")
+    )
+    with pytest.raises(ValueError, match="没有分块"):
+        revectorize_document(manager, repository, "doc-empty")
