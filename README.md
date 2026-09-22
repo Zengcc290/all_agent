@@ -119,7 +119,7 @@ Copy `.env.example` to `.env` and provide credentials locally. Never commit `.en
 ## 知识星云 Web application
 
 The repository also ships an optional FastAPI application that exposes the
-memory system as an HTTP API and serves a Canvas 2D knowledge-graph front end
+memory system as an HTTP API and serves a React single-page front end
 ("知识星云"): chat with the knowledge agent, upload documents for RAG chunking
 plus LLM entity/relation extraction, add facts or single sentences, inspect the
 graph, run hybrid graph+vector retrieval, and export/import the whole memory
@@ -133,9 +133,9 @@ store as JSON.
 
 It starts without any API key: retrieval falls back to the offline
 `HashEmbedding`, and `/api/chat` returns 503 with a configuration hint until a
-chat provider is configured. Set `NEBULA_PORT` to use another port. See
+chat provider is configured. The port comes from `constants.DEFAULT_WEB_PORT` (8765). See
 [`web/README.md`](web/README.md) for the endpoint table, the data flow and the
-static front end layout.
+front end layout (Vite sources in `web/frontend`, built into `web/static`).
 
 The `config/` directory is resolved relative to the project root and is
 therefore meant to run from a checkout (`python -m web.app`); it is not embedded

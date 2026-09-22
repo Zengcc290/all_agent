@@ -1079,20 +1079,17 @@ def test_cloud_down_keeps_read_paths_alive(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_static_smoke_home_page_and_renderable_graph(file_client) -> None:
-    """方案 §10.5 静态冒烟：GET / 200 且含 #universe；/api/graph 返回可渲染的 nodes/edges。"""
+    """静态冒烟：GET / 200 返回 SPA 入口；/api/graph 返回可渲染的 nodes/edges。"""
 
     client, _ = file_client
 
     home = client.get("/")
     assert home.status_code == 200
-    # 方案写的是「含 #universe」= 含该元素；画布样式走元素选择器 canvas{}，没有 #universe 规则
-    assert 'id="universe"' in home.text
-    assert "canvas {" in home.text
-    assert "window.confirm" in home.text
-    assert "confirmation: pending" in home.text
+    # SPA 由 web/frontend 构建到 web/static：入口必须挂载点 + 构建产物引用
+    assert 'id="root"' in home.text
+    assert "/assets/" in home.text
 
     payload = client.get("/api/graph").json()
-    assert isinstance(payload["nodes"], list) and isinstance(payload["edges"], list)
     assert isinstance(payload["nodes"], list) and isinstance(payload["edges"], list)
     for node in payload["nodes"]:
         assert {"id", "kind", "title", "domain", "importance"} <= set(node)

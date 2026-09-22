@@ -14,7 +14,7 @@
 - GET  /api/export   导出全部记忆为 JSON 文件（课设「库→文件」要求）
 - POST /api/import   导入此前导出的 JSON（课设「文件→库」要求）
 - GET  /api/health   健康检查：嵌入模式、聊天可用性
-- /                星云图前端静态页（web/static/index.html）
+- /                SPA 前端静态页（web/static，由 web/frontend 构建生成）
 
 运行：``python -m web.app``（默认 http://127.0.0.1:8765）
 """
@@ -818,7 +818,8 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         }
 
     # ------------------------------------------------------------------
-    # 静态前端（注册在 API 路由之后，避免吞掉 /api/*）
+    # SPA 前端（注册在 API 路由之后，避免吞掉 /api/*）。
+    # 目录由 web/frontend 的 `npm run build` 生成（outDir: ../static）。
     # ------------------------------------------------------------------
     if STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
