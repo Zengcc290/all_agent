@@ -155,7 +155,8 @@ def _norm_entities(raw: Iterable) -> list[dict]:
         out.append({
             "name": name,
             "type": _clean_str(e.get("type") or e.get("label") or "概念", 30) or "概念",
-            "key": norm_key(_clean_str(e.get("key") or "", 128) or name),
+            # key 一律用实体名归一化，与关系表 src_key/tgt_key 对齐（忽略 LLM 拼音 key）
+            "key": norm_key(name),
             "aliases": [_clean_str(a, 60) for a in (e.get("aliases") or e.get("alias") or []) if _clean_str(a, 60)],
             "time": _extract_time(e.get("time"), e.get("date"), e.get("timestamp")),
             "raw_time": _clean_str(e.get("time") or "", 40),

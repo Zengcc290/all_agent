@@ -184,7 +184,7 @@ export default function App() {
         {tab === 'queue' && (
           <>
             <PendingQueue onChanged={onChanged} refreshKey={refreshKey} />
-            <ChunksCard />
+            <ChunksCard onChanged={onChanged} />
           </>
         )}
 
@@ -292,13 +292,35 @@ chunks_fts(chunk_id UNINDEXED, content)   -- chunk 转正时自动同步`}</pre>
   )
 }
 
-function ChunksCard() {
+function ChunksCard({ onChanged }) {
   const [rows, setRows] = useState(null)
   const [open, setOpen] = useState(null)
+  const [busy, setBusy] = useState({})   // chunk_id -> 'loading' | 'done' | 'error'
+  const [results, setResults] = useState({}) // chunk_id -> 结果信息
 
-  useEffect(() => {
+  const load = useCallback(() => {
     api.chunks().then((r) => setRows(r.items || [])).catch(() => setRows([]))
   }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const reingest = async (chunkId) => {
+    if (busy[chunkId]) return
+    setBusy((b) => ({ ...b, [chunkId]: 'loading' }))
+    setResults((r) => ({ ...r, [chunkId]: null }))
+    try {
+      const r = await api.reingest(chunkId)
+      const res = r.result || r
+      const ok = res.promoted === true
+      setBusy((b) => ({ ...b, [chunkId]: ok ? 'done' : 'error' }))
+      setResults((x) => ({ ...x, [chunkId]: res }))
+      if (onChanged) onChanged()
+      load()
+    } catch (e) {
+      setBusy((b) => ({ ...b, [chunkId]: 'error' }))
+      setResults((x) => ({ ...x, [chunkId]: { error: e.message } }))
+    }
+  }
 
   return (
     <div className="card">
@@ -315,6 +337,13 @@ function ChunksCard() {
               <span className="pill ok">qdrant + neo4j ✓</span>
               <span className="id" style={{ marginLeft: 'auto' }}>{c.chunk_id}</span>
               <span className="pill">{c.char_len} 字符</span>
+              <button
+                className={`btn sm ${busy[c.chunk_id] === 'loading' ? '' : 'primary'}`}
+                disabled={busy[c.chunk_id] === 'loading'}
+                onClick={(e) => { e.stopPropagation(); reingest(c.chunk_id) }}
+              >
+                {busy[c.chunk_id] === 'loading' ? <><span className="spinner" />入库中…</> : '重新入库'}
+              </button>
             </div>
             {open === c.chunk_id && (
               <div className="chunk-body">
@@ -326,6 +355,38 @@ function ChunksCard() {
                 {(c.entities || []).length > 0 && (
                   <div className="tags" style={{ marginTop: 8, display: 'flex', gap: 5, flexWrap: 'wrap' }}>
                     {(c.entities || []).map((e, i) => <span className="pill accent" key={i}>{e}</span>)}
+                  </div>
+                )}
+                {results[c.chunk_id] && (
+                  <div style={{ marginTop: 8, display: 'grid', gap: 7 }}>
+                    {results[c.chunk_id].error ? (
+                      <p className="hint" style={{ color: 'var(--err)', margin: 0 }}>重新入库失败：{results[c.chunk_id].error}</p>
+                    ) : (
+                      <>
+                        {(results[c.chunk_id].details || []).length > 0 && (
+                          <div style={{ display: 'grid', gap: 7 }}>
+                            {Object.entries(results[c.chunk_id].details).map(([line, d]) => (
+                              <div key={line} className="hit" style={{ marginBottom: 0 }}>
+                                <div className="top">
+                                  <span>{line === 'qdrant' ? 'Qdrant 向量线' : 'Neo4j 图谱线'}</span>
+                                  <span className={`pill ${d.ok ? 'ok' : 'err'}`}>{d.ok ? '成功' : '失败'}</span>
+                                </div>
+                                <div className="body" style={{ fontSize: 11.5 }}>
+                                  {d.ok
+                                    ? (line === 'qdrant'
+                                      ? `已写入向量点，维度 ${d.dim ?? '-'}，耗时 ${d.elapsed_ms ?? '-'}ms`
+                                      : `实体 ${d.entities ?? 0} 个（新增 ${d.new_entities ?? 0} / 复用 ${d.reused_entities ?? 0}），关系 ${d.relations ?? 0} 条，映射实体 ${d.linked_entities ?? 0}`)
+                                    : d.error}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <span className={`pill ${results[c.chunk_id].promoted ? 'ok' : 'warn'}`}>
+                          {results[c.chunk_id].promoted ? '重新入库完成 ✓' : '重新入库未转正'}
+                        </span>
+                      </>
+                    )}
                   </div>
                 )}
               </div>

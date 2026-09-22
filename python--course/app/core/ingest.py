@@ -16,7 +16,7 @@ from app.core.registry import registry
 from app.core.textutil import norm_key
 from app.db.qdrant_store import vector_store as qdrant_store
 from app.db.neo4j_store import graph_store as neo4j_store
-from app.db.sqlite_store import store
+from app.db.sqlite_store import now_iso, store
 from app.llm.client import LLMError, chat_stream, embed_texts
 
 Event = Callable[[str, dict], Any]
@@ -192,11 +192,23 @@ async def _ingest_neo4j(chunk_id: str, content: str, text: str,
 
 # ------------------------------------------------------------------ 单个 chunk
 async def ingest_chunk(chunk_id: str, on_event: Event | None = None) -> dict:
-    """把队列里的一个 chunk 过一遍两条入库线，都成功才 promote 进 chunks 表。"""
+    """把队列里的一个 chunk 过一遍两条入库线，都成功才 promote 进 chunks 表。
+
+    兼容两种来源：
+    - 还在 ingest_queue 的 chunk（待入库/失败重试）：跑完后 promote 进 chunks 表；
+    - 已转正的 chunk（chunks 表已有）：重新跑两条线并刷新 ingested_at（重新入库）。
+    """
     row = await asyncio.to_thread(store.get_queue_item, chunk_id)
+    promoted_row = None
     if not row:
-        raise ValueError(f"chunk {chunk_id} 不在入库队列中（可能已入库）")
-    content = row["content"]
+        promoted_row = await asyncio.to_thread(store.get_chunk, chunk_id)
+        if not promoted_row:
+            raise ValueError(f"chunk {chunk_id} 既不在入库队列中，也不在 chunks 表中")
+        content = promoted_row["content"]
+        await asyncio.to_thread(store.update_chunk_status, chunk_id, error="")
+    else:
+        content = row["content"]
+        await asyncio.to_thread(store.update_chunk_status, chunk_id, error="")
 
     await asyncio.to_thread(store.update_chunk_status, chunk_id, error="")
 
@@ -213,6 +225,11 @@ async def ingest_chunk(chunk_id: str, on_event: Event | None = None) -> dict:
 
     async def run_neo4j() -> dict:
         try:
+            if promoted_row is not None:
+                # 重新入库：先清理这个 chunk 的旧图产物（断开 MENTIONS、删旧 REL；
+                # 实体若不再被其它 chunk 引用则删除，否则保留复用）
+                cleaned = await neo4j_store.cleanup_chunk(chunk_id)
+                await _emit(on_event, "cleanup", chunk_id=chunk_id, **cleaned)
             r = await _ingest_neo4j(chunk_id, content, content, on_event)
             await asyncio.to_thread(store.update_chunk_status, chunk_id, None, "success", "")
             await _emit(on_event, "neo4j_ok", chunk_id=chunk_id, **{k: v for k, v in r.items() if k != "parsed"})
@@ -230,10 +247,18 @@ async def ingest_chunk(chunk_id: str, on_event: Event | None = None) -> dict:
 
     promoted = False
     if ok_q and ok_n:
-        promoted = await asyncio.to_thread(store.promote_chunk, chunk_id)
-        if promoted:
-            # promote_chunk 已返回 chunk_id，这里显式覆盖一次，避免重复传参
-            await _emit(on_event, "promoted", **{**promoted, "chunk_id": chunk_id})
+        if promoted_row is not None:
+            # 已转正的 chunk：重新入库成功后刷新 ingested_at（chunk_id 不变）
+            ts = now_iso()
+            await asyncio.to_thread(store.update_chunk_ingested_at, chunk_id, ts)
+            await _emit(on_event, "promoted", chunk_id=chunk_id,
+                  document_id=promoted_row["document_id"], reingested=True, ingested_at=ts)
+            promoted = True
+        else:
+            promoted = await asyncio.to_thread(store.promote_chunk, chunk_id)
+            if promoted:
+                # promote_chunk 已返回 chunk_id，这里显式覆盖一次，避免重复传参
+                await _emit(on_event, "promoted", **{**promoted, "chunk_id": chunk_id})
     else:
         # 任一失败就继续留在 ingest_queue 里等重试
         await _emit(on_event, "stayed_in_queue", chunk_id=chunk_id,

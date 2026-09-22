@@ -51,13 +51,13 @@ def build_extract_messages(text: str, existing_entities: list[dict],
 
     user = f"""请从下面这句话中抽取全部实体与实体关系，并尽量详尽准确。
 
+要抽取的原文：
+{text}
+
 {rel_block}
 
 # 系统中已经存在的实体（请优先复用这些名字，不要另造别名）
 {ent_block}
-
-# 当前可用的工具清单（由 registry.describe() 动态生成；新增工具自动出现在这里）
-{build_tool_prompt()}
 
 # 输出要求
 - 只输出一个 JSON 对象，格式严格如下，不要任何额外文字：

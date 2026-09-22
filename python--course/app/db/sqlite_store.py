@@ -248,6 +248,11 @@ class SQLiteStore:
     def get_chunk(self, chunk_id: str) -> dict | None:
         return self._one("SELECT * FROM chunks WHERE chunk_id=?", (chunk_id,))
 
+    def update_chunk_ingested_at(self, chunk_id: str, ingested_at: str | None = None) -> None:
+        """重新入库成功后刷新 chunks 表的 ingested_at（chunk_id 不变）。"""
+        ts = ingested_at or now_iso()
+        self._exec("UPDATE chunks SET ingested_at=? WHERE chunk_id=?", (ts, chunk_id))
+
     def list_chunks(self, limit: int = 50, offset: int = 0) -> list[dict]:
         return self._rows(
             "SELECT * FROM chunks ORDER BY ingested_at DESC LIMIT ? OFFSET ?", (limit, offset)

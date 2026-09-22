@@ -4,8 +4,8 @@
 
 .DESCRIPTION
   启动顺序（带端口就绪等待）:
-    1. Qdrant   原生 Windows 版，C:\qdrant\qdrant.exe  -> 127.0.0.1:6333
-    2. Neo4j    原生 Windows 版，C:\neo4j              -> 127.0.0.1:7687
+    1. Qdrant   原生 Windows 版，C:\Users\liang\qdrant\qdrant.exe  -> 127.0.0.1:6333
+    2. Neo4j    原生 Windows 版，C:\Users\liang\neo4j-home\neo4j-community-5.26.12              -> 127.0.0.1:7687
     3. 离线演示 LLM（可选，仅在未配置真实 key 时启用）-> 127.0.0.1:8890
     4. FastAPI 后端                                    -> 127.0.0.1:8000
     5. Vite 前端                                      -> 127.0.0.1:5173
@@ -34,11 +34,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$Py = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
+$Py = Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) { $Py = (Get-Command python -ErrorAction SilentlyContinue).Source }
 if (-not $Py) { Write-Host "找不到 python.exe，请先安装 Python 3.12" -ForegroundColor Red; exit 1 }
 
-$Jdk = "C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot"
+$Jdk = "C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
 if (-not (Test-Path "$Jdk\bin\java.exe")) {
     $j = Get-Command java -ErrorAction SilentlyContinue
     if ($j) { $Jdk = Split-Path (Split-Path $j.Source -Parent) -Parent }
@@ -132,43 +132,43 @@ if (-not $SkipServices) {
     Write-Host "`n[1/5] Qdrant 向量数据库" -ForegroundColor Cyan
     if (Test-Port 6333) {
         Write-Host "  -    已在运行 (127.0.0.1:6333)" -ForegroundColor DarkGray
-    } elseif (Test-Path "C:\qdrant\qdrant.exe") {
+    } elseif (Test-Path "C:\Users\liang\qdrant\qdrant.exe") {
         $env:QDRANT__SERVICE__HOST = "127.0.0.1"
         $env:QDRANT__SERVICE__HTTP_PORT = "6333"
         $env:QDRANT__SERVICE__GRPC_PORT = "6334"
-        $env:QDRANT__STORAGE__STORAGE_PATH = "C:\qdrant\storage"
+        $env:QDRANT__STORAGE__STORAGE_PATH = "C:\Users\liang\qdrant\storage"
         $env:QDRANT__TELEMETRY_DISABLED = "true"
-        $null = Start-Detached "C:\qdrant\qdrant.exe" @() "C:\qdrant" "qdrant"
+        $null = Start-Detached "C:\Users\liang\qdrant\qdrant.exe" @() "C:\Users\liang\qdrant" "qdrant"
         Wait-Port 6333 30 "Qdrant" | Out-Null
     } else {
-        Write-Host "  FAIL 未找到 C:\qdrant\qdrant.exe" -ForegroundColor Red
+        Write-Host "  FAIL 未找到 C:\Users\liang\qdrant\qdrant.exe" -ForegroundColor Red
     }
 
     # ---------------- 2. Neo4j ----------------
     Write-Host "`n[2/5] Neo4j 图数据库" -ForegroundColor Cyan
     if (Test-Port 7687) {
         Write-Host "  -    已在运行 (127.0.0.1:7687)" -ForegroundColor DarkGray
-    } elseif (Test-Path "C:\neo4j\lib") {
+    } elseif (Test-Path "C:\Users\liang\neo4j-home\neo4j-community-5.26.12\lib") {
         if (-not (Test-Path "$Jdk\bin\java.exe")) {
             Write-Host "  FAIL 未找到 java（JDK17 未安装）" -ForegroundColor Red
         } else {
             $env:JAVA_HOME = $Jdk
-            $env:NEO4J_HOME = "C:\neo4j"
-            Remove-Item "C:\neo4j\logs\neo4j-console.log","C:\neo4j\logs\neo4j-console.err" -Force -ErrorAction SilentlyContinue
+            $env:NEO4J_HOME = "C:\Users\liang\neo4j-home\neo4j-community-5.26.12"
+            Remove-Item "C:\Users\liang\neo4j-home\neo4j-community-5.26.12\logs\neo4j-console.log","C:\Users\liang\neo4j-home\neo4j-community-5.26.12\logs\neo4j-console.err" -Force -ErrorAction SilentlyContinue
             $null = Start-Detached "$Jdk\bin\java.exe" @(
-                "-cp", "C:\neo4j\lib\*",
-                "-Dbasedir=C:\neo4j",
-                "-Dneo4j.home=C:\neo4j",
+                "-cp", "C:\Users\liang\neo4j-home\neo4j-community-5.26.12\lib\*",
+                "-Dbasedir=C:\Users\liang\neo4j-home\neo4j-community-5.26.12",
+                "-Dneo4j.home=C:\Users\liang\neo4j-home\neo4j-community-5.26.12",
                 "org.neo4j.server.startup.Neo4jCommand", "console"
-            ) "C:\neo4j" "neo4j-console"
+            ) "C:\Users\liang\neo4j-home\neo4j-community-5.26.12" "neo4j-console"
             if (-not (Wait-Port 7687 90 "Neo4j")) {
                 Write-Host "  ---- neo4j 启动日志 ----" -ForegroundColor Red
-                Get-Content "C:\neo4j\logs\neo4j-console.err" -Tail 15 -ErrorAction SilentlyContinue |
+                Get-Content "C:\Users\liang\neo4j-home\neo4j-community-5.26.12\logs\neo4j-console.err" -Tail 15 -ErrorAction SilentlyContinue |
                     ForEach-Object { Write-Host "  $_" }
             }
         }
     } else {
-        Write-Host "  FAIL 未找到 C:\neo4j\lib" -ForegroundColor Red
+        Write-Host "  FAIL 未找到 C:\Users\liang\neo4j-home\neo4j-community-5.26.12\lib" -ForegroundColor Red
     }
 } else {
     Write-Host "`n[1-2/5] 已跳过依赖服务（-SkipServices）" -ForegroundColor DarkGray
@@ -272,3 +272,5 @@ Write-Host "  → 「🧬 多路混合检索」体验向量 + FTS5 + RRF"
 Write-Host ""
 Write-Host "  停止全部：.\scripts\stop-all.ps1" -ForegroundColor DarkGray
 Write-Host ""
+
+

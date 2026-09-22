@@ -21,6 +21,7 @@ class QdrantStore:
             kw: dict[str, Any] = {
                 "prefer_grpc": config.qdrant.prefer_grpc,
                 "check_compatibility": False,
+                "trust_env": False,
             }
             if config.qdrant.local_path:
                 # 嵌入式本地模式：qdrant 引擎跑在本进程内，数据落盘到 local_path，
@@ -199,3 +200,5 @@ def _vector_info(info) -> dict:
 
 # 单例（注意命名：避免与子模块名 app.db.qdrant_store 互相遮蔽）
 vector_store = QdrantStore()
+
+

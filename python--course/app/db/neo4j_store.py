@@ -54,7 +54,9 @@ class Neo4jStore:
         rows = []
         for e in entities:
             name = (e.get("name") or "").strip()
-            key = norm_key(e.get("key") or name)
+            # key 一律由实体名归一化而来，与关系表的 src_key/tgt_key 保持一致，
+            # 避免 LLM 给的拼音/自定义 key 与 norm_key(name) 不一致导致重复节点。
+            key = norm_key(name or e.get("key") or "")
             if not name and not key:
                 continue
             alias = e.get("aliases") or e.get("alias") or []
@@ -227,6 +229,46 @@ class Neo4jStore:
         async with self._session() as s:
             await s.run("MATCH (c:Chunk {id: $cid}) DETACH DELETE c", cid=chunk_id)
         return True
+
+    async def cleanup_chunk(self, chunk_id: str) -> dict:
+        """重新入库前清理该 chunk 的旧图产物。
+
+        规则（与「重新入库」语义一致）：
+        1. 断开本 chunk 与所有实体的 MENTIONS（相当于从实体上摘掉这个 chunk 编号）；
+        2. 删除本 chunk 抽取的关系 REL（rel.chunk_id = chunk_id）；
+        3. 逐个实体检查：若还被其他 chunk 引用则保留，否则 DETACH DELETE；
+        4. 删除 Chunk 节点本身（link_chunk 会用同一 chunk_id 重新建）。
+        """
+        if not chunk_id:
+            return {"linked": 0, "deleted_entities": 0, "deleted_relations": 0}
+        async with self._session() as s:
+            rec = await s.run(
+                "MATCH (c:Chunk {id: $cid})-[m:MENTIONS]->(e:Entity) "
+                "RETURN DISTINCT e.key AS key", cid=chunk_id)
+            keys = [r["key"] async for r in rec]
+
+            rel = await s.run(
+                "MATCH ()-[r:REL]->() WHERE r.chunk_id = $cid DELETE r "
+                "RETURN count(r) AS n", cid=chunk_id)
+            rel_row = await rel.single()
+            deleted_rels = int(rel_row["n"]) if rel_row else 0
+
+            await s.run("MATCH (c:Chunk {id: $cid})-[m:MENTIONS]->() DELETE m", cid=chunk_id)
+
+            deleted = 0
+            for k in keys:
+                rec2 = await s.run(
+                    "MATCH (e:Entity {key: $k}) "
+                    "OPTIONAL MATCH (e)<-[:MENTIONS]-(c2:Chunk) WHERE c2.id <> $cid "
+                    "RETURN count(c2) AS other", k=k, cid=chunk_id)
+                row = await rec2.single()
+                if row and int(row["other"] or 0) == 0:
+                    await s.run("MATCH (e:Entity {key: $k}) DETACH DELETE e", k=k)
+                    deleted += 1
+
+            await s.run("MATCH (c:Chunk {id: $cid}) DETACH DELETE c", cid=chunk_id)
+            return {"linked": len(keys), "deleted_entities": deleted,
+                    "deleted_relations": deleted_rels}
 
     async def get_chunks_of_entity(self, entity_key: str) -> list[str]:
         async with self.driver.session(database=config.neo4j.database) as s:
