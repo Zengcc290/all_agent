@@ -53,10 +53,10 @@ class MemoryManageTool(BaseTool):
             "Delete one memory item or clear an entire memory layer. Destructive; "
             "requires explicit user confirmation."
         ),
-        version="2.0.0",
+        version="3.0.0",
         input_model=MemoryManageInput,
         output_model=MemoryManageOutput,
-        side_effect="write",
+        side_effect="destructive",
         permissions=("memory.write",),
         timeout_seconds=10.0,
         idempotent=False,

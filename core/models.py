@@ -256,8 +256,9 @@ class ExecutionContext:
     """Execution context for one tool request.
 
     Entries in ``confirmed_side_effects`` should be the registry's
-    generation-bound confirmation keys, so a replacement implementation cannot
-    reuse an old confirmation. ``permissions`` remains available as tool
+    generation-bound confirmation keys. Tools marked ``destructive`` require
+    ``call_confirmation_key`` instead, which also binds the exact normalized
+    arguments. ``permissions`` remains available as tool
     compatibility/audit metadata, but is not currently enforced by the runtime
     or agents.
     """

@@ -11,9 +11,8 @@
 向量写入「当前配置的向量存储」：配置了 config/services.toml [qdrant] 就是云端
 Qdrant 集合，否则是内存回退——与 Web/Agent 运行时同一份投影，不会写丢。
 
-维度变更（如 1024 -> 4096）请先运行：
-    python scripts/migrate_to_cloud.py --recreate-collection
-重建集合并重灌 chunks，再运行本脚本重灌记忆条目向量。
+嵌入空间不一致时必须加 ``--confirm-rebuild``。锁闸门会一次性重建集合并重灌
+chunks 和 memories；脚本不会再做第二轮重复嵌入。
 """
 
 from __future__ import annotations
@@ -26,7 +25,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from memory import HashEmbedding, MemoryConfig, MemoryManager, default_sqlite_path, make_default_embedding  # noqa: E402
-from memory.embedding_lock import EmbeddingLockMismatch, apply_embedding_lock  # noqa: E402
+from memory.embedding_lock import (  # noqa: E402
+    EmbeddingLockMismatch,
+    apply_embedding_lock,
+    inspect_embedding_lock,
+    reindex_vector_projection,
+)
 from memory.storage.document_repo import DocumentRepository  # noqa: E402
 
 
@@ -56,33 +60,46 @@ def main() -> int:
     manager = MemoryManager(config, embedding=embedding)
     repo = DocumentRepository(db_path) if db_path.exists() else None
     try:
-        apply_embedding_lock(manager, repo, confirm_rebuild=args.confirm_rebuild)
-    except EmbeddingLockMismatch as exc:
-        print(exc)
-        print("换模型后请加 --confirm-rebuild 以重建向量集合并全量重灌。")
-        manager.close()
+        snapshot = inspect_embedding_lock(manager, repo) if repo is not None else {"mismatch": False}
+        rebuilt_projection = bool(snapshot["mismatch"])
+        if rebuilt_projection:
+            try:
+                apply_embedding_lock(manager, repo, confirm_rebuild=args.confirm_rebuild)
+            except EmbeddingLockMismatch as exc:
+                print(exc)
+                print("换模型后请加 --confirm-rebuild 以重建向量集合并全量重灌。")
+                return 2
+            except Exception as exc:  # noqa: BLE001 - CLI reports rebuild failure cleanly
+                print(f"重建失败，嵌入锁未更新：{type(exc).__name__}: {exc}")
+                return 2
+
+        print(f"向量存储：{type(manager.vector_store).__name__}")
+        if rebuilt_projection:
+            print("完成：嵌入空间已变更，锁闸门已一次性重灌 chunks 与 memories。")
+            return 0
+
+        if repo is None:  # manager construction normally creates the SQLite file
+            print("找不到 SQLite 真值源，拒绝只重建部分投影。")
+            return 2
+        print(f"按唯一 ID 重索引 chunks 与 memories -> {embedding!r}")
+        report = reindex_vector_projection(
+            manager,
+            repo,
+            recreate_collection=False,
+            continue_on_error=True,
+        )
+        failures = report["failed"]
+        for failure in failures:
+            print(f"  ! {failure['id']}: {failure['error']}")
+        print(
+            f"完成：{report['chunks']} 个分块、{report['memories']} 条记忆成功，"
+            f"{len(failures)} 个唯一 ID 失败。"
+        )
+        return 0 if not failures else 2
+    finally:
         if repo is not None:
             repo.close()
-        return 2
-    print(f"向量存储：{type(manager.vector_store).__name__}")
-    items = manager.document_store.list(include_expired=True)
-    print(f"待重索引：{len(items)} 条 -> {embedding!r}")
-
-    done = failed = 0
-    for item in items:
-        try:
-            item.embedding = embedding.embed(item.content)
-            manager.document_store.upsert(item)
-            manager.vector_store.upsert(item)
-            done += 1
-        except Exception as exc:  # noqa: BLE001 - 单条失败不应中断整批重索引
-            failed += 1
-            print(f"  ! {item.id}: {type(exc).__name__}: {exc}")
-    print(f"完成：{done} 条成功，{failed} 条失败，共 {len(items)} 条。")
-    if repo is not None:
-        repo.close()
-    manager.close()
-    return 0 if failed == 0 else 2
+        manager.close()
 
 
 if __name__ == "__main__":

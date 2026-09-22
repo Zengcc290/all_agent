@@ -324,6 +324,7 @@ def _make_fake_agent():
             return {
                 "memory.query": None,
                 "memory.add": None,
+                "memory.manage": None,
                 "memory.rag_search": None,
                 "memory.rag": None,
                 "system.current_time": None,
@@ -337,6 +338,7 @@ def _make_fake_agent():
         tools = FakeTools()
 
         def __init__(self) -> None:
+            self.pending_confirmations = []
             self.last_tool_names = None
             self.last_context = None
 
@@ -490,6 +492,76 @@ def test_chat_confirms_only_additive_memory_write(
     context = agent.last_context
     assert context is not None
     assert context.confirmed_side_effects == frozenset({"memory.add:test-generation"})
+    assert "memory.manage" in agent.last_tool_names
+
+
+def test_chat_returns_exact_destructive_confirmation_without_recording_qa(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _search_services(tmp_path, monkeypatch, on=False)
+    agent = _make_fake_agent()
+
+    def request_delete(query: str, **kwargs):
+        agent.last_tool_names = kwargs.get("tool_names")
+        agent.last_context = kwargs.get("context")
+        agent.pending_confirmations = [
+            {
+                "tool_name": "memory.manage",
+                "arguments": {
+                    "action": "delete",
+                    "memory_type": "semantic",
+                    "item_id": "candidate-id",
+                },
+            }
+        ]
+        return "请确认删除 candidate-id"
+
+    agent.run = request_delete
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: agent)
+
+    before = len(client.app.state.manager.list(memory_type="episodic"))
+    response = client.post("/api/chat", json={"message": "删除候选"})
+
+    assert response.status_code == 200
+    assert response.json()["confirmations"] == agent.pending_confirmations
+    assert len(client.app.state.manager.list(memory_type="episodic")) == before
+
+
+def test_exact_destructive_chat_confirmation_is_call_bound(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tool.memory_tool import MemoryManageTool
+
+    _search_services(tmp_path, monkeypatch, on=False)
+    agent = _make_fake_agent()
+    manage = MemoryManageTool(manager=client.app.state.manager)
+    agent.tools.resolve = lambda name: (manage, 1)  # type: ignore[attr-defined]
+    agent.tools.call_confirmation_key = (  # type: ignore[attr-defined]
+        lambda name, arguments: f"{name}:" + arguments["item_id"]
+    )
+    monkeypatch.setattr("web.app.chat_ready", lambda: (True, ""))
+    monkeypatch.setattr("web.app.get_agent", lambda: agent)
+
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "确认删除",
+            "confirmation": {
+                "tool_name": "memory.manage",
+                "arguments": {
+                    "action": "delete",
+                    "memory_type": "semantic",
+                    "item_id": "approved-id",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert agent.last_context.confirmed_side_effects == frozenset(
+        {"memory.add:test-generation", "memory.manage:approved-id"}
+    )
 
 
 def test_chat_serializes_concurrent_requests(
@@ -643,13 +715,14 @@ def test_get_agent_registers_the_four_memory_tools(
         assert {
             "memory.query",
             "memory.add",
+            "memory.manage",
             "memory.rag_search",
             "memory.rag",
             "web.search",
         } <= names
         assert "system.current_time" not in names
         assert "system.update_log" not in names
-        # 只读工具不该要求确认，memory.add 才是聊天唯一自动确认的写入。
+        # memory.manage 可见但不自动确认；只有 memory.add 预置通用写确认。
         assert support.chat_confirmed_side_effects(agent) == frozenset(
             {agent.tools.confirmation_key("memory.add")}
         )
@@ -1015,6 +1088,8 @@ def test_static_smoke_home_page_and_renderable_graph(file_client) -> None:
     # 方案写的是「含 #universe」= 含该元素；画布样式走元素选择器 canvas{}，没有 #universe 规则
     assert 'id="universe"' in home.text
     assert "canvas {" in home.text
+    assert "window.confirm" in home.text
+    assert "confirmation: pending" in home.text
 
     payload = client.get("/api/graph").json()
     assert isinstance(payload["nodes"], list) and isinstance(payload["edges"], list)
@@ -1075,6 +1150,11 @@ def test_revectorize_reports_the_failure_reason(tmp_path: Path, monkeypatch: pyt
                 chunk_id="doc-1:0", document_id="doc-1", chunk_index=0,
                 char_start=0, char_end=2, text="正文",
             )])
+            # This test targets the cloud call failure, not legacy unlocked-data
+            # migration (covered by test_embedding_lock.py).
+            repository.set_embedding_lock(
+                "DeadCloudEmbedding", manager.embedding.dimension
+            )
         finally:
             repository.close()
         response = client.post("/api/documents/doc-1/revectorize")

@@ -10,9 +10,9 @@
 ======================
 
 这是"体检"能力：它能告诉用户"图里有多少实体是白建的"。它只读、不删，
-所以可以随时调用（星云图的 ``orphan_entities`` 统计就复用它，避免二次全表扫描）；
-真正的清理走 ``knowledge.propose_cleanup`` 生成待确认的删除提案，
-最终删除仍由 ``memory.storage.document_repo.execute_deletion`` 的确认闸门把关。
+所以可以随时调用（星云图的 ``orphan_entities`` 统计就复用它，避免二次全表扫描）。
+删除必须由用户明确指定目标后调用 ``memory.manage``，并经过工具运行时的写确认；
+本工具不会创建另一套未接线的确认协议。
 
 本模块是这段逻辑的**唯一实现**：``web/cleanup.py`` 里的 ``find_orphan_entities`` 已删除。
 """
@@ -116,8 +116,7 @@ class OrphanEntitiesTool(BaseTool):
         description=(
             "Find entity nodes that are completely isolated: no relation edge, no "
             "chunk mention, no note attached, and not seeded. Read-only health "
-            "check; use knowledge.propose_cleanup to open a confirmation-gated "
-            "deletion proposal for them."
+            "check; deletion remains a separate, runtime-confirmed memory.manage action."
         ),
         version="1.0.0",
         input_model=OrphanEntitiesInput,
@@ -130,7 +129,7 @@ class OrphanEntitiesTool(BaseTool):
         tags=("knowledge", "graph", "orphan", "health", "read"),
         guidance=(
             "做知识库健康检查、找完全孤立实体时使用。判定包含四项：没有关系边、没有被分块提及、没有备注、且不是种子数据，所以种子实体不会被误判成垃圾。"
-            "要清理必须走 knowledge.propose_cleanup（人工确认），不要自行删除。"
+            "如需清理，先向用户展示候选；只有用户点名确认后才能调用 memory.manage，不要自行删除。"
         ),
     )
 

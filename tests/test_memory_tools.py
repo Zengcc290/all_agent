@@ -44,10 +44,13 @@ def runtime(manager):
 async def _call(runtime, name: str, arguments: dict, *, confirm: bool):
     registry, executor = runtime
     tool, generation = registry.resolve(name)
+    confirmation = (
+        registry.call_confirmation_key(name, arguments)
+        if tool.spec.side_effect == "destructive"
+        else registry.confirmation_key(name)
+    )
     context = ExecutionContext(
-        confirmed_side_effects=(
-            frozenset({registry.confirmation_key(name)}) if confirm else frozenset()
-        )
+        confirmed_side_effects=(frozenset({confirmation}) if confirm else frozenset())
     )
     batch = await executor.execute_batch(
         [
@@ -134,6 +137,79 @@ async def test_destructive_and_ingest_writes_need_confirmation(runtime) -> None:
 
 
 @pytest.mark.asyncio
+async def test_confirmed_memory_delete_is_the_single_destructive_path(runtime, manager) -> None:
+    item = manager.semantic.add_fact("用户", "明确删除", "旧记忆", confidence=0.9)
+    assert manager.semantic.graph_store.get_relations("用户")
+    arguments = {"action": "delete", "memory_type": "semantic", "item_id": item.id}
+
+    denied = await _call(runtime, "memory.manage", arguments, confirm=False)
+    assert denied.error is not None
+    assert denied.error.code == "CONFIRMATION_REQUIRED"
+    assert manager.get(item.id) is not None
+
+    allowed = await _call(runtime, "memory.manage", arguments, confirm=True)
+    assert allowed.ok is True
+    assert allowed.data["count"] == 1
+    assert manager.get(item.id) is None
+    assert manager.semantic.graph_store.get_relations("用户") == []
+
+
+@pytest.mark.asyncio
+async def test_destructive_confirmation_is_bound_to_exact_arguments(runtime, manager) -> None:
+    first = manager.semantic.add_fact("甲", "关联", "乙", confidence=0.9)
+    second = manager.semantic.add_fact("丙", "关联", "丁", confidence=0.9)
+    registry, executor = runtime
+    tool, generation = registry.resolve("memory.manage")
+    approved = {"action": "delete", "memory_type": "semantic", "item_id": first.id}
+    context = ExecutionContext(
+        confirmed_side_effects=frozenset(
+            {registry.call_confirmation_key("memory.manage", approved)}
+        )
+    )
+    substitutions = (
+        {"action": "delete", "memory_type": "semantic", "item_id": second.id},
+        {"action": "clear", "memory_type": "semantic"},
+    )
+    for index, substituted in enumerate(substitutions):
+        call = ToolCall(
+            call_id=f"substituted-{index}",
+            tool_name="memory.manage",
+            schema_version=tool.spec.version,
+            schema_hash=tool.spec.schema_hash,
+            registry_generation=generation,
+            arguments=substituted,
+        )
+        result = (await executor.execute_batch([call], context)).results[0]
+        assert result.error is not None
+        assert result.error.code == "CONFIRMATION_REQUIRED"
+
+    assert manager.get(first.id) is not None
+    assert manager.get(second.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_semantic_clear_removes_graph_relations(runtime, manager) -> None:
+    manager.semantic.add_fact("清空主体", "关联", "清空客体", confidence=0.9)
+    assert manager.semantic.graph_store.get_relations("清空主体")
+    assert manager.semantic.graph_store.graph_snapshot()["entities"]
+
+    result = await _call(
+        runtime,
+        "memory.manage",
+        {"action": "clear", "memory_type": "semantic"},
+        confirm=True,
+    )
+
+    assert result.ok is True
+    assert result.data["count"] >= 1
+    assert manager.semantic.graph_store.get_relations("清空主体") == []
+    snapshot = manager.semantic.graph_store.graph_snapshot()
+    assert snapshot["entities"] == []
+    assert snapshot["observations"] == []
+    assert snapshot["relations"] == []
+
+
+@pytest.mark.asyncio
 async def test_rag_ingest_rejects_source_outside_workspace(
     runtime, tmp_path, monkeypatch
 ) -> None:
@@ -184,4 +260,5 @@ def test_read_and_write_tool_names_are_distinct() -> None:
         "memory.manage",
         "memory.rag",
     }
-    assert all(spec.side_effect == "write" for spec in write_tools)
+    assert MemoryManageTool().spec.side_effect == "destructive"
+    assert {spec.side_effect for spec in write_tools} == {"write", "destructive"}

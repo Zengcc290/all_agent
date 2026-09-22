@@ -61,6 +61,6 @@ memory.rag_search / memory.rag                  （恒星=领域 行星=实体 �
 - `static/index.html` —— 星云图前端（改造自 Aetheria 单文件 HTML）
 - `seed_data.json` —— 种子数据（从原 HTML 的 celestialTree 提取）
 
-> 记忆项 → 星云 `nodes/edges` 的映射规则、领域分类、孤儿实体统计与清理提案都已工具化，
-> 见 `tool/graph_snapshot.py`、`tool/domain_classify.py`、`tool/orphan_entities.py`、
-> `tool/propose_cleanup.py`（`GET /api/graph` 只保留进程内缓存与增量逻辑）。
+> 记忆项 → 星云 `nodes/edges` 的映射规则、领域分类与孤儿实体统计都已工具化，
+> 见 `tool/graph_snapshot.py`、`tool/domain_classify.py`、`tool/orphan_entities.py`。
+> 删除统一使用 `memory.manage` 的运行时写确认，不再维护第二套未接线的提案协议。

@@ -288,17 +288,6 @@ def test_ingest_source_enforces_base_dir_containment(
     assert pipeline.ingest_source(str(inside), base_dir=allowed, chunk_size=50, overlap=10)
 
 
-def test_pipeline_answer_requires_callable_generator(pipeline: RAGPipeline):
-    with pytest.raises(TypeError, match="generator"):
-        pipeline.answer("anything", "not-callable")  # type: ignore[arg-type]
-
-    pipeline.ingest(Document("React answers use thoughts and actions.", id="doc-react"))
-    answer = pipeline.answer(
-        "thoughts and actions", lambda prompt: f"answer-of:{len(prompt)}"
-    )
-    assert answer.startswith("answer-of:")
-
-
 def test_tool_default_sqlite_path_prefers_env(monkeypatch: pytest.MonkeyPatch):
     from pathlib import Path as _Path
 

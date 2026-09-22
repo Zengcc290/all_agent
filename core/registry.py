@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import threading
 from abc import ABC, abstractmethod
 from typing import Any
@@ -68,6 +70,25 @@ class ToolRegistry:
         """Return a key invalidated whenever the registered implementation changes."""
         tool, generation = self.resolve(name)
         return f"{tool.spec.confirmation_key}:{generation}"
+
+    def call_confirmation_key(self, name: str, arguments: dict[str, Any]) -> str:
+        """Bind destructive approval to one exact canonical argument object."""
+
+        if not isinstance(arguments, dict):
+            raise TypeError("arguments must be a dict")
+        tool, _ = self.resolve(name)
+        normalized = tool.spec.input_model.model_validate(
+            arguments, strict=True
+        ).model_dump(mode="json")
+        encoded = json.dumps(
+            normalized,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        return f"{self.confirmation_key(name)}:{digest}"
 
     def resolve(self, name: str) -> tuple[BaseTool, int]:
         """Atomically return an executable and its current registration generation."""

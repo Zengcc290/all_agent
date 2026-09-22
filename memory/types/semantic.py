@@ -252,6 +252,15 @@ class SemanticMemory(BaseMemory):
                 remove_relation(item_id)
         return removed
 
+    def clear(self) -> int:
+        """Clear semantic truth and its complete graph projection."""
+
+        count = super().clear()
+        clear_graph = getattr(self.graph_store, "clear", None)
+        if callable(clear_graph):
+            clear_graph()
+        return count
+
     def related(
         self, entity: str, *, relation: str | None = None, at: str | None = None
     ) -> list[dict[str, Any]]:

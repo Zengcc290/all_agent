@@ -11,12 +11,13 @@
 视觉抽取并物化成 n-ary 观察（实体/关系/时序）。
 抽取失败**不**回滚已入库的图片：源句必须留下，错误写进报告，这是原来的语义。
 
-与 ``RAGPipeline.ingest_media`` 的关系
-=====================================
+唯一实现
+========
 
-实现整体搬到这里，管道方法保留为**薄委托**（一行函数内导入），
-所以 ``pipeline.ingest_media`` 的既有调用方与测试行为不变；
-``accepts_parameter``（抽取器协议自省）仍由 ``memory.rag.pipeline`` 提供，不写第二份。
+图片入库实现整体搬到这里；曾经保留的 ``RAGPipeline.ingest_media`` 薄委托没有生产调用，
+还会造成 ``memory → tool → memory`` 的反向依赖，因此已删除。Web 与工具协议现在都直接
+调用本模块的 ``ingest_image``；``accepts_parameter``（抽取器协议自省）仍由
+``memory.rag.pipeline`` 提供，不写第二份。
 """
 
 from __future__ import annotations

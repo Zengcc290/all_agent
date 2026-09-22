@@ -3099,7 +3099,19 @@
         drawer.classList.add("visible");
         return;
       }
-      const res = await apiPostJson("/api/chat", { message: text, mode: usedMode }, 180000);
+      let request = { message: text, mode: usedMode };
+      let res = await apiPostJson("/api/chat", request, 180000);
+      const pending = (res.confirmations || [])[0];
+      if (pending) {
+        const args = pending.arguments || {};
+        const target = args.action === "clear"
+          ? `清空 ${args.memory_type || "working"} 层`
+          : `删除记忆 ${args.item_id || "(未知 id)"}`;
+        if (window.confirm(`破坏性操作需要确认：${target}\n\n确认后只授权这一组精确参数，是否继续？`)) {
+          request = { message: text, mode: usedMode, confirmation: pending };
+          res = await apiPostJson("/api/chat", request, 180000);
+        }
+      }
       think.classList.remove("thinking");
       const sources = (res.sources || [])
         .filter(item => item.source)

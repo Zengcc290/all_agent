@@ -84,11 +84,6 @@ from tool.orphan_entities import (
     OrphanEntitiesTool,
     find_orphan_entities,
 )
-from tool.propose_cleanup import (
-    ProposeCleanupInput,
-    ProposeCleanupTool,
-    propose_orphan_cleanup,
-)
 from tool.reconcile import (
     ReconcileInput,
     ReconcileTool,
@@ -112,7 +107,6 @@ CAPABILITY_TOOLS = (
     "knowledge.import",
     "knowledge.classify_domain",
     "knowledge.orphan_entities",
-    "knowledge.propose_cleanup",
     "knowledge.graph_snapshot",
     "knowledge.document_list",
     "knowledge.document_get",
@@ -202,7 +196,7 @@ def test_capability_tools_are_discovered_and_registered() -> None:
 
 
 def test_read_and_write_side_effects_are_declared_correctly() -> None:
-    """只读类免确认（召回/对账/导出/分类/孤儿/星图/文档读/统计），写入类必须确认（索引/节点/自愈/导入/提案/重嵌入/事实/播种/图片）。"""
+    """只读类免确认；索引、修复、导入与其他数据写入必须确认。"""
 
     read_tools = (
         HybridRecallTool().spec,
@@ -221,7 +215,6 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         GraphNodeUpdateTool().spec,
         RepairDriftTool().spec,
         ImportKnowledgeTool().spec,
-        ProposeCleanupTool().spec,
         DocumentRevectorizeTool().spec,
         AddFactTool().spec,
         SeedKnowledgeTool().spec,
@@ -246,7 +239,6 @@ def test_read_and_write_side_effects_are_declared_correctly() -> None:
         "knowledge.graph_node_update",
         "knowledge.repair_drift",
         "knowledge.import",
-        "knowledge.propose_cleanup",
         "knowledge.document_revectorize",
         "knowledge.add_fact",
         "knowledge.seed",
@@ -754,29 +746,6 @@ def test_orphan_entities_tool_matches_the_cleanup_criteria(manager) -> None:
     assert len(find_orphan_entities(manager)) == 1
     # 只读：实体还在
     assert manager.get(output.entities[0].id) is not None
-
-
-def test_propose_cleanup_tool_never_leaks_the_confirm_token(manager) -> None:
-    """清理提案工具：只开待确认提案、绝不删除；且刻意不把确认令牌交给模型。"""
-
-    manager.add("尘埃", memory_type="semantic", metadata={"kind": "entity", "title": "尘埃"})
-
-    output = ProposeCleanupTool(manager=manager).execute(ProposeCleanupInput())
-
-    assert output.count == 1
-    assert output.proposal_id
-    assert output.requires_human_confirmation is True
-    # 令牌只走人类/脚本通道（函数仍返回它），工具输出里绝不能出现
-    assert "confirm_token" not in output.model_dump()
-    assert propose_orphan_cleanup(manager)["confirm_token"]
-    # 提案是 pending，数据一条没删
-    from memory.storage.document_repo import DeletionProposalStore
-
-    store = DeletionProposalStore(
-        manager.document_store.path, connection=manager.document_store.connection
-    )
-    assert store.get(output.proposal_id).status == "pending"
-    assert manager.get(output.item_ids[0]) is not None
 
 
 def test_document_tools_read_the_truth_source(drift_pipeline) -> None:

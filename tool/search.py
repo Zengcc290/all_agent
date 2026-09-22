@@ -27,7 +27,7 @@ from pydantic import (
 
 from core import BaseTool, ToolSpec
 from core.parser import reject_json_constant
-from core.services_config import SearchService, load_services_config
+from core.services_config import load_services_config
 
 # Discovery uses this literal switch before constructing the tool.
 TOOL_ENABLED = True
@@ -219,7 +219,7 @@ class SearchTool(BaseTool):
         # Loading happens in the constructor (rather than module import) so
         # discovery remains free of configuration and I/O side effects.
         services = (
-            _services_search()
+            load_services_config().search
             if base_url is None or api_key is None or timeout is None
             else None
         )
@@ -323,12 +323,6 @@ class SearchTool(BaseTool):
             # JSONDecodeError），必须一并捕获，否则会逃逸成难以理解的内部错误。
             raise ValueError("search response was not valid UTF-8 JSON") from exc
         return _normalize_response(payload, arguments.max_results)
-
-
-def _services_search() -> SearchService:
-    """Search settings from config/services.toml; a blank/missing file yields all-None."""
-
-    return load_services_config().search
 
 
 def _normalize_nullable_text(value: Any) -> Any:

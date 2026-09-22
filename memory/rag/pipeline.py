@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -244,31 +244,6 @@ class RAGPipeline:
         self.last_ingest_report = report
         return items
 
-    def ingest_media(
-        self,
-        image: bytes,
-        *,
-        text: str = "",
-        mime_type: str = "image/jpeg",
-        metadata: Mapping[str, Any] | None = None,
-    ) -> MemoryItem:
-        """Index one image and materialize vision-extracted n-ary observations.
-
-        实现已工具化（``tool/ingest_image.py``，工具名 ``knowledge.ingest_image``）；
-        这里保留薄委托，因为「图片入库」在本类上是一个公开入口（多模态测试与
-        Web 端点都用它），而规则细节（锁闸门顺序、抽取失败不回滚）只有一处实现。
-        """
-
-        from tool.ingest_image import ingest_image
-
-        result = ingest_image(
-            self, image=image, text=text, mime_type=mime_type, metadata=dict(metadata or {})
-        )
-        item = self.manager.get(result["item_id"])
-        if item is None:  # pragma: no cover - add() 刚写入，取不到说明库被外部改动
-            raise RuntimeError(f"图片已入库但读不回：{result['item_id']}")
-        return item
-
     def ingest_source(
         self,
         source: str | Path,
@@ -322,13 +297,6 @@ class RAGPipeline:
 
     def graph_context(self, query: str, *, limit: int = RAG_RETRIEVE_LIMIT, hops: int = RAG_GRAPH_HOPS, max_chars: int = RAG_CONTEXT_MAX_CHARS) -> str:
         return self.graph.build_context(query, limit=limit, hops=hops, max_chars=max_chars)
-
-    def answer(self, query: str, generator: Callable[[str], str], *, limit: int = RAG_RETRIEVE_LIMIT) -> str:
-        if not callable(generator):
-            raise TypeError("generator must be callable")
-        context = self.build_context(query, limit=limit)
-        prompt = f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
-        return str(generator(prompt))
 
     def delete_document(self, document_id: str) -> int:
         items = self.manager.list(memory_type=MemoryType.SEMANTIC, include_expired=True)

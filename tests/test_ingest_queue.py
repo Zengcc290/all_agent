@@ -121,6 +121,7 @@ def test_knowledge_endpoint_async_flow_and_history(tmp_path, monkeypatch):
         wait_for(done)
         history = client.get("/api/knowledge/jobs").json()
         assert history["available"] is True
+        assert "workers" not in history  # 旧字段从未连接真实 worker 数，已移除
         job = history["items"][0]
         assert job["label"] == "入库成功"
         assert job["result"]["chunks"] >= 1

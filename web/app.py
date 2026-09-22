@@ -122,10 +122,18 @@ def embedding_config_hint(manager: MemoryManager) -> str:
     )
 
 
+class ConfirmedChatToolCall(BaseModel):
+    """Exact destructive call the human accepted in the previous response."""
+
+    tool_name: Literal["memory.manage"]
+    arguments: dict[str, Any]
+
+
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=WEB_CHAT_MAX_CHARS)
     #: 回答模式：offline 只靠本地记忆，online 额外允许联网搜索（web.search）。
     mode: Literal["offline", "online"] = Field(default="offline")
+    confirmation: ConfirmedChatToolCall | None = None
 
 
 class FactBody(BaseModel):
@@ -322,9 +330,15 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             # 互相污染上下文（后发请求排队，而不是并发改写同一份历史）。
             # 上下文只为 memory.add 预置写确认：用户这一轮明确要求「记住」时
             # 模型才能落库；删除/清空/入库仍需人工确认。
-            context = ExecutionContext(
-                confirmed_side_effects=chat_confirmed_side_effects(agent)
+            confirmations = (
+                chat_confirmed_side_effects(agent)
+                if body.confirmation is None
+                else chat_confirmed_side_effects(
+                    agent,
+                    destructive_call=body.confirmation.model_dump(mode="json"),
+                )
             )
+            context = ExecutionContext(confirmed_side_effects=confirmations)
             async with app.state.chat_lock:
                 answer = await asyncio.to_thread(
                     agent.run,
@@ -336,8 +350,19 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=502, detail=f"聊天模型调用失败：{type(exc).__name__}: {exc}"
             )
-        # 问答留痕：每次问答都写进 episodic 记忆（带时间戳、可检索），
-        # 时间线上会新增一颗「问：…」事件星。
+        confirmations = list(getattr(agent, "pending_confirmations", []))
+        if confirmations:
+            # First pass is only a confirmation proposal. Do not write a QA
+            # record or run extraction until the user accepts the exact call.
+            return {
+                "answer": answer,
+                "mode": effective_mode,
+                "sources": [],
+                "paths": [],
+                "retrieval": {"note": "", "hits": []},
+                "confirmations": confirmations,
+            }
+        # 问答留痕：每次完成的问答写进 episodic 记忆（带时间戳、可检索）。
         record_qa(the_manager(), body.message, answer, mode=effective_mode)
         # 再把这次问答交给 LLM 转成图补丁，后台执行：抽取是第二次模型往返，
         # 不能让用户为它多等一轮。抽取成功会递增 GRAPH_REVISION，图缓存自动失效。
@@ -390,6 +415,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
             ],
             "paths": [path.to_dict() for path in retrieval.paths],
             "retrieval": retrieval_report,
+            "confirmations": [],
         }
 
     # ------------------------------------------------------------------
@@ -536,7 +562,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
 
         queue = getattr(app.state, "ingest_queue", None)
         if queue is None or not queue.available:
-            return {"items": [], "available": False, "workers": 0}
+            return {"items": [], "available": False}
         if status is not None and status not in ("pending", "running", "done", "failed"):
             raise HTTPException(status_code=422, detail="status 取值必须是 pending/running/done/failed")
         # 仓储层内部有 200 条硬上限，这里在 API 层再夹一层，避免超大步进直接
@@ -545,7 +571,6 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
         return {
             "items": [job_to_dict(job) for job in jobs],
             "available": True,
-            "workers": getattr(queue, "_workers", 0),
         }
 
     @app.post("/api/knowledge/jobs/{job_id}/retry")
@@ -737,10 +762,7 @@ def create_app(manager: MemoryManager | None = None) -> FastAPI:
     def rebuild_embedding(confirm_rebuild: bool = Query(default=False)) -> dict[str, Any]:
         """Confirm and rebuild the vector projection at the current embedding."""
 
-        if not confirm_rebuild:
-            guard_embedding(confirm_rebuild=False)
-        else:
-            guard_embedding(confirm_rebuild=True)
+        guard_embedding(confirm_rebuild=confirm_rebuild)
         invalidate_graph()
         snapshot = inspect_embedding_lock(the_manager(), app.state.pipeline.document_repo())
         return {

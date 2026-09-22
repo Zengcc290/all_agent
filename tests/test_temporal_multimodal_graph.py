@@ -183,30 +183,6 @@ def test_graph_snapshot_includes_graph_only_edge():
     store.close()
 
 
-def test_visual_ingest_persists_payload_and_calls_visual_extractor():
-    store = manager()
-    seen = []
-
-    class Extractor:
-        def extract(self, text, *, metadata=None, graph_context="", image=None, mime_type=""):
-            seen.append((text, metadata, image, mime_type))
-            return ExtractionResult()
-
-    pipeline = RAGPipeline(store, extractor=Extractor())
-    item = pipeline.ingest_media(
-        PNG,
-        text="电脑在书桌上",
-        mime_type="image/png",
-        metadata={"filename": "camera.png", "captured_at": "2025-01-01T13:00:00+00:00"},
-    )
-    assert item.payload == PNG
-    assert item.modality == "image"
-    assert seen[0][2] == PNG
-    assert seen[0][3] == "image/png"
-    assert pipeline.last_ingest_report["modality"] == "image"
-    store.close()
-
-
 def test_image_knowledge_endpoint_stores_camera_payload(monkeypatch):
     store = manager()
     seen = []

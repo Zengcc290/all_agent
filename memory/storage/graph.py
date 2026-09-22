@@ -872,6 +872,23 @@ class Neo4jGraphStore:
                 getattr(summary.counters, "nodes_deleted", 0)
             )
 
+    def clear(self) -> None:
+        """Remove the complete semantic graph projection."""
+
+        if self.driver is None:
+            self._local.clear()
+            self._reverse.clear()
+            self._entities.clear()
+            self._observations.clear()
+            return
+        query = (
+            "MATCH (n) WHERE n:MemoryEntity OR n:MemoryObservation "
+            "DETACH DELETE n"
+        )
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query)
+            result.consume()
+
     def close(self) -> None:
         if self.driver is not None and callable(getattr(self.driver, "close", None)):
             self.driver.close()

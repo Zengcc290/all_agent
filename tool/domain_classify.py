@@ -81,10 +81,6 @@ DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
 #: 暴露领域清单，供 UI/测试/文档使用。
 KNOWN_DOMAINS: tuple[str, ...] = tuple(DOMAIN_KEYWORDS.keys())
 
-#: 兜底领域：任何主题关键词都没命中时的归宿（常量来源：constants.py）。
-DEFAULT_DOMAIN_NAME = DEFAULT
-
-
 def classify_domain(text: str, *, title: str = "", default: str = DEFAULT) -> str:
     """把文本归类到最匹配的领域，返回领域名。
 

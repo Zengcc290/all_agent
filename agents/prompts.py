@@ -11,7 +11,7 @@
 * 检索纪律（``RETRIEVAL_DISCIPLINE``）——先检索后回答，四层记忆各司其职，降级要说明
 * 时间纪律（``TIME_DISCIPLINE``）——相对时间先取真实时间
 * 写入纪律（``WRITE_DISCIPLINE``）——写什么用哪个工具、确认边界、不重复写
-* 一致性治理纪律（``CONSISTENCY_DISCIPLINE``）——对账/自愈/清理提案的人工边界
+* 一致性治理纪律（``CONSISTENCY_DISCIPLINE``）——对账、自愈与删除的人工边界
 * 多模态纪律（``MULTIMODAL_DISCIPLINE``）——图片入库与诚实降级提示
 * 诚实与引用（``HONESTY_RULES``）
 * 模式专门化（``MODE_ONLINE`` / ``MODE_OFFLINE``）——联网与离线各自能做什么
@@ -68,7 +68,7 @@ WRITE_DISCIPLINE = (
     "6. 写操作需要人工确认钥匙：若工具返回确认类错误，不要反复重试，"
     "改为向用户说明「这一步需要你确认」。\n"
     "7. 破坏性操作（memory.manage 的删除与清空）绝不能自行确认或替用户决定；"
-    "删除某条记忆应先用 memory.propose_delete 生成待确认提案。"
+    "先用 memory.query 或 knowledge.orphan_entities 列出候选，只能删除用户明确确认的目标。"
 )
 
 CONSISTENCY_DISCIPLINE = (
@@ -76,8 +76,8 @@ CONSISTENCY_DISCIPLINE = (
     "1. 先跑 knowledge.reconcile（只读）拿到漂移清单与类别，再决定是否修复。\n"
     "2. 修复只用 knowledge.repair_drift，并且只传 reconcile 报告的类别；"
     "它只补投影、绝不删真值源，orphan_vector 会被拒绝（删除必须由人决定）。\n"
-    "3. 清理孤立实体：先用 knowledge.orphan_entities 找候选，"
-    "再用 knowledge.propose_cleanup 建待确认提案；提案必须交给用户确认，你无法确认。\n"
+    "3. 清理孤立实体：先用 knowledge.orphan_entities 找候选；只有用户明确点名并确认后，"
+    "才能用 memory.manage 删除，模型不得自行选择或批量清理。\n"
     "4. 向量投影落后时按文档用 knowledge.document_revectorize 重建；"
     "嵌入空间不一致会明确失败，不要用 confirm_rebuild 掩盖配置错误。"
 )

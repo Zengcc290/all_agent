@@ -1,9 +1,7 @@
-"""孤立实体清理：完全孤立判定 + 删除提案闸门的最小回归集。
+"""孤立实体只读检测的最小回归集。
 
-验收：
-① 完全孤立（无关系边、无原句提及、无备注挂靠、非 seed）才会被列为候选；
-② 有事实边、有提及、有备注、或 seed 播种的实体都不算孤立；
-③ propose_orphan_cleanup 只写待确认提案，不删任何数据。
+只有完全孤立（无关系边、无原句提及、无备注挂靠、非 seed）的实体才会被列为候选；
+有事实边、有提及、有备注、或 seed 播种的实体都不算孤立。
 """
 
 from __future__ import annotations
@@ -12,9 +10,7 @@ import pytest
 from conftest import HashEmbedding
 
 from memory import MemoryConfig, MemoryManager, Neo4jGraphStore
-from memory.storage.document_repo import DeletionProposalStore
 from tool.orphan_entities import find_orphan_entities
-from tool.propose_cleanup import propose_orphan_cleanup
 
 
 @pytest.fixture()
@@ -93,29 +89,3 @@ def test_chunk_mention_keeps_entity_alive(manager: MemoryManager) -> None:
     )
     _add_entity(manager, "尘埃", source_ids=[chunk.id])
     assert _orphan_names(manager) == set()
-
-
-def test_propose_orphan_cleanup_only_creates_pending_proposal(manager: MemoryManager) -> None:
-    """验收③：清理只落待确认提案，实体原样保留。"""
-
-    _add_entity(manager, "尘埃")
-    result = propose_orphan_cleanup(manager)
-
-    assert result["count"] == 1
-    assert result["proposal_id"] and result["confirm_token"]
-    assert manager.get(result["item_ids"][0]) is not None
-    store = DeletionProposalStore(
-        manager.document_store.path, connection=manager.document_store.connection
-    )
-    assert store.get(result["proposal_id"]).status == "pending"
-
-
-def test_propose_orphan_cleanup_without_candidates_returns_empty(manager: MemoryManager) -> None:
-    _add_entity(manager, "恒星")
-    manager.semantic.add_fact("恒星", "照亮", "行星", confidence=0.9)
-
-    result = propose_orphan_cleanup(manager)
-
-    assert result["count"] == 0
-    assert result["proposal_id"] == ""
-    assert "没有发现" in result["note"]

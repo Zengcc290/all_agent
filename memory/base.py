@@ -528,8 +528,8 @@ class BaseMemory:
     def clear(self) -> int:
         count = 0
         for item in self.document_store.list(memory_type=self.memory_type, include_expired=True):
-            self.vector_store.delete(item.id)
-            if self.document_store.delete(item.id):
+            # Dispatch through overrides (SemanticMemory also removes graph edges).
+            if self.delete(item.id):
                 count += 1
         return count
 

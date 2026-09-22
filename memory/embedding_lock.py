@@ -11,9 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .base import MemoryItem, MemoryType
 from .embedding import BaseEmbedding
 from .manager import MemoryManager
 from .storage.document_repo import DocumentRepository, EmbeddingLockRecord
+
+UNKNOWN_EMBEDDING_MODEL = "__unlocked_existing_data__"
+REBUILDING_EMBEDDING_MODEL = "__rebuild_in_progress__"
 
 
 @dataclass(frozen=True)
@@ -97,7 +101,27 @@ def inspect_embedding_lock(
     projected = live_vector_dimension(manager)
     effective = locked
     mismatch = False
-    if projected is not None and projected != current.dimension:
+    unlocked_data = False
+    if locked is None:
+        memories_exist = bool(manager.document_store.list(include_expired=True))
+        chunks_exist = bool(repository.chunk_ids()) if repository is not None else False
+        # A non-empty live collection with an unknown model is not safe to claim
+        # even if its dimension happens to match the configured model.
+        projection_exists = False
+        list_ids = getattr(manager.vector_store, "list_ids", None)
+        if callable(list_ids):
+            try:
+                projection_exists = projection_exists or bool(list_ids(limit=1))
+            except TypeError:
+                projection_exists = projection_exists or bool(list_ids())
+        unlocked_data = memories_exist or chunks_exist or projection_exists
+    if unlocked_data:
+        mismatch = True
+        effective = EmbeddingLockRecord(
+            model=UNKNOWN_EMBEDDING_MODEL,
+            dimension=projected or current.dimension,
+        )
+    elif projected is not None and projected != current.dimension:
         mismatch = True
         effective = EmbeddingLockRecord(
             model=locked.model if locked is not None else "Qdrant",
@@ -186,50 +210,136 @@ def mismatch_from_exception(
     return EmbeddingLockMismatch(effective, current)
 
 
-def rebuild_vector_projection(
+def reindex_vector_projection(
     manager: MemoryManager,
     repository: DocumentRepository,
     identity: EmbeddingIdentity | None = None,
+    *,
+    recreate_collection: bool = False,
+    continue_on_error: bool = False,
 ) -> dict[str, Any]:
-    """Recreate the vector collection and re-embed every SQLite chunk/memory."""
+    """Project every unique SQLite id once, including orphan/pending chunks.
+
+    Normal ingestion stores a chunk in both ``chunks`` and ``memories`` under
+    the same id. That pair is embedded once via ``embed_item`` and written with
+    the richer chunk payload; ordinary memories follow afterwards. A chunk that
+    never reached ``memories`` is still recoverable from the chunks truth source.
+    The embedding lock advances only when every projection write succeeds.
+    """
 
     current = identity or resolve_embedding_identity(manager.embedding)
+    repository.set_embedding_lock(REBUILDING_EMBEDDING_MODEL, current.dimension)
     recreate = getattr(manager.vector_store, "recreate_collection", None)
-    if callable(recreate):
+    if recreate_collection and callable(recreate):
         recreate(current.dimension)
-    chunks_done = 0
+
+    memories = manager.document_store.list(include_expired=True)
+    memory_by_id = {item.id: item for item in memories}
+    chunk_ids: set[str] = set()
+    indexed_chunk_ids: list[str] = []
+    staged_memories: list[MemoryItem] = []
+    failures: list[dict[str, str]] = []
+    chunks_done = memories_done = 0
     upsert_chunk = getattr(manager.vector_store, "upsert_chunk", None)
-    for chunk in repository.list_all_chunks():
-        vector = manager.embedding.embed(chunk.text)
-        if callable(upsert_chunk):
-            document = repository.get_document(chunk.document_id)
-            upsert_chunk(
-                chunk.chunk_id,
-                vector,
-                document_id=chunk.document_id,
-                chunk_index=chunk.chunk_index,
-                source=document.source if document is not None else "",
-                memory_type="semantic",
-            )
-        repository.set_chunk_vector_status(chunk.chunk_id, "indexed")
-        chunks_done += 1
-    memories_done = 0
-    for item in manager.document_store.list(include_expired=True):
-        item.embedding = manager.embedding.embed_item(
-            item.content,
-            payload=getattr(item, "payload", None),
-            modality=getattr(item, "modality", None),
+
+    def record_failure(item_id: str, exc: Exception) -> None:
+        failures.append(
+            {"id": item_id, "error": f"{type(exc).__name__}: {exc}"}
         )
-        manager.document_store.upsert(item)
-        manager.vector_store.upsert(item)
-        memories_done += 1
-    repository.set_embedding_lock(current.model, current.dimension)
+        if not continue_on_error:
+            raise exc
+
+    for chunk in repository.list_all_chunks():
+        chunk_ids.add(chunk.chunk_id)
+        item = memory_by_id.get(chunk.chunk_id)
+        try:
+            document = repository.get_document(chunk.document_id)
+            if item is None:
+                vector = manager.embedding.embed(chunk.text)
+                item = MemoryItem(
+                    id=chunk.chunk_id,
+                    content=chunk.text,
+                    memory_type=MemoryType.SEMANTIC,
+                    metadata={
+                        "kind": "chunk",
+                        "document_id": chunk.document_id,
+                        "chunk_index": chunk.chunk_index,
+                        "source": document.source if document is not None else "",
+                    },
+                    embedding=vector,
+                )
+            else:
+                vector = manager.embedding.embed_item(
+                    item.content,
+                    payload=item.payload,
+                    modality=item.modality,
+                )
+                item.embedding = vector
+            staged_memories.append(item)
+
+            if callable(upsert_chunk):
+                upsert_chunk(
+                    chunk.chunk_id,
+                    vector,
+                    document_id=chunk.document_id,
+                    chunk_index=chunk.chunk_index,
+                    source=document.source if document is not None else "",
+                    memory_type="semantic",
+                )
+            else:
+                manager.vector_store.upsert(item)
+            indexed_chunk_ids.append(chunk.chunk_id)
+            chunks_done += 1
+            memories_done += 1
+        except Exception as exc:  # noqa: BLE001 - caller chooses fail-fast/best-effort
+            repository.set_chunk_vector_status(chunk.chunk_id, "failed")
+            record_failure(chunk.chunk_id, exc)
+
+    for item in memories:
+        if item.id in chunk_ids:
+            continue
+        try:
+            item.embedding = manager.embedding.embed_item(
+                item.content,
+                payload=item.payload,
+                modality=item.modality,
+            )
+            staged_memories.append(item)
+            manager.vector_store.upsert(item)
+            memories_done += 1
+        except Exception as exc:  # noqa: BLE001 - caller chooses fail-fast/best-effort
+            record_failure(item.id, exc)
+
+    if not failures:
+        upsert_many = getattr(manager.document_store, "upsert_many", None)
+        if not callable(upsert_many):
+            raise RuntimeError("document store does not support atomic projection commits")
+        upsert_many(staged_memories)
+        for chunk_id in indexed_chunk_ids:
+            repository.set_chunk_vector_status(chunk_id, "indexed")
+        repository.set_embedding_lock(current.model, current.dimension)
     return {
         "model": current.model,
         "dimension": current.dimension,
         "chunks": chunks_done,
         "memories": memories_done,
+        "failed": failures,
     }
+
+
+def rebuild_vector_projection(
+    manager: MemoryManager,
+    repository: DocumentRepository,
+    identity: EmbeddingIdentity | None = None,
+) -> dict[str, Any]:
+    """Recreate the vector collection, then project every unique SQLite id."""
+
+    return reindex_vector_projection(
+        manager,
+        repository,
+        identity,
+        recreate_collection=True,
+    )
 
 
 __all__ = [
@@ -241,5 +351,6 @@ __all__ = [
     "live_vector_dimension",
     "mismatch_from_exception",
     "rebuild_vector_projection",
+    "reindex_vector_projection",
     "resolve_embedding_identity",
 ]

@@ -431,6 +431,7 @@ class ReActAgent(Agent):
         if repository is None and lazy_tools and auto_discover_tools:
             repository = ToolSpecRepository()
         self.lazy_tools = lazy_tools
+        self.pending_confirmations: list[dict[str, Any]] = []
         super().__init__(
             name,
             llm=llm,
@@ -611,6 +612,7 @@ class ReActAgent(Agent):
             or max_rounds < 1
         ):
             raise ValueError("max_rounds must be None or a positive integer")
+        self.pending_confirmations = []
         if context is None:
             context = ExecutionContext()
         elif not isinstance(context, ExecutionContext):
@@ -1165,14 +1167,6 @@ class ReActAgent(Agent):
             result, loaded_order, context, loaded_tool_schemas
         )
 
-    @staticmethod
-    def _strict_react_schema(schema: dict[str, Any]) -> dict[str, Any]:
-        # Reuse Agent's strict schema implementation so ReAct and native
-        # function-calling expose exactly the same contract.
-        from .agent import _strict_function_schema
-
-        return _strict_function_schema(schema)
-
     def _unavailable_tool_error(
         self,
         action_name: str,
@@ -1313,7 +1307,16 @@ class ReActAgent(Agent):
                 (action_name,),
                 time.perf_counter() - tool_started_at,
             )
-        return batch.results[0]
+        result = batch.results[0]
+        self._record_pending_confirmation(call, result)
+        return result
+
+    def _record_pending_confirmation(self, call: ToolCall, result: ToolResult) -> None:
+        if result.error is None or result.error.code != "CONFIRMATION_REQUIRED":
+            return
+        pending = {"tool_name": call.tool_name, "arguments": dict(call.arguments)}
+        if pending not in self.pending_confirmations:
+            self.pending_confirmations.append(pending)
 
     async def _execute_native_calls(
         self,
@@ -1410,8 +1413,11 @@ class ReActAgent(Agent):
                     tool_names,
                     time.perf_counter() - tool_started_at,
                 )
-            for position, result in zip(positions, batch.results, strict=True):
+            for position, result, call in zip(
+                positions, batch.results, calls, strict=True
+            ):
                 results[position] = result
+                self._record_pending_confirmation(call, result)
         observations = []
         for position, native_call in enumerate(native_calls):
             call_id = _field(native_call, "id") or f"react-native-call-{position + 1}"

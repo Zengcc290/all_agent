@@ -28,15 +28,8 @@ from constants import (
     WEB_QA_EXTRACT_SYNC,
     WEB_QA_QUESTION_MAX_CHARS,
 )
-from core.services_config import SearchService, load_services_config
-from memory import (
-    MemoryConfig,
-    MemoryItem,
-    MemoryManager,
-    default_sqlite_path,
-    make_default_embedding,
-    utc_now,
-)
+from core.services_config import load_services_config
+from memory import MemoryConfig, MemoryItem, MemoryManager, default_sqlite_path, utc_now
 from memory.rag import LLMKnowledgeExtractor, NullKnowledgeExtractor, RAGPipeline
 
 LOGGER = logging.getLogger(__name__)
@@ -48,16 +41,6 @@ STATIC_DIR = WEB_DIR / "static"
 #: 统一记忆库路径：Web API 与 Agent 工具都读 memory.base.default_sqlite_path()
 #: （单一事实来源；``MEMORY_DB_PATH`` 是唯一保留的路径覆盖入口）。
 DB_PATH = Path(default_sqlite_path())
-
-
-def build_embedding(config: MemoryConfig | None = None):
-    """按 ``memory.base.make_default_embedding`` 的优先级选嵌入实现。
-
-    这里**只做转发**，不重复一份选型逻辑：配置（端点/密钥/模型）统一来自
-    config/services.toml 的 ``[embedding]`` 段，选型规则见
-    ``memory.base.make_default_embedding``。
-    """
-    return make_default_embedding(config)
 
 
 def build_knowledge_extractor():
@@ -123,7 +106,7 @@ def get_manager() -> MemoryManager:
                 # 未配置时与旧行为完全一致（内存向量 + 内存图）。
                 config = MemoryConfig.from_config()
                 config.sqlite_path = str(DB_PATH)
-                _manager = MemoryManager(config, embedding=build_embedding(config))
+                _manager = MemoryManager(config)
     return _manager
 
 
@@ -167,6 +150,7 @@ def get_agent():
                 from agents import ReActAgent
                 from tool.memory_add import MemoryAddTool
                 from tool.memory_query import MemoryQueryTool
+                from tool.memory_tool import MemoryManageTool
                 from tool.rag_search import RAGSearchTool
                 from tool.rag_tool import RAGTool
                 from tool.search import SearchTool
@@ -175,12 +159,15 @@ def get_agent():
                 # fs / update_log / current_time 等项目脚手架。
                 agent = ReActAgent("knowledge-butler", auto_discover_tools=False)
                 agent.set_system_prompt(SYSTEM_PROMPT)
-                # 四个记忆工具统一注入 Web 单例后端，避免发现机制各自创建的
+                # 五个记忆工具统一注入 Web 单例后端，避免发现机制各自创建的
                 # 默认连接与嵌入配置和 Web API 漂移（同一份记忆库是硬要求）。
                 agent.register_tool(
                     MemoryQueryTool(manager=get_manager()), replace=True
                 )
                 agent.register_tool(MemoryAddTool(manager=get_manager()), replace=True)
+                agent.register_tool(
+                    MemoryManageTool(manager=get_manager()), replace=True
+                )
                 agent.register_tool(
                     RAGSearchTool(pipeline=get_pipeline()), replace=True
                 )
@@ -195,11 +182,13 @@ def get_agent():
 CHAT_CONFIRMED_TOOLS = ("memory.add",)
 
 
-def chat_confirmed_side_effects(agent) -> frozenset[str]:
-    """Return confirmation keys for the writes one user chat turn may perform.
+def chat_confirmed_side_effects(
+    agent, *, destructive_call: dict[str, Any] | None = None
+) -> frozenset[str]:
+    """Return additive plus optional exact-call destructive confirmations.
 
-    Fails closed: an unregistered or unknown tool simply contributes no key, so
-    the runtime keeps asking for confirmation instead of silently allowing it.
+    The destructive key is derived from validated normalized arguments, so a
+    model cannot substitute another id or escalate ``delete`` into ``clear``.
     """
 
     keys: set[str] = set()
@@ -218,6 +207,19 @@ def chat_confirmed_side_effects(agent) -> frozenset[str]:
                 break
         else:
             LOGGER.warning("chat confirmation key unavailable for tool %s", name)
+    if destructive_call is not None:
+        try:
+            name = str(destructive_call["tool_name"])
+            arguments = destructive_call["arguments"]
+            if name != "memory.manage" or not isinstance(arguments, dict):
+                raise ValueError("only memory.manage can be confirmed here")
+            tool, _ = agent.tools.resolve(name)
+            normalized = tool.spec.input_model.model_validate(
+                arguments, strict=True
+            ).model_dump(mode="json")
+            keys.add(agent.tools.call_confirmation_key(name, normalized))
+        except (KeyError, TypeError, ValueError):
+            LOGGER.warning("invalid destructive chat confirmation ignored")
     return frozenset(keys)
 
 
@@ -229,6 +231,7 @@ SEARCH_TOOL_NAME = "web.search"
 CHAT_TOOL_ALLOWLIST = (
     "memory.query",
     "memory.add",
+    "memory.manage",
     "memory.rag_search",
     "memory.rag",
     SEARCH_TOOL_NAME,
@@ -241,14 +244,8 @@ def search_available() -> bool:
     唯一来源是 config/services.toml 的 ``[search]`` 段——外部 API 调用的
     集中配置（历史 SEARCH_* / ANYSEARCH_* 环境变量入口已删除）。
     """
-    search = _services_search()
+    search = load_services_config().search
     return bool(search.base_url) and bool(search.api_key)
-
-
-def _services_search() -> SearchService:
-    """Search settings from config/services.toml; a blank/missing file yields all-None."""
-
-    return load_services_config().search
 
 
 def chat_tool_names(agent, *, online: bool) -> list[str]:

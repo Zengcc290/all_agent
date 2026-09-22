@@ -153,6 +153,56 @@ def test_real_agent_chat_runs_the_memory_tools_and_persists_add(real_chat_client
     assert qa_items and qa_items[0].metadata["question"].startswith("先检索知识库")
 
 
+def test_real_chat_destructive_confirmation_round_trip(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _chat_env(tmp_path, monkeypatch, confirm_add=True) as (client, manager, _llm):
+        item = manager.semantic.add_fact("待删主体", "待删关系", "待删客体", confidence=0.9)
+        action = (
+            "Thought: 删除需要确认\n"
+            "Action: memory.manage\n"
+            f'Action Input: {{"action": "delete", "memory_type": "semantic", "item_id": "{item.id}"}}\n'
+        )
+        agent = importlib.import_module("web.support").get_agent()
+        agent.llm = ScriptedReActLLM()
+        agent.llm.complete = lambda messages, **options: (
+            action if agent.llm.calls in {0, 2} else "Final Answer: 已处理确认流程。"
+        )
+        original_complete = agent.llm.complete
+
+        def counted(messages, **options):
+            result = original_complete(messages, **options)
+            agent.llm.calls += 1
+            return result
+
+        agent.llm.complete = counted
+
+        first = client.post("/api/chat", json={"message": "删除这条明确指定的记忆"})
+        pending = first.json()["confirmations"]
+        assert first.status_code == 200
+        assert pending == [{
+            "tool_name": "memory.manage",
+            "arguments": {
+                "action": "delete",
+                "memory_type": "semantic",
+                "item_id": item.id,
+            },
+        }]
+        assert manager.get(item.id) is not None
+
+        second = client.post(
+            "/api/chat",
+            json={
+                "message": "删除这条明确指定的记忆",
+                "confirmation": pending[0],
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["confirmations"] == []
+        assert manager.get(item.id) is None
+        assert manager.semantic.graph_store.get_relations("待删主体") == []
+
+
 def test_chat_denies_memory_add_when_the_endpoint_stops_confirming(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

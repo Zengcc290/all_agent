@@ -47,12 +47,7 @@ class SQLiteDocumentStore(BaseDocumentStore):
 
     @property
     def connection(self) -> sqlite3.Connection | None:
-        """The pinned ``:memory:`` connection, or ``None`` for file-backed stores.
-
-        F2 的待确认删除表与 ``memories`` 同居一个 SQLite 文件；``:memory:``
-        的情况下两个私有连接不共享数据，所以同库的第二个存储类必须复用
-        这一条连接，否则提议写进去、执行端读不到。
-        """
+        """The pinned ``:memory:`` connection, or ``None`` for file-backed stores."""
 
         return self._connection
 
@@ -98,34 +93,47 @@ class SQLiteDocumentStore(BaseDocumentStore):
             connection.execute("CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp)")
 
-    def upsert(self, item: MemoryItem) -> None:
+    @staticmethod
+    def _upsert_on(connection: sqlite3.Connection, item: MemoryItem) -> None:
         if not isinstance(item, MemoryItem):
             raise TypeError("item must be a MemoryItem")
         data = item.to_dict()
+        connection.execute(
+            """
+            INSERT INTO memories
+            (id, content, memory_type, metadata, importance, created_at, updated_at,
+             expires_at, timestamp, embedding, payload, modality, relations)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              content=excluded.content, memory_type=excluded.memory_type,
+              metadata=excluded.metadata, importance=excluded.importance,
+              created_at=excluded.created_at, updated_at=excluded.updated_at,
+              expires_at=excluded.expires_at, timestamp=excluded.timestamp,
+              embedding=excluded.embedding, payload=excluded.payload,
+              modality=excluded.modality, relations=excluded.relations
+            """,
+            (
+                item.id, item.content, item.memory_type.value,
+                json.dumps(data["metadata"], ensure_ascii=False), item.importance,
+                data["created_at"], data["updated_at"], data["expires_at"],
+                data["timestamp"], json.dumps(item.embedding),
+                json.dumps(data.get("payload"), ensure_ascii=False), item.modality,
+                json.dumps(data["relations"], ensure_ascii=False),
+            ),
+        )
+
+    def upsert(self, item: MemoryItem) -> None:
         with self._connection_scope() as connection:
-            connection.execute(
-                """
-                INSERT INTO memories
-                (id, content, memory_type, metadata, importance, created_at, updated_at,
-                 expires_at, timestamp, embedding, payload, modality, relations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  content=excluded.content, memory_type=excluded.memory_type,
-                  metadata=excluded.metadata, importance=excluded.importance,
-                  created_at=excluded.created_at, updated_at=excluded.updated_at,
-                  expires_at=excluded.expires_at, timestamp=excluded.timestamp,
-                  embedding=excluded.embedding, payload=excluded.payload,
-                  modality=excluded.modality, relations=excluded.relations
-                """,
-                (
-                    item.id, item.content, item.memory_type.value,
-                    json.dumps(data["metadata"], ensure_ascii=False), item.importance,
-                    data["created_at"], data["updated_at"], data["expires_at"],
-                    data["timestamp"], json.dumps(item.embedding),
-                    json.dumps(data.get("payload"), ensure_ascii=False), item.modality,
-                    json.dumps(data["relations"], ensure_ascii=False),
-                ),
-            )
+            self._upsert_on(connection, item)
+
+    def upsert_many(self, items: list[MemoryItem]) -> None:
+        """Commit a projection rebuild's memory rows in one SQLite transaction."""
+
+        if not isinstance(items, list):
+            raise TypeError("items must be a list")
+        with self._connection_scope() as connection:
+            for item in items:
+                self._upsert_on(connection, item)
 
     def get(self, item_id: str) -> MemoryItem | None:
         with self._connection_scope() as connection:

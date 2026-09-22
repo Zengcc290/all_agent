@@ -32,9 +32,6 @@ from memory.storage.document_repo import DocumentRepository
 
 TOOL_ENABLED = True
 
-#: 可报告的漂移类型；修复工具只接受其中可自愈的两类。
-DRIFT_KINDS = ("missing_vector", "orphan_vector", "missing_edge")
-
 #: 可自愈的漂移类型（只补投影，绝不删改真值源）。
 REPAIRABLE_KINDS = ("missing_vector", "missing_edge")
 
@@ -219,7 +216,6 @@ def create_tool() -> BaseTool:
 
 
 __all__ = [
-    "DRIFT_KINDS",
     "REPAIRABLE_KINDS",
     "DriftEntry",
     "ReconcileCounts",
