@@ -227,6 +227,49 @@ async def test_hot_tool_is_callable_after_hot_reload():
 
 
 @pytest.mark.asyncio
+async def test_explicit_whitelist_excludes_hot_loaded_tool():
+    class ExcludedHotLLM:
+        model = "test-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.requests: list[list[dict]] = []
+
+        def complete(self, messages, **_options):
+            self.requests.append([dict(message) for message in messages])
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    "Thought: use excluded hot tool\n"
+                    "Action: test.excluded_hot\n"
+                    'Action Input: {"value": 7}'
+                )
+            return "Final Answer: blocked"
+
+    llm = ExcludedHotLLM()
+    agent = ReActAgent("hot-whitelist-test", llm=llm, auto_discover_tools=False)
+    agent.register_tool(EchoTool())
+    agent._sync_frozen_manifest()
+    agent.register_hot_tool(
+        _named_echo_tool("test.excluded_hot", "Must stay request-disabled.")
+    )
+
+    answer = await agent.run_with_react(
+        "echo 7",
+        max_rounds=3,
+        tool_names=["test.react_echo"],
+        defer_tool_loading=False,
+        use_history=False,
+    )
+
+    assert answer == "blocked"
+    first_round = "\n".join(str(message.get("content") or "") for message in llm.requests[0])
+    second_round = "\n".join(str(message.get("content") or "") for message in llm.requests[1])
+    assert "Must stay request-disabled." not in first_round
+    assert "TOOL_NOT_ENABLED" in second_round
+
+
+@pytest.mark.asyncio
 async def test_frozen_inventory_stays_stable_after_hot_reload():
     class FinalLLM:
         model = "test-model"

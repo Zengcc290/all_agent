@@ -659,11 +659,7 @@ class ReActAgent(Agent):
             }
             if unknown:
                 raise ValueError("unknown tool name(s): " + ", ".join(sorted(unknown)))
-            loaded_order = (
-                [self.catalog_tool.spec.name, *requested_order]
-                if self.lazy_tools
-                else requested_order
-            )
+            loaded_order = requested_order
             requested_names: set[str] | None = set(requested_order)
         elif defer_tool_loading or self.lazy_tools:
             loaded_order = [self.catalog_tool.spec.name]
@@ -691,10 +687,13 @@ class ReActAgent(Agent):
                     if name != self.catalog_tool.spec.name and name not in self.tools:
                         self._ensure_tool_loaded(name)
             current_snapshot = self.tools.snapshot()
-            # Hot-reloaded tools stay executable even when the caller never
-            # passed them through ``tool_names`` or a catalog resolution.
+            # Hot-reloaded tools remain immediately executable unless this
+            # request supplied an explicit ``tool_names`` capability boundary.
             hot_in_registry = [
-                name for name in self._hot_tools if name in current_snapshot
+                name
+                for name in self._hot_tools
+                if name in current_snapshot
+                and (requested_names is None or name in requested_names)
             ]
             for name in hot_in_registry:
                 if name not in loaded_order:
@@ -716,9 +715,18 @@ class ReActAgent(Agent):
                 conversation,
                 registrations,
                 loaded_tool_schemas,
-                catalog_first=defer_tool_loading or self.lazy_tools,
+                catalog_first=(
+                    (defer_tool_loading or self.lazy_tools)
+                    and self.catalog_tool.spec.name in registrations
+                ),
+                visible_names=requested_names,
             )
-            if self._hot_tools:
+            enabled_hot_tools = {
+                name
+                for name in self._hot_tools
+                if requested_names is None or name in requested_names
+            }
+            if enabled_hot_tools:
                 # The hot-zone block is rebuilt per request and appended at
                 # the very end so it rides after every cached prefix byte.
                 tail_messages = conversation_for_request[-1:]
@@ -726,7 +734,9 @@ class ReActAgent(Agent):
                 hot_block = {
                     "role": "system",
                     "content": "\n".join(
-                        self._hot_zone_lines(loaded_tool_schemas)
+                        self._hot_zone_lines(
+                            loaded_tool_schemas, allowed_names=enabled_hot_tools
+                        )
                     ),
                 }
                 conversation_for_request = [
@@ -965,6 +975,7 @@ class ReActAgent(Agent):
         loaded_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
         *,
         catalog_first: bool = False,
+        visible_names: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         if self.lazy_tools:
             registrations = {
@@ -977,7 +988,11 @@ class ReActAgent(Agent):
         # in the trailing hot-zone block instead of rewriting this cached
         # prefix.
         self._sync_frozen_manifest()
-        frozen_names = sorted(self._frozen_manifest or {})
+        frozen_names = sorted(
+            name
+            for name in (self._frozen_manifest or {})
+            if visible_names is None or name in visible_names
+        )
         inventory = ", ".join(frozen_names) or "(none)"
         # Hot-reloaded tools may appear in ``registrations`` (they are fully
         # executable), but their schemas must never render into this cached
@@ -1035,7 +1050,10 @@ class ReActAgent(Agent):
         return [instruction, *conversation]
 
     def _hot_zone_lines(
-        self, loaded_tool_schemas: Mapping[str, Mapping[str, Any]]
+        self,
+        loaded_tool_schemas: Mapping[str, Mapping[str, Any]],
+        *,
+        allowed_names: set[str] | None = None,
     ) -> list[str]:
         """Render the trailing hot-zone block for hot-reloaded tools.
 
@@ -1049,7 +1067,13 @@ class ReActAgent(Agent):
         if not self._hot_tools:
             return []
         max_full = 4
-        roster = sorted(self._hot_tools)
+        roster = sorted(
+            name
+            for name in self._hot_tools
+            if allowed_names is None or name in allowed_names
+        )
+        if not roster:
+            return []
         hot_snapshot = self.tools.snapshot()
         # Keep tools whose executable disappeared from the registry (e.g.
         # replaced outside this agent) out of the advertised schema list but
@@ -1238,6 +1262,14 @@ class ReActAgent(Agent):
         assert parsed.action is not None
         action_name = self._canonical_action_name(parsed.action, current_snapshot)
         call_id = f"react-call-{call_number}"
+        request_name = action_name.replace("__", ".")
+        if (
+            requested_names is not None
+            and request_name not in requested_names
+        ):
+            return self._unavailable_tool_error(
+                request_name, call_id, requested_names=requested_names
+            )
         if action_name not in current_snapshot:
             # A model may call a known lazy tool directly after seeing the
             # inventory, without first resolving it through the catalog. Load
@@ -1345,6 +1377,11 @@ class ReActAgent(Agent):
             if canonical in current_snapshot:
                 continue
             lazy_name = canonical.replace("__", ".")
+            if (
+                requested_names is not None
+                and lazy_name not in requested_names
+            ):
+                continue
             if not self.lazy_tools or self.repository is None:
                 continue
             if self.repository.get(lazy_name) is None:
@@ -1375,6 +1412,16 @@ class ReActAgent(Agent):
             function = _field(native_call, "function")
             provider_name = _field(function, "name", "unknown.tool")
             canonical = aliases.get(provider_name, provider_name)
+            request_name = (
+                canonical.replace("__", ".")
+                if isinstance(canonical, str)
+                else canonical
+            )
+            if requested_names is not None and request_name not in requested_names:
+                results[position] = self._unavailable_tool_error(
+                    request_name, call_id, requested_names=requested_names
+                )
+                continue
             try:
                 call = parse_openai_tool_calls(
                     [native_call], self.tools, name_map, registrations
