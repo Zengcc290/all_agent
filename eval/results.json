@@ -1,0 +1,1390 @@
+{
+  "en::baseline": {
+    "summary": {
+      "corpus": "README.md (English)",
+      "corpus_key": "en",
+      "tokenizer": "baseline",
+      "documents": [
+        "README.md"
+      ],
+      "chunks": 25,
+      "queries_total": 25,
+      "queries_used": 20,
+      "queries_unmapped": 5,
+      "recall@1": 0.6,
+      "recall@3": 0.85,
+      "recall@5": 0.9,
+      "precision@5": 0.19,
+      "mrr": 0.7183,
+      "top1_score_mean": 0.3248,
+      "top1_score_median": 0.3266,
+      "top1_score_when_correct": 0.3388
+    },
+    "rows": [
+      {
+        "query": "How are new tool plugins discovered without editing a central list?",
+        "ground_truth": [
+          1
+        ],
+        "top_k": [
+          0,
+          17,
+          5,
+          15,
+          1
+        ],
+        "rank": 5,
+        "top1_score": 0.2654,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.2
+      },
+      {
+        "query": "What prevents skill bodies from fragmenting the prompt prefix cache?",
+        "ground_truth": [
+          3
+        ],
+        "top_k": [
+          3,
+          18,
+          19,
+          9,
+          10
+        ],
+        "rank": 1,
+        "top1_score": 0.3741,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "What happens to the prompt cache key when a skill file is edited?",
+        "ground_truth": [
+          3
+        ],
+        "top_k": [
+          3,
+          13,
+          14,
+          19,
+          24
+        ],
+        "rank": 1,
+        "top1_score": 0.409,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Do skill directories execute any code?",
+        "ground_truth": [
+          3
+        ],
+        "top_k": [
+          3,
+          7,
+          2,
+          11,
+          8
+        ],
+        "rank": 1,
+        "top1_score": 0.2465,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Which information about a tool is printed when it registers successfully?",
+        "ground_truth": [
+          4
+        ],
+        "top_k": [
+          13,
+          6,
+          11,
+          5,
+          18
+        ],
+        "rank": null,
+        "top1_score": 0.2721,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "Which Pydantic setting prevents unknown fields from being silently discarded?",
+        "ground_truth": [
+          6
+        ],
+        "top_k": [
+          6,
+          11,
+          15,
+          13,
+          16
+        ],
+        "rank": 1,
+        "top1_score": 0.3652,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Is recommended_before_tools an execution dependency or only a hint?",
+        "ground_truth": [
+          7
+        ],
+        "top_k": [
+          7,
+          13,
+          14,
+          3,
+          18
+        ],
+        "rank": 1,
+        "top1_score": 0.332,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "What does the runtime verify before executing a tool call?",
+        "ground_truth": [
+          7
+        ],
+        "top_k": [
+          14,
+          21,
+          7,
+          13,
+          0
+        ],
+        "rank": 3,
+        "top1_score": 0.3955,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "Can independent tool calls run at the same time?",
+        "ground_truth": [
+          8
+        ],
+        "top_k": [
+          8,
+          4,
+          5,
+          1,
+          17
+        ],
+        "rank": 1,
+        "top1_score": 0.3419,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "How are tools marked unsafe for parallelism scheduled?",
+        "ground_truth": [
+          8
+        ],
+        "top_k": [
+          11,
+          6,
+          8,
+          17,
+          1
+        ],
+        "rank": 3,
+        "top1_score": 0.205,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "Which class schedules one batch of validated tool calls?",
+        "ground_truth": [
+          9
+        ],
+        "top_k": [
+          8,
+          4,
+          24,
+          0,
+          10
+        ],
+        "rank": null,
+        "top1_score": 0.1246,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "Which tool exposes the catalog for summary search and versioned schema loading?",
+        "ground_truth": [
+          11,
+          12
+        ],
+        "top_k": [
+          11,
+          12,
+          4,
+          0,
+          1
+        ],
+        "rank": 1,
+        "top1_score": 0.5473,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.4,
+        "rr": 1.0
+      },
+      {
+        "query": "How does catalog-first schema exposure shrink the first request payload?",
+        "ground_truth": [
+          12
+        ],
+        "top_k": [
+          12,
+          11,
+          21,
+          1,
+          4
+        ],
+        "rank": 1,
+        "top1_score": 0.5618,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "What must be supplied after every real modification of the project?",
+        "ground_truth": [
+          15
+        ],
+        "top_k": [
+          15,
+          12,
+          14,
+          21,
+          8
+        ],
+        "rank": 1,
+        "top1_score": 0.2899,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "How are malformed or stale native tool calls handled?",
+        "ground_truth": [
+          17
+        ],
+        "top_k": [
+          16,
+          17,
+          6,
+          8,
+          5
+        ],
+        "rank": 2,
+        "top1_score": 0.3505,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.5
+      },
+      {
+        "query": "How do I send a request without reusing conversation history?",
+        "ground_truth": [
+          17
+        ],
+        "top_k": [
+          17,
+          13,
+          3,
+          6,
+          5
+        ],
+        "rank": 1,
+        "top1_score": 0.3459,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Which parameter keeps the prompt cache alive longer?",
+        "ground_truth": [
+          19
+        ],
+        "top_k": [
+          19,
+          3,
+          7,
+          18,
+          12
+        ],
+        "rank": 1,
+        "top1_score": 0.2473,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Which adapter do all provider profiles use today?",
+        "ground_truth": [
+          21
+        ],
+        "top_k": [
+          0,
+          21,
+          18,
+          6,
+          17
+        ],
+        "rank": 2,
+        "top1_score": 0.2091,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.5
+      },
+      {
+        "query": "Which embedding providers can be swapped inside the memory package?",
+        "ground_truth": [
+          23
+        ],
+        "top_k": [
+          22,
+          23,
+          14,
+          19,
+          1
+        ],
+        "rank": 2,
+        "top1_score": 0.2916,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.5
+      },
+      {
+        "query": "How are development dependencies installed and tests executed?",
+        "ground_truth": [
+          22
+        ],
+        "top_k": [
+          22,
+          8,
+          1,
+          6,
+          0
+        ],
+        "rank": 1,
+        "top1_score": 0.3213,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      }
+    ],
+    "unmapped": [
+      {
+        "query": "Which flag must be enabled inside a module for the agent to register it as a tool?",
+        "marker": "TOOL_ENABLED = True"
+      },
+      {
+        "query": "What is omitted from runtime logs to keep the output readable?",
+        "marker": "Raw tool arguments and return values are omitted"
+      },
+      {
+        "query": "Where are project changes recorded and which tool does it?",
+        "marker": "recorded compactly in SQLite"
+      },
+      {
+        "query": "Where should per-profile API keys be configured?",
+        "marker": "config/provider.toml"
+      },
+      {
+        "query": "Is provider_name still supported or is it deprecated?",
+        "marker": "deprecated alias during migration"
+      }
+    ]
+  },
+  "zh::baseline": {
+    "summary": {
+      "corpus": "tool/README.md + memory/README.md + skills/README.md (中文)",
+      "corpus_key": "zh",
+      "tokenizer": "baseline",
+      "documents": [
+        "tool/README.md",
+        "memory/README.md",
+        "skills/README.md"
+      ],
+      "chunks": 33,
+      "queries_total": 11,
+      "queries_used": 11,
+      "queries_unmapped": 0,
+      "recall@1": 0.1818,
+      "recall@3": 0.2727,
+      "recall@5": 0.2727,
+      "precision@5": 0.1273,
+      "mrr": 0.2121,
+      "top1_score_mean": 0.1935,
+      "top1_score_median": 0.1961,
+      "top1_score_when_correct": 0.2495
+    },
+    "rows": [
+      {
+        "query": "单文件工具的文件名有什么限制？",
+        "ground_truth": [
+          19
+        ],
+        "top_k": [
+          12,
+          2
+        ],
+        "rank": null,
+        "top1_score": 0.183,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "TOOL_ENABLED 必须是真正的布尔值吗？",
+        "ground_truth": [
+          0,
+          2,
+          5,
+          18
+        ],
+        "top_k": [
+          18,
+          5,
+          0,
+          2,
+          16
+        ],
+        "rank": 1,
+        "top1_score": 0.2887,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.8,
+        "rr": 1.0
+      },
+      {
+        "query": "工具名为什么要带命名空间前缀？",
+        "ground_truth": [
+          2,
+          9,
+          10
+        ],
+        "top_k": [
+          8,
+          13,
+          1
+        ],
+        "rank": null,
+        "top1_score": 0.1961,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "输入输出模型需要什么严格配置？",
+        "ground_truth": [
+          2,
+          7,
+          8,
+          13
+        ],
+        "top_k": [
+          8,
+          12,
+          13
+        ],
+        "rank": 1,
+        "top1_score": 0.1961,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.4,
+        "rr": 1.0
+      },
+      {
+        "query": "Qdrant 在什么时候自动创建 collection？",
+        "ground_truth": [
+          24
+        ],
+        "top_k": [
+          32,
+          25,
+          28,
+          21,
+          10
+        ],
+        "rank": null,
+        "top1_score": 0.2415,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "没有提供 Neo4j uri 时存储会怎样降级？",
+        "ground_truth": [
+          21
+        ],
+        "top_k": [
+          26,
+          24,
+          15,
+          5,
+          19
+        ],
+        "rank": null,
+        "top1_score": 0.1427,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "DashScope 嵌入默认按多大批量分批？",
+        "ground_truth": [
+          25
+        ],
+        "top_k": [
+          14,
+          7
+        ],
+        "rank": null,
+        "top1_score": 0.1083,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "要解析 PDF 文档需要额外安装什么？",
+        "ground_truth": [
+          23
+        ],
+        "top_k": [
+          18,
+          30,
+          31,
+          9,
+          11
+        ],
+        "rank": null,
+        "top1_score": 0.2357,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "memory 系列工具默认把数据写到哪个文件？",
+        "ground_truth": [
+          27
+        ],
+        "top_k": [
+          19,
+          22,
+          27,
+          23,
+          21
+        ],
+        "rank": 3,
+        "top1_score": 0.2636,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "变更日志数据库的路径怎么覆盖？",
+        "ground_truth": [
+          5
+        ],
+        "top_k": [],
+        "rank": null,
+        "top1_score": 0.0,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "工作记忆如何控制容量与过期？",
+        "ground_truth": [
+          20,
+          23
+        ],
+        "top_k": [
+          31,
+          30,
+          29
+        ],
+        "rank": null,
+        "top1_score": 0.2725,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      }
+    ],
+    "unmapped": []
+  },
+  "en::cjk-bigram": {
+    "summary": {
+      "corpus": "README.md (English)",
+      "corpus_key": "en",
+      "tokenizer": "cjk-bigram",
+      "documents": [
+        "README.md"
+      ],
+      "chunks": 25,
+      "queries_total": 25,
+      "queries_used": 20,
+      "queries_unmapped": 5,
+      "recall@1": 0.6,
+      "recall@3": 0.85,
+      "recall@5": 0.9,
+      "precision@5": 0.19,
+      "mrr": 0.7183,
+      "top1_score_mean": 0.3248,
+      "top1_score_median": 0.3266,
+      "top1_score_when_correct": 0.3388
+    },
+    "rows": [
+      {
+        "query": "How are new tool plugins discovered without editing a central list?",
+        "ground_truth": [
+          1
+        ],
+        "top_k": [
+          0,
+          17,
+          5,
+          15,
+          1
+        ],
+        "rank": 5,
+        "top1_score": 0.2654,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.2
+      },
+      {
+        "query": "What prevents skill bodies from fragmenting the prompt prefix cache?",
+        "ground_truth": [
+          3
+        ],
+        "top_k": [
+          3,
+          18,
+          19,
+          9,
+          10
+        ],
+        "rank": 1,
+        "top1_score": 0.3741,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "What happens to the prompt cache key when a skill file is edited?",
+        "ground_truth": [
+          3
+        ],
+        "top_k": [
+          3,
+          13,
+          14,
+          19,
+          24
+        ],
+        "rank": 1,
+        "top1_score": 0.409,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Do skill directories execute any code?",
+        "ground_truth": [
+          3
+        ],
+        "top_k": [
+          3,
+          7,
+          2,
+          11,
+          8
+        ],
+        "rank": 1,
+        "top1_score": 0.2465,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Which information about a tool is printed when it registers successfully?",
+        "ground_truth": [
+          4
+        ],
+        "top_k": [
+          13,
+          6,
+          11,
+          5,
+          18
+        ],
+        "rank": null,
+        "top1_score": 0.2721,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "Which Pydantic setting prevents unknown fields from being silently discarded?",
+        "ground_truth": [
+          6
+        ],
+        "top_k": [
+          6,
+          11,
+          15,
+          13,
+          16
+        ],
+        "rank": 1,
+        "top1_score": 0.3652,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Is recommended_before_tools an execution dependency or only a hint?",
+        "ground_truth": [
+          7
+        ],
+        "top_k": [
+          7,
+          13,
+          14,
+          3,
+          18
+        ],
+        "rank": 1,
+        "top1_score": 0.332,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "What does the runtime verify before executing a tool call?",
+        "ground_truth": [
+          7
+        ],
+        "top_k": [
+          14,
+          21,
+          7,
+          13,
+          0
+        ],
+        "rank": 3,
+        "top1_score": 0.3955,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "Can independent tool calls run at the same time?",
+        "ground_truth": [
+          8
+        ],
+        "top_k": [
+          8,
+          4,
+          5,
+          1,
+          17
+        ],
+        "rank": 1,
+        "top1_score": 0.3419,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "How are tools marked unsafe for parallelism scheduled?",
+        "ground_truth": [
+          8
+        ],
+        "top_k": [
+          11,
+          6,
+          8,
+          17,
+          1
+        ],
+        "rank": 3,
+        "top1_score": 0.205,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "Which class schedules one batch of validated tool calls?",
+        "ground_truth": [
+          9
+        ],
+        "top_k": [
+          8,
+          4,
+          24,
+          0,
+          10
+        ],
+        "rank": null,
+        "top1_score": 0.1246,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "Which tool exposes the catalog for summary search and versioned schema loading?",
+        "ground_truth": [
+          11,
+          12
+        ],
+        "top_k": [
+          11,
+          12,
+          4,
+          0,
+          1
+        ],
+        "rank": 1,
+        "top1_score": 0.5473,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.4,
+        "rr": 1.0
+      },
+      {
+        "query": "How does catalog-first schema exposure shrink the first request payload?",
+        "ground_truth": [
+          12
+        ],
+        "top_k": [
+          12,
+          11,
+          21,
+          1,
+          4
+        ],
+        "rank": 1,
+        "top1_score": 0.5618,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "What must be supplied after every real modification of the project?",
+        "ground_truth": [
+          15
+        ],
+        "top_k": [
+          15,
+          12,
+          14,
+          21,
+          8
+        ],
+        "rank": 1,
+        "top1_score": 0.2899,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "How are malformed or stale native tool calls handled?",
+        "ground_truth": [
+          17
+        ],
+        "top_k": [
+          16,
+          17,
+          6,
+          8,
+          5
+        ],
+        "rank": 2,
+        "top1_score": 0.3505,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.5
+      },
+      {
+        "query": "How do I send a request without reusing conversation history?",
+        "ground_truth": [
+          17
+        ],
+        "top_k": [
+          17,
+          13,
+          3,
+          6,
+          5
+        ],
+        "rank": 1,
+        "top1_score": 0.3459,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Which parameter keeps the prompt cache alive longer?",
+        "ground_truth": [
+          19
+        ],
+        "top_k": [
+          19,
+          3,
+          7,
+          18,
+          12
+        ],
+        "rank": 1,
+        "top1_score": 0.2473,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "Which adapter do all provider profiles use today?",
+        "ground_truth": [
+          21
+        ],
+        "top_k": [
+          0,
+          21,
+          18,
+          6,
+          17
+        ],
+        "rank": 2,
+        "top1_score": 0.2091,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.5
+      },
+      {
+        "query": "Which embedding providers can be swapped inside the memory package?",
+        "ground_truth": [
+          23
+        ],
+        "top_k": [
+          22,
+          23,
+          14,
+          19,
+          1
+        ],
+        "rank": 2,
+        "top1_score": 0.2916,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.5
+      },
+      {
+        "query": "How are development dependencies installed and tests executed?",
+        "ground_truth": [
+          22
+        ],
+        "top_k": [
+          22,
+          8,
+          1,
+          6,
+          0
+        ],
+        "rank": 1,
+        "top1_score": 0.3213,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      }
+    ],
+    "unmapped": [
+      {
+        "query": "Which flag must be enabled inside a module for the agent to register it as a tool?",
+        "marker": "TOOL_ENABLED = True"
+      },
+      {
+        "query": "What is omitted from runtime logs to keep the output readable?",
+        "marker": "Raw tool arguments and return values are omitted"
+      },
+      {
+        "query": "Where are project changes recorded and which tool does it?",
+        "marker": "recorded compactly in SQLite"
+      },
+      {
+        "query": "Where should per-profile API keys be configured?",
+        "marker": "config/provider.toml"
+      },
+      {
+        "query": "Is provider_name still supported or is it deprecated?",
+        "marker": "deprecated alias during migration"
+      }
+    ]
+  },
+  "zh::cjk-bigram": {
+    "summary": {
+      "corpus": "tool/README.md + memory/README.md + skills/README.md (中文)",
+      "corpus_key": "zh",
+      "tokenizer": "cjk-bigram",
+      "documents": [
+        "tool/README.md",
+        "memory/README.md",
+        "skills/README.md"
+      ],
+      "chunks": 33,
+      "queries_total": 11,
+      "queries_used": 11,
+      "queries_unmapped": 0,
+      "recall@1": 0.3636,
+      "recall@3": 0.6364,
+      "recall@5": 0.7273,
+      "precision@5": 0.1636,
+      "mrr": 0.4879,
+      "top1_score_mean": 0.2388,
+      "top1_score_median": 0.2416,
+      "top1_score_when_correct": 0.2399
+    },
+    "rows": [
+      {
+        "query": "单文件工具的文件名有什么限制？",
+        "ground_truth": [
+          19
+        ],
+        "top_k": [
+          1,
+          0,
+          9,
+          10,
+          32
+        ],
+        "rank": null,
+        "top1_score": 0.2535,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "TOOL_ENABLED 必须是真正的布尔值吗？",
+        "ground_truth": [
+          0,
+          2,
+          5,
+          18
+        ],
+        "top_k": [
+          28,
+          2,
+          18,
+          30,
+          29
+        ],
+        "rank": 2,
+        "top1_score": 0.2368,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.4,
+        "rr": 0.5
+      },
+      {
+        "query": "工具名为什么要带命名空间前缀？",
+        "ground_truth": [
+          2,
+          9,
+          10
+        ],
+        "top_k": [
+          3,
+          29,
+          2,
+          32,
+          12
+        ],
+        "rank": 3,
+        "top1_score": 0.2283,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "输入输出模型需要什么严格配置？",
+        "ground_truth": [
+          2,
+          7,
+          8,
+          13
+        ],
+        "top_k": [
+          3,
+          0,
+          14,
+          15,
+          2
+        ],
+        "rank": 5,
+        "top1_score": 0.2294,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.2
+      },
+      {
+        "query": "Qdrant 在什么时候自动创建 collection？",
+        "ground_truth": [
+          24
+        ],
+        "top_k": [
+          25,
+          21,
+          14,
+          4,
+          1
+        ],
+        "rank": null,
+        "top1_score": 0.1579,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "没有提供 Neo4j uri 时存储会怎样降级？",
+        "ground_truth": [
+          21
+        ],
+        "top_k": [
+          3,
+          4,
+          27,
+          23,
+          31
+        ],
+        "rank": null,
+        "top1_score": 0.2966,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "precision@5": 0.0,
+        "rr": 0.0
+      },
+      {
+        "query": "DashScope 嵌入默认按多大批量分批？",
+        "ground_truth": [
+          25
+        ],
+        "top_k": [
+          19,
+          32,
+          25,
+          29,
+          0
+        ],
+        "rank": 3,
+        "top1_score": 0.299,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 0.3333
+      },
+      {
+        "query": "要解析 PDF 文档需要额外安装什么？",
+        "ground_truth": [
+          23
+        ],
+        "top_k": [
+          23,
+          25,
+          21,
+          19,
+          1
+        ],
+        "rank": 1,
+        "top1_score": 0.2536,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "memory 系列工具默认把数据写到哪个文件？",
+        "ground_truth": [
+          27
+        ],
+        "top_k": [
+          27,
+          0,
+          14,
+          19,
+          10
+        ],
+        "rank": 1,
+        "top1_score": 0.2416,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "变更日志数据库的路径怎么覆盖？",
+        "ground_truth": [
+          5
+        ],
+        "top_k": [
+          5,
+          21,
+          19,
+          4,
+          27
+        ],
+        "rank": 1,
+        "top1_score": 0.1628,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      },
+      {
+        "query": "工作记忆如何控制容量与过期？",
+        "ground_truth": [
+          20,
+          23
+        ],
+        "top_k": [
+          20,
+          3,
+          8,
+          11,
+          27
+        ],
+        "rank": 1,
+        "top1_score": 0.2677,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "precision@5": 0.2,
+        "rr": 1.0
+      }
+    ],
+    "unmapped": []
+  }
+}

@@ -16,6 +16,17 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from typing import Any, Iterable
 
+# CJK code-point ranges used by TFIDFEmbedding.tokenize. The CJK alternative
+# must be listed before [\w]+ inside _CJK_OR_WORD, otherwise \w would swallow
+# whole Chinese runs as a single token.
+CJK_RANGES = (
+    f"{chr(0x3400)}-{chr(0x4dbf)}"
+    f"{chr(0x4e00)}-{chr(0x9fff)}"
+    f"{chr(0xf900)}-{chr(0xfaff)}"
+)
+_CJK_BLOCK = re.compile(f"[{CJK_RANGES}]+", re.UNICODE)
+_CJK_OR_WORD = re.compile(f"[{CJK_RANGES}]+|[\\w]+", re.UNICODE)
+
 
 class BaseEmbedding(ABC):
     dimension: int
@@ -48,10 +59,29 @@ class TFIDFEmbedding(BaseEmbedding):
 
     @staticmethod
     def tokenize(text: str) -> list[str]:
+        r"""Split text into index tokens.
+
+        CJK runs are split into character bigrams; latin/numeric runs stay as
+        whole words. A single re.findall over [\w]+ collapses an entire Chinese
+        sentence into one token (Chinese has no spaces), which made Chinese
+        retrieval collapse: measured Recall@5 0.2727 on Chinese vs 0.9000 on
+        English for the same pipeline. Bigram indexing is what Lucene
+        CJKAnalyzer does; it needs no external dictionary and keeps the hashed
+        vector dimension stable.
+        """
         if not isinstance(text, str):
             raise TypeError("text must be a string")
-        # Keep Unicode words (including Chinese runs) and latin/numeric terms.
-        return re.findall(r"[\w]+", text.casefold(), flags=re.UNICODE)
+        tokens: list[str] = []
+        for match in _CJK_OR_WORD.finditer(text.casefold()):
+            token = match.group(0)
+            if _CJK_BLOCK.fullmatch(token):
+                if len(token) == 1:
+                    tokens.append(token)
+                else:
+                    tokens.extend(token[i:i + 2] for i in range(len(token) - 1))
+            else:
+                tokens.append(token)
+        return tokens
 
     def fit(self, texts: Iterable[str]) -> "TFIDFEmbedding":
         documents = list(texts)
