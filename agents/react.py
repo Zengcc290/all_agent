@@ -14,10 +14,8 @@ metadata and are not used as an authorization gate.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import importlib
-import inspect
 import json
 import re
 import time
@@ -26,18 +24,25 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
+from constants import (
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TIMEOUT,
+    REACT_MALFORMED_ANSWER_RETRY_LIMIT,
+    REACT_UNMARKED_ANSWER_RETRY_LIMIT,
+)
 from core import (
     ExecutionContext,
     ToolCall,
     ToolError,
+    ToolLoop,
+    ToolRegistry,
     ToolResult,
     ToolSpecRepository,
-    ToolRegistry,
-    ToolLoop,
+)
+from core import (
     discover_tools as discover_tool_modules,
 )
 from core.activity_log import (
-    log_model_completed,
     log_react_final_answer,
     log_react_parse_issue,
     log_react_round_started,
@@ -46,9 +51,9 @@ from core.activity_log import (
     log_tool_call_started,
     log_tool_registration,
 )
-from constants import DEFAULT_TEMPERATURE, DEFAULT_TIMEOUT
+from core.parser import loads_model_json, parse_openai_tool_calls
 from core.registry import BaseTool
-from core.parser import parse_openai_tool_calls
+from core.tool_docs import render_schema_block, render_tool_entry
 
 from .agent import (
     Agent,
@@ -59,7 +64,6 @@ from .agent import (
     _safe_tool_name,
 )
 from .llm import EchoMode
-
 
 # Marker names accepted at the start of a ReAct line.  Chinese aliases cover
 # providers that translate the protocol; full-width and ASCII colons are both
@@ -90,9 +94,8 @@ _EXPLICIT_FINAL_RE = re.compile(
     r"(?im)^\s*(?:\*\*)?(?:final\s+answer|最终答案|最终回答|最终回复)(?:\*\*)?\s*[：:]"
 )
 # A provider that keeps emitting unmarked (or malformed) protocol answers even
-# after repeated corrections must not pin the loop until the round cap.
-_UNMARKED_ANSWER_RETRY_LIMIT = 3
-_MALFORMED_ANSWER_RETRY_LIMIT = 3
+# after repeated corrections must not pin the loop until the round cap; the
+# retry limits live in constants.py with the rest of the tunables.
 
 
 @dataclass(frozen=True)
@@ -246,82 +249,24 @@ def _extract_thought(text: str) -> str | None:
 def _decode_action_input(payload: str) -> tuple[dict[str, Any] | None, str | None]:
     """Decode one Action Input payload, tolerating common wrapper noise.
 
-    Decoding tries, in order: the payload as-is, the first balanced ``{...}``
-    block (for models that add prose or preambles around the object), and a
-    Python-style single-quoted literal repair.  Only JSON objects are
-    accepted; anything else returns an actionable correction message.
+    Delegates the actual decoding to :func:`core.loads_model_json` (shared with
+    the tool-call parsers) with ``object_only=True``: the payload as-is, the
+    first balanced ``{...}`` block and a single-quoted literal repair are tried
+    in that order. Only JSON objects are accepted; anything else returns an
+    actionable correction message.
     """
 
-    candidates = [payload]
-    stripped = payload.strip()
-    balanced = _balanced_json_substring(stripped)
-    if balanced and balanced != stripped:
-        candidates.append(balanced)
-    repaired = _repair_single_quoted_object(stripped)
-    if repaired:
-        candidates.append(repaired)
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            arguments = json.loads(candidate, parse_constant=_reject_json_constant)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(arguments, dict):
-            return arguments, None
+    try:
+        arguments = loads_model_json(payload, object_only=True)
+    except (TypeError, ValueError):
+        arguments = None
+    if isinstance(arguments, dict):
+        return arguments, None
     return None, (
         "Action Input is not valid JSON. Provide exactly one JSON object with "
         'double-quoted keys, for example: {"query": "text"}. '
         "Do not append prose after the object."
     )
-
-
-def _balanced_json_substring(text: str) -> str:
-    """Return the first balanced ``{...}`` block, or an empty string."""
-
-    start = text.find("{")
-    if start == -1:
-        return ""
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
-    return ""
-
-
-def _repair_single_quoted_object(payload: str) -> str:
-    """Convert a Python-style ``{'key': 1}`` literal into JSON text."""
-
-    candidate = _balanced_json_substring(payload)
-    if not candidate or "'" not in candidate:
-        return ""
-    try:
-        value = ast.literal_eval(candidate)
-    except (ValueError, SyntaxError, MemoryError, RecursionError):
-        return ""
-    if isinstance(value, dict):
-        try:
-            return json.dumps(value, ensure_ascii=False)
-        except (TypeError, ValueError):
-            return ""
-    return ""
 
 
 def _strip_code_fence(value: str) -> str:
@@ -331,10 +276,6 @@ def _strip_code_fence(value: str) -> str:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
     return "\n".join(lines).strip()
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _coerce_string_scalars(
@@ -401,6 +342,19 @@ def _declared_schema_types(subschema: Mapping[str, Any]) -> frozenset[str]:
     return frozenset()
 
 
+def _run_sync(coro: Any) -> Any:
+    """Run a coroutine to completion from a synchronous context.
+
+    ``asyncio.run`` cannot be called from a thread that already has a running
+    event loop (for example a FastAPI request thread), so the coroutine is
+    dispatched to a dedicated worker thread instead. The worker thread exits
+    once the request completes.
+    """
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
 class ReActAgent(Agent):
     """An ``Agent`` variant using a textual ReAct protocol.
 
@@ -430,7 +384,15 @@ class ReActAgent(Agent):
         "Final Answer: It is 12:00.\n"
         "\n"
         "Action Input 必须是一个 JSON 对象（双引号键），例如："
-        '{"query": "python"}；不要在 JSON 后面追加解释文字。'
+        '{"query": "python"}；不要在 JSON 后面追加解释文字。\n'
+        "\n"
+        "工具使用纪律（违反会直接失败）：\n"
+        "1. 只调用 `Available tools` 里列出的工具；清单外的名字不可调用。\n"
+        "2. 调用前先读该工具的完整契约：标为「必填」的变量一个都不能省，"
+        "取值必须满足契约里的约束，不要自创变量名或添加未声明的字段。\n"
+        "3. 标注「写操作 · 需确认」的工具需要人工确认钥匙；"
+        "若返回确认类错误，不要重复重试，改为把「这一步需要用户确认」告诉用户。\n"
+        "4. 工具报错要如实转述（含错误码与原因），不要改写成成功，也不要编造 Observation。"
     )
 
     CATALOG_FIRST_REACT_INSTRUCTIONS = (
@@ -444,23 +406,6 @@ class ReActAgent(Agent):
         "correct the capability intent and retry. Resolve multiple capabilities with "
         "`limit`: 20 when possible."
     )
-    # Keep the old public constant as a compatibility alias for callers that
-    # customized the previous lazy-loading prompt.
-    LAZY_REACT_INSTRUCTIONS = CATALOG_FIRST_REACT_INSTRUCTIONS
-
-    SKILL_VIEW_REACT_INSTRUCTIONS = (
-        "Names in `Available skills` are read-only instruction packages, not "
-        "callable tools. When the task matches a skill's description or "
-        "triggers, first call system.skill_catalog with `action`: `view` and "
-        "the skill's `skill_name`; the Observation returns the full skill file "
-        "content. Follow that content for the task. Never guess a skill's "
-        "content from its one-line description alone; descriptions are only "
-        "matching hints."
-    )
-    # ``max_rounds=None`` means the caller does not want to tune the limit,
-    # but a provider must still be prevented from keeping the process alive
-    # forever when it repeats a failing tool request.
-    UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
 
     def __init__(
         self,
@@ -486,6 +431,7 @@ class ReActAgent(Agent):
         if repository is None and lazy_tools and auto_discover_tools:
             repository = ToolSpecRepository()
         self.lazy_tools = lazy_tools
+        self.pending_confirmations: list[dict[str, Any]] = []
         super().__init__(
             name,
             llm=llm,
@@ -621,58 +567,12 @@ class ReActAgent(Agent):
             raise KeyError(f"tool '{name}' is not registered")
         return f"{name}@{stored['version']}#{stored['schema_hash']}:1"
 
-    get_tool_confirmation_key = tool_confirmation_key
-
     def run(self, query: str, **kwargs: Any) -> str:
         """Synchronous convenience entry point for the ReAct loop."""
 
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
         return _run_sync(self.run_with_react(query, **kwargs))
-
-    async def arun(self, query: str, **kwargs: Any) -> str:
-        """Async alias matching common agent APIs."""
-
-        return await self.run_with_react(query, **kwargs)
-
-    async def run_react(
-        self,
-        messages: str | Sequence[Mapping[str, Any]],
-        context: ExecutionContext | None = None,
-        *,
-        max_rounds: int | None = None,
-        model: str | None = None,
-        temperature: float = DEFAULT_TEMPERATURE,
-        timeout: float = DEFAULT_TIMEOUT,
-        tool_names: list[str] | None = None,
-        profile_name: str | None = None,
-        provider_name: str | None = None,
-        use_history: bool = True,
-        defer_tool_loading: bool = True,
-        prompt_cache_key: str | None = None,
-        prompt_cache_retention: str | None = None,
-        enable_prompt_cache: bool = True,
-        stream_echo: bool = False,
-    ) -> str:
-        """Run one textual ReAct conversation to a final answer."""
-
-        return await self.run_with_react(
-            messages,
-            context,
-            max_rounds=max_rounds,
-            model=model,
-            temperature=temperature,
-            timeout=timeout,
-            tool_names=tool_names,
-            profile_name=profile_name,
-            provider_name=provider_name,
-            use_history=use_history,
-            defer_tool_loading=defer_tool_loading,
-            prompt_cache_key=prompt_cache_key,
-            prompt_cache_retention=prompt_cache_retention,
-            enable_prompt_cache=enable_prompt_cache,
-            stream_echo=stream_echo,
-        )
 
     async def run_with_react(
         self,
@@ -712,6 +612,7 @@ class ReActAgent(Agent):
             or max_rounds < 1
         ):
             raise ValueError("max_rounds must be None or a positive integer")
+        self.pending_confirmations = []
         if context is None:
             context = ExecutionContext()
         elif not isinstance(context, ExecutionContext):
@@ -758,11 +659,7 @@ class ReActAgent(Agent):
             }
             if unknown:
                 raise ValueError("unknown tool name(s): " + ", ".join(sorted(unknown)))
-            loaded_order = (
-                [self.catalog_tool.spec.name, *requested_order]
-                if self.lazy_tools
-                else requested_order
-            )
+            loaded_order = requested_order
             requested_names: set[str] | None = set(requested_order)
         elif defer_tool_loading or self.lazy_tools:
             loaded_order = [self.catalog_tool.spec.name]
@@ -779,7 +676,7 @@ class ReActAgent(Agent):
             )
         round_loop = ToolLoop(
             max_rounds,
-            safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
+            safety_limit=ToolLoop.DEFAULT_SAFETY_LIMIT,
         )
         unmarked_answer_retries = 0
         malformed_answer_retries = 0
@@ -790,10 +687,13 @@ class ReActAgent(Agent):
                     if name != self.catalog_tool.spec.name and name not in self.tools:
                         self._ensure_tool_loaded(name)
             current_snapshot = self.tools.snapshot()
-            # Hot-reloaded tools stay executable even when the caller never
-            # passed them through ``tool_names`` or a catalog resolution.
+            # Hot-reloaded tools remain immediately executable unless this
+            # request supplied an explicit ``tool_names`` capability boundary.
             hot_in_registry = [
-                name for name in self._hot_tools if name in current_snapshot
+                name
+                for name in self._hot_tools
+                if name in current_snapshot
+                and (requested_names is None or name in requested_names)
             ]
             for name in hot_in_registry:
                 if name not in loaded_order:
@@ -815,9 +715,18 @@ class ReActAgent(Agent):
                 conversation,
                 registrations,
                 loaded_tool_schemas,
-                catalog_first=defer_tool_loading or self.lazy_tools,
+                catalog_first=(
+                    (defer_tool_loading or self.lazy_tools)
+                    and self.catalog_tool.spec.name in registrations
+                ),
+                visible_names=requested_names,
             )
-            if self._hot_tools:
+            enabled_hot_tools = {
+                name
+                for name in self._hot_tools
+                if requested_names is None or name in requested_names
+            }
+            if enabled_hot_tools:
                 # The hot-zone block is rebuilt per request and appended at
                 # the very end so it rides after every cached prefix byte.
                 tail_messages = conversation_for_request[-1:]
@@ -825,7 +734,9 @@ class ReActAgent(Agent):
                 hot_block = {
                     "role": "system",
                     "content": "\n".join(
-                        self._hot_zone_lines(loaded_tool_schemas)
+                        self._hot_zone_lines(
+                            loaded_tool_schemas, allowed_names=enabled_hot_tools
+                        )
                     ),
                 }
                 conversation_for_request = [
@@ -878,6 +789,7 @@ class ReActAgent(Agent):
                     context,
                     round_number=round_number,
                     loaded_tool_schemas=loaded_tool_schemas,
+                    requested_names=requested_names,
                 )
                 conversation.extend(observations)
                 if (defer_tool_loading or self.lazy_tools) and requested_names is None:
@@ -913,7 +825,7 @@ class ReActAgent(Agent):
                     and self._should_require_tool_action(request_messages, registrations)
                 ):
                     unmarked_answer_retries += 1
-                    if unmarked_answer_retries <= _UNMARKED_ANSWER_RETRY_LIMIT:
+                    if unmarked_answer_retries <= REACT_UNMARKED_ANSWER_RETRY_LIMIT:
                         protocol_error = (
                             "You returned an unmarked answer before using the available "
                             "tools. This request requires tool evidence. Do not answer "
@@ -946,7 +858,7 @@ class ReActAgent(Agent):
 
             if parsed.error is not None and not parsed.has_action:
                 malformed_answer_retries += 1
-                if malformed_answer_retries <= _MALFORMED_ANSWER_RETRY_LIMIT:
+                if malformed_answer_retries <= REACT_MALFORMED_ANSWER_RETRY_LIMIT:
                     log_react_parse_issue(round_number, parsed.error)
                     conversation.append(
                         {
@@ -982,6 +894,7 @@ class ReActAgent(Agent):
                 context,
                 call_number=round_number,
                 loaded_tool_schemas=loaded_tool_schemas,
+                requested_names=requested_names,
             )
             conversation.append(
                 {
@@ -1062,6 +975,7 @@ class ReActAgent(Agent):
         loaded_tool_schemas: Mapping[str, Mapping[str, Any]] | None = None,
         *,
         catalog_first: bool = False,
+        visible_names: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         if self.lazy_tools:
             registrations = {
@@ -1074,7 +988,11 @@ class ReActAgent(Agent):
         # in the trailing hot-zone block instead of rewriting this cached
         # prefix.
         self._sync_frozen_manifest()
-        frozen_names = sorted(self._frozen_manifest or {})
+        frozen_names = sorted(
+            name
+            for name in (self._frozen_manifest or {})
+            if visible_names is None or name in visible_names
+        )
         inventory = ", ".join(frozen_names) or "(none)"
         # Hot-reloaded tools may appear in ``registrations`` (they are fully
         # executable), but their schemas must never render into this cached
@@ -1088,10 +1006,19 @@ class ReActAgent(Agent):
         ]
         if catalog_first:
             lines.extend((self.CATALOG_FIRST_REACT_INSTRUCTIONS, ""))
-        skill_entries = self._skill_directory_lines()
-        if skill_entries:
-            lines.extend((*skill_entries, ""))
-            lines.extend((self.SKILL_VIEW_REACT_INSTRUCTIONS, ""))
+        # 注册清单是进程级快照，可能包含本次请求不可调用的工具（非联网模式下被
+        # 白名单摘除的 web.search，或尚未加载 schema 的惰性工具），因此显式声明
+        # 当前可调用范围。
+        lines.extend(
+            (
+                (
+                    "Only the tools listed under `Available tools` below are callable "
+                    "right now; other registered names above are either not loaded yet "
+                    "or disabled for this request."
+                ),
+                "",
+            )
+        )
         lines.append("Available tools:")
         prefix_registrations = {
             name: registration
@@ -1101,18 +1028,13 @@ class ReActAgent(Agent):
         if not prefix_registrations:
             lines.append("(No tools are currently available; answer directly.)")
         else:
-            for name, (tool, _) in prefix_registrations.items():
-                schema = self._strict_react_schema(tool.spec.input_schema)
-                lines.append(f"- {name}: {tool.spec.model_description}")
-                lines.append(
-                    "  Action Input schema: "
-                    + json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                )
+            # 每个工具都渲染成「用途 / 使用规范 / 输入变量（类型·必填·默认·约束·说明）/
+            # 输出字段 / 副作用与确认」的完整契约，而不是只给一句描述 + 原始 JSON Schema：
+            # 模型必须能直接从 prompt 里读到每个变量怎么填、哪些必填、写操作要不要确认。
+            # 渲染顺序（工具名排序 + 字段定义顺序）逐字节稳定，因此前缀缓存仍然可复用。
+            for name in sorted(prefix_registrations):
+                tool, _ = prefix_registrations[name]
+                lines.extend(render_tool_entry(name, tool.spec))
         resolved_schemas = {
             name: schema
             for name, schema in (loaded_tool_schemas or {}).items()
@@ -1121,23 +1043,17 @@ class ReActAgent(Agent):
         if resolved_schemas:
             lines.extend(("", "Loaded tool input schemas:"))
             for name in sorted(resolved_schemas):
-                schema = self._strict_react_schema(
-                    dict(resolved_schemas[name])
-                )
-                lines.append(
-                    f"- {name}: "
-                    + json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
+                lines.extend(
+                    render_schema_block(name, dict(resolved_schemas[name]))
                 )
         instruction = {"role": "system", "content": "\n".join(lines)}
         return [instruction, *conversation]
 
     def _hot_zone_lines(
-        self, loaded_tool_schemas: Mapping[str, Mapping[str, Any]]
+        self,
+        loaded_tool_schemas: Mapping[str, Mapping[str, Any]],
+        *,
+        allowed_names: set[str] | None = None,
     ) -> list[str]:
         """Render the trailing hot-zone block for hot-reloaded tools.
 
@@ -1151,56 +1067,34 @@ class ReActAgent(Agent):
         if not self._hot_tools:
             return []
         max_full = 4
-        roster = sorted(self._hot_tools)
+        roster = sorted(
+            name
+            for name in self._hot_tools
+            if allowed_names is None or name in allowed_names
+        )
+        if not roster:
+            return []
         hot_snapshot = self.tools.snapshot()
         # Keep tools whose executable disappeared from the registry (e.g.
         # replaced outside this agent) out of the advertised schema list but
         # still listable by name until they are re-registered or unloaded.
         renderable = [name for name in roster if name in hot_snapshot]
         lines = [
-            "Hot-loaded tools (newly registered during this conversation, "
-            "usable immediately):"
+            (
+                "Hot-loaded tools (newly registered during this conversation, "
+                "usable immediately):"
+            )
         ]
         full_names = set(renderable[-max_full:])
         for name in renderable:
             tool, _ = hot_snapshot[name]
-            schema = self._strict_react_schema(tool.spec.input_schema)
             if name in full_names:
-                lines.append(f"- {name}: {tool.spec.model_description}")
-                lines.append(
-                    "  Action Input schema: "
-                    + json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                )
+                # 热加载工具的完整契约（含使用规范与逐变量说明），与 Available tools 同源。
+                lines.extend(render_tool_entry(name, tool.spec))
             else:
                 lines.append(f"- {name}: (see schema above or via catalog)")
         for name in sorted(set(roster) - set(renderable)):
             lines.append(f"- {name}: (implementation temporarily unavailable)")
-        return lines
-
-    def _skill_directory_lines(self) -> list[str]:
-        """Return deterministic skill-directory lines, or an empty list.
-
-        Mirrors ``Agent._with_registered_skill_names``: only names,
-        descriptions, versions, and triggers are listed so the ReAct
-        instruction block stays byte-for-byte stable for one skill set and
-        skill file content is fetched through ``system.skill_catalog`` on
-        demand.
-        """
-
-        snapshot = self.skills.snapshot()
-        if not snapshot:
-            return []
-        lines = ["Available skills (view content via system.skill_catalog):"]
-        for name, (spec, _) in snapshot.items():
-            entry = f"- {name} (v{spec.version}): {spec.description}"
-            if spec.triggers:
-                entry += " Triggers: " + ", ".join(spec.triggers)
-            lines.append(entry)
         return lines
 
     def _ensure_tool_loaded(self, name: str) -> None:
@@ -1297,13 +1191,52 @@ class ReActAgent(Agent):
             result, loaded_order, context, loaded_tool_schemas
         )
 
-    @staticmethod
-    def _strict_react_schema(schema: dict[str, Any]) -> dict[str, Any]:
-        # Reuse Agent's strict schema implementation so ReAct and native
-        # function-calling expose exactly the same contract.
-        from .agent import _strict_function_schema
+    def _unavailable_tool_error(
+        self,
+        action_name: str,
+        call_id: str,
+        *,
+        requested_names: set[str] | None = None,
+    ) -> ToolResult:
+        """Error for a registered tool that this request may not call.
 
-        return _strict_function_schema(schema)
+        A registered tool can be missing from ``registrations`` for two very
+        different reasons: the caller passed an explicit ``tool_names``
+        whitelist that excluded it (offline chat mode drops ``web.search`` this
+        way), or its schema has not been loaded yet under deferred/lazy
+        loading. Only the second case can be fixed through the catalog, so
+        telling the model to resolve a whitelisted-out tool would send it into
+        a retry loop.
+        """
+
+        safe_name = _safe_tool_name(action_name)
+        if requested_names is not None and action_name not in requested_names:
+            return ToolResult(
+                call_id=call_id,
+                tool_name=safe_name,
+                ok=False,
+                error=ToolError(
+                    code="TOOL_NOT_ENABLED",
+                    message=(
+                        f"tool '{safe_name}' is disabled for this request; do not "
+                        "retry it or resolve it through the catalog. Continue using "
+                        "only the tools listed under 'Available tools'."
+                    ),
+                ),
+            )
+        return ToolResult(
+            call_id=call_id,
+            tool_name=safe_name,
+            ok=False,
+            error=ToolError(
+                code="TOOL_SCHEMA_REQUIRED",
+                message=(
+                    f"tool '{safe_name}' is registered and usable; first call "
+                    f"{self.catalog_tool.spec.name} with action 'resolve' to load "
+                    "its Action Input schema"
+                ),
+            ),
+        )
 
     @staticmethod
     def _response_message(response: Any) -> Any:
@@ -1324,10 +1257,19 @@ class ReActAgent(Agent):
         *,
         call_number: int,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
+        requested_names: set[str] | None = None,
     ) -> ToolResult:
         assert parsed.action is not None
         action_name = self._canonical_action_name(parsed.action, current_snapshot)
         call_id = f"react-call-{call_number}"
+        request_name = action_name.replace("__", ".")
+        if (
+            requested_names is not None
+            and request_name not in requested_names
+        ):
+            return self._unavailable_tool_error(
+                request_name, call_id, requested_names=requested_names
+            )
         if action_name not in current_snapshot:
             # A model may call a known lazy tool directly after seeing the
             # inventory, without first resolving it through the catalog. Load
@@ -1365,18 +1307,8 @@ class ReActAgent(Agent):
                 ),
             )
         if action_name not in registrations:
-            return ToolResult(
-                call_id=call_id,
-                tool_name=_safe_tool_name(action_name),
-                ok=False,
-                error=ToolError(
-                    code="TOOL_SCHEMA_REQUIRED",
-                    message=(
-                        f"tool '{_safe_tool_name(action_name)}' is registered and "
-                        f"usable; first call {self.catalog_tool.spec.name} with action "
-                        "'resolve' to load its Action Input schema"
-                    ),
-                ),
+            return self._unavailable_tool_error(
+                action_name, call_id, requested_names=requested_names
             )
         if parsed.error is not None:
             return ToolResult(
@@ -1407,7 +1339,16 @@ class ReActAgent(Agent):
                 (action_name,),
                 time.perf_counter() - tool_started_at,
             )
-        return batch.results[0]
+        result = batch.results[0]
+        self._record_pending_confirmation(call, result)
+        return result
+
+    def _record_pending_confirmation(self, call: ToolCall, result: ToolResult) -> None:
+        if result.error is None or result.error.code != "CONFIRMATION_REQUIRED":
+            return
+        pending = {"tool_name": call.tool_name, "arguments": dict(call.arguments)}
+        if pending not in self.pending_confirmations:
+            self.pending_confirmations.append(pending)
 
     async def _execute_native_calls(
         self,
@@ -1418,6 +1359,7 @@ class ReActAgent(Agent):
         *,
         round_number: int,
         loaded_tool_schemas: dict[str, dict[str, Any]] | None = None,
+        requested_names: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         # Native calls are accepted as a compatibility fallback.  They use the
         # exact parser and execution path of Agent.run_with_tools.
@@ -1435,6 +1377,11 @@ class ReActAgent(Agent):
             if canonical in current_snapshot:
                 continue
             lazy_name = canonical.replace("__", ".")
+            if (
+                requested_names is not None
+                and lazy_name not in requested_names
+            ):
+                continue
             if not self.lazy_tools or self.repository is None:
                 continue
             if self.repository.get(lazy_name) is None:
@@ -1465,30 +1412,38 @@ class ReActAgent(Agent):
             function = _field(native_call, "function")
             provider_name = _field(function, "name", "unknown.tool")
             canonical = aliases.get(provider_name, provider_name)
+            request_name = (
+                canonical.replace("__", ".")
+                if isinstance(canonical, str)
+                else canonical
+            )
+            if requested_names is not None and request_name not in requested_names:
+                results[position] = self._unavailable_tool_error(
+                    request_name, call_id, requested_names=requested_names
+                )
+                continue
             try:
                 call = parse_openai_tool_calls(
                     [native_call], self.tools, name_map, registrations
                 )[0]
             except (TypeError, ValueError) as exc:
-                code = (
-                    "TOOL_SCHEMA_REQUIRED"
-                    if isinstance(canonical, str)
+                if (
+                    isinstance(canonical, str)
                     and canonical in current_snapshot
                     and canonical not in registrations
-                    else "INVALID_TOOL_CALL"
-                )
-                message = (
-                    f"tool '{_safe_tool_name(canonical)}' is registered and usable; "
-                    f"first call {self.catalog_tool.spec.name} with action 'resolve' to load "
-                    "its Action Input schema"
-                    if code == "TOOL_SCHEMA_REQUIRED"
-                    else _safe_tool_call_error(exc)
-                )
+                ):
+                    results[position] = self._unavailable_tool_error(
+                        canonical, call_id, requested_names=requested_names
+                    )
+                    continue
                 results[position] = ToolResult(
                     call_id=call_id,
                     tool_name=_safe_tool_name(canonical),
                     ok=False,
-                    error=ToolError(code=code, message=message),
+                    error=ToolError(
+                        code="INVALID_TOOL_CALL",
+                        message=_safe_tool_call_error(exc),
+                    ),
                 )
                 continue
             calls.append(call)
@@ -1505,8 +1460,11 @@ class ReActAgent(Agent):
                     tool_names,
                     time.perf_counter() - tool_started_at,
                 )
-            for position, result in zip(positions, batch.results, strict=True):
+            for position, result, call in zip(
+                positions, batch.results, calls, strict=True
+            ):
                 results[position] = result
+                self._record_pending_confirmation(call, result)
         observations = []
         for position, native_call in enumerate(native_calls):
             call_id = _field(native_call, "id") or f"react-native-call-{position + 1}"
@@ -1529,10 +1487,3 @@ class ReActAgent(Agent):
             if self._openai_tool_name(name) == action:
                 return name
         return action
-
-
-# Public spellings used by different versions of the original prototype.
-ReactAgent = ReActAgent
-ReAct = ReActAgent
-React = ReActAgent
-react = ReActAgent

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from dataclasses import replace
 from typing import Annotated, Any, Literal
 from urllib.error import HTTPError
@@ -27,6 +26,8 @@ from pydantic import (
 )
 
 from core import BaseTool, ToolSpec
+from core.parser import reject_json_constant
+from core.services_config import load_services_config
 
 # Discovery uses this literal switch before constructing the tool.
 TOOL_ENABLED = True
@@ -203,6 +204,9 @@ class SearchTool(BaseTool):
         max_concurrency=8,
         tags=("web", "search"),
         recommended_before_tools=("system.current_time",),
+        guidance=(
+            "需要当前公开网络信息（新闻、最新版本、实时事实）时使用，只在联网模式下可用。与用户知识库或记忆相关的问题优先用本地检索工具，不要用网络搜索代替本地知识。引用结果时要给出标题与链接。"
+        ),
     )
 
     def __init__(
@@ -210,22 +214,27 @@ class SearchTool(BaseTool):
         base_url: str | None = None,
         api_key: str | None = None,
         *,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> None:
         # Loading happens in the constructor (rather than module import) so
         # discovery remains free of configuration and I/O side effects.
-        if base_url is None or api_key is None:
-            _load_dotenv()
-        self.base_url = (
-            base_url
-            if base_url is not None
-            else _first_env("SEARCH_BASE_URL", "ANYSEARCH_BASE_URL")
+        services = (
+            load_services_config().search
+            if base_url is None or api_key is None or timeout is None
+            else None
         )
-        self.api_key = (
-            api_key
-            if api_key is not None
-            else _first_env("SEARCH_API", "SEARCH_API_KEY", "ANYSEARCH_API_KEY")
-        )
+        if base_url is None:
+            # config/services.toml 的 [search] 段是唯一配置来源
+            # （历史 SEARCH_* / ANYSEARCH_* 环境变量入口已删除）。
+            base_url = services.base_url if services is not None else None
+        if api_key is None:
+            api_key = services.api_key if services is not None else None
+        if timeout is None:
+            timeout = (
+                services.timeout if services is not None and services.timeout is not None else 30.0
+            )
+        self.base_url = base_url
+        self.api_key = api_key
         if self.base_url is not None and not isinstance(self.base_url, str):
             raise TypeError("base_url must be a string")
         if self.base_url is not None:
@@ -251,9 +260,9 @@ class SearchTool(BaseTool):
         if not isinstance(arguments, SearchInput):
             raise TypeError("arguments must be a SearchInput instance")
         if not self.base_url:
-            raise RuntimeError("SEARCH_BASE_URL is not configured")
+            raise RuntimeError("search base_url is not configured (config/services.toml [search])")
         if not self.api_key:
-            raise RuntimeError("SEARCH_API is not configured")
+            raise RuntimeError("search api_key is not configured (config/services.toml [search])")
 
         endpoint = _search_endpoint(self.base_url)
         request_body: dict[str, Any] = {
@@ -285,7 +294,7 @@ class SearchTool(BaseTool):
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(request, timeout=self.timeout) as response:  # nosec B310 - endpoint 已由 _search_endpoint 强制 http/https
                 raw_body = _read_response_body(response)
         except HTTPError as exc:
             # Very old AnySearch-compatible gateways exposed a GET endpoint.
@@ -303,35 +312,17 @@ class SearchTool(BaseTool):
                 },
                 method="GET",
             )
-            with urlopen(legacy_request, timeout=self.timeout) as response:
+            with urlopen(legacy_request, timeout=self.timeout) as response:  # nosec B310 - 继承 _search_endpoint 的 http/https 校验
                 raw_body = _read_response_body(response)
         try:
             payload = json.loads(
-                raw_body.decode("utf-8"), parse_constant=_reject_json_constant
+                raw_body.decode("utf-8"), parse_constant=reject_json_constant
             )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, ValueError) as exc:
+            # parse_constant 拒绝 NaN/Infinity 时抛的是裸 ValueError（不是
+            # JSONDecodeError），必须一并捕获，否则会逃逸成难以理解的内部错误。
             raise ValueError("search response was not valid UTF-8 JSON") from exc
         return _normalize_response(payload, arguments.max_results)
-
-
-def _load_dotenv() -> None:
-    """Load the repository's .env when python-dotenv is available."""
-
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        # Environment variables are still usable when the optional loader is
-        # unavailable; the project declares python-dotenv as a dependency.
-        return
-    load_dotenv(override=False)
-
-
-def _first_env(*names: str) -> str | None:
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and value.strip():
-            return value
-    return None
 
 
 def _normalize_nullable_text(value: Any) -> Any:
@@ -346,7 +337,7 @@ def _normalize_nullable_text(value: Any) -> Any:
 def _search_endpoint(base_url: str) -> str:
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("SEARCH_BASE_URL must be an absolute HTTP(S) URL")
+        raise ValueError("search base_url must be an absolute HTTP(S) URL")
     path = parsed.path.rstrip("/")
     if not path:
         path = "/v1/search"
@@ -430,10 +421,6 @@ def _normalize_response(payload: Any, max_results: int) -> SearchOutput:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def create_tool() -> BaseTool:

@@ -1,23 +1,35 @@
-"""Unified embedding service implementations.
+"""Unified embedding service: cloud OpenAI-compatible API + offline fallback.
 
-All providers expose the same tiny interface, making them interchangeable in
-the manager and in applications that want to supply their own model.
+运行时嵌入只保留两种实现：
+
+- :class:`APIEmbedding` - 任何 OpenAI 兼容 ``/embeddings`` 端点（SiliconFlow、
+  DashScope、OpenAI、Zhipu、本地 vLLM）。端点/密钥/模型统一来自
+  ``config/services.toml`` 的 ``[embedding]`` 段。
+- :class:`HashEmbedding` - 确定性离线兜底：未配置云端嵌入时保持记忆层、
+  Web 与 RAG 可用（向量空间与云端互不兼容，仅测试/离线场景使用）。
+
+历史实现（Gemini ``:embedContent``、本机转发网关 ``/embed``、SSH 隧道自动
+拉起、``.env`` 装载）已按"配置只认 config/ 与 constants.py"的约定删除。
+云端向量空间互不兼容：切换模型后必须重建投影（维度唯一开关是
+``[embedding].model``，见 ``QdrantVectorStore`` 的维度守卫与迁移脚本）。
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import math
 import re
 import urllib.error
 import urllib.request
-import json
 from abc import ABC, abstractmethod
 from collections import Counter
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 # CJK code-point ranges used by TFIDFEmbedding.tokenize. The CJK alternative
-# must be listed before [\w]+ inside _CJK_OR_WORD, otherwise \w would swallow
+# must be listed before \w+ inside _CJK_OR_WORD, otherwise \w would swallow
 # whole Chinese runs as a single token.
 CJK_RANGES = (
     f"{chr(0x3400)}-{chr(0x4dbf)}"
@@ -26,13 +38,32 @@ CJK_RANGES = (
 )
 _CJK_BLOCK = re.compile(f"[{CJK_RANGES}]+", re.UNICODE)
 _CJK_OR_WORD = re.compile(f"[{CJK_RANGES}]+|[\\w]+", re.UNICODE)
+from urllib.parse import urlsplit
+
+from constants import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_MODEL,
+    MEMORY_EMBEDDING_DIMENSION,
+)
+
+#: 模型名里带 ``vl`` 的按视觉语言嵌入处理（``Qwen/Qwen3-VL-Embedding-*`` 等）。
+#: 这类模型仍是 OpenAI 兼容 ``/embeddings`` 端点，只是 ``input`` 额外接受
+#: ``{"text": ...}`` / ``{"image": ...}`` 内容对象与它们的混合列表。
+VL_EMBEDDING_MODEL_MARKER = "vl"
+
+#: 嵌入 API 响应体上限（字节）。单次批内最多 DEFAULT_EMBEDDING_BATCH_SIZE 条
+#: 输入，正常响应远小于此；超限说明对端行为异常，不整段读进内存。
+EMBEDDING_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 
 
 class BaseEmbedding(ABC):
-    dimension: int
+    """Tiny interface every embedding provider implements."""
+
+    dimension: int = 0
 
     @abstractmethod
     def embed(self, text: str) -> list[float]:
+        """Embed one text into a finite numeric vector."""
         raise NotImplementedError
 
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
@@ -41,28 +72,38 @@ class BaseEmbedding(ABC):
             raise TypeError("texts must contain strings")
         return [self.embed(text) for text in values]
 
+    def embed_item(self, text: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
+        """Embed one stored memory item.
 
-class TFIDFEmbedding(BaseEmbedding):
-    """A deterministic, dependency-free TF-IDF style embedding.
+        Text-only by default.  ``BaseMemory.add`` routes every write through this
+        hook, so a multimodal backend overrides it to fold ``payload``/
+        ``modality`` into the same vector - that is what makes a stored image
+        retrievable by its own content.  Providers that cannot embed
+        ``payload`` ignore it and keep embedding ``text``.
+        """
+        del payload, modality
+        return self.embed(text)
 
-    Tokens are hashed into a fixed-size vector, so adding documents never
-    changes vector dimensionality (important for persistent vector stores).
-    ``fit`` may be called with a corpus to improve IDF weighting.
+
+class HashEmbedding(BaseEmbedding):
+    """Deterministic offline embedding (bag-of-words hashed into fixed dims).
+
+    Not compatible with :class:`APIEmbedding` vector spaces: it exists so the
+    memory layer, agent tools and the web app stay usable without any cloud
+    configuration, and as the injected test double for the whole suite.
     """
 
-    def __init__(self, dimension: int = 384) -> None:
+    def __init__(self, dimension: int = MEMORY_EMBEDDING_DIMENSION) -> None:
         if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
             raise ValueError("dimension must be a positive integer")
         self.dimension = dimension
-        self._idf: dict[int, float] = {}
-        self._documents = 0
 
     @staticmethod
     def tokenize(text: str) -> list[str]:
         r"""Split text into index tokens.
 
         CJK runs are split into character bigrams; latin/numeric runs stay as
-        whole words. A single re.findall over [\w]+ collapses an entire Chinese
+        whole words. A single re.findall over \w+ collapses an entire Chinese
         sentence into one token (Chinese has no spaces), which made Chinese
         retrieval collapse: measured Recall@5 0.2727 on Chinese vs 0.9000 on
         English for the same pipeline. Bigram indexing is what Lucene
@@ -83,126 +124,94 @@ class TFIDFEmbedding(BaseEmbedding):
                 tokens.append(token)
         return tokens
 
-    def fit(self, texts: Iterable[str]) -> "TFIDFEmbedding":
-        documents = list(texts)
-        df: Counter[int] = Counter()
-        for text in documents:
-            seen = set()
-            for token in self.tokenize(text):
-                seen.add(self._index(token))
-            df.update(seen)
-        self._documents = len(documents)
-        self._idf = {
-            index: math.log((1 + self._documents) / (1 + count)) + 1.0
-            for index, count in df.items()
-        }
-        return self
-
     def _index(self, token: str) -> int:
         digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
         return int.from_bytes(digest, "big") % self.dimension
 
     def embed(self, text: str) -> list[float]:
-        tokens = self.tokenize(text)
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
         vector = [0.0] * self.dimension
-        if not tokens:
-            return vector
-        counts = Counter(tokens)
-        for token, count in counts.items():
-            index = self._index(token)
-            # Sublinear TF reduces the impact of repeated boilerplate words.
-            tf = 1.0 + math.log(float(count))
-            vector[index] += tf * self._idf.get(index, 1.0)
+        for token, count in Counter(self.tokenize(text)).items():
+            vector[self._index(token)] += 1.0 + math.log(float(count))
         norm = math.sqrt(sum(value * value for value in vector))
         return [value / norm for value in vector] if norm else vector
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": type(self).__name__, "dimension": self.dimension}
 
-class LocalTransformerEmbedding(BaseEmbedding):
-    """Sentence-transformers adapter loaded lazily.
-
-    A model instance or callable can be injected in tests and in applications;
-    the optional ``sentence-transformers`` package is only imported when needed.
-    """
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", model: Any = None) -> None:
-        if not isinstance(model_name, str) or not model_name.strip():
-            raise ValueError("model_name must be non-empty")
-        if model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as exc:
-                raise RuntimeError(
-                    "LocalTransformerEmbedding requires sentence-transformers; "
-                    "install it or inject a model instance"
-                ) from exc
-            model = SentenceTransformer(model_name)
-        if not callable(getattr(model, "encode", None)) and not callable(model):
-            raise TypeError("model must provide encode() or be callable")
-        self.model_name = model_name
-        self.model = model
-        dimensions = getattr(model, "get_sentence_embedding_dimension", lambda: None)()
-        self.dimension = int(dimensions) if dimensions else 0
-
-    def embed(self, text: str) -> list[float]:
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-        if callable(getattr(self.model, "encode", None)):
-            try:
-                value = self.model.encode(text, convert_to_numpy=False)
-            except TypeError:
-                value = self.model.encode(text)
-        else:
-            value = self.model(text)
-        # Some model wrappers return a one-row matrix for a single input.
-        try:
-            first = value[0]
-        except (IndexError, KeyError, TypeError):
-            first = None
-        if isinstance(first, (list, tuple)) or getattr(first, "ndim", 0) > 0:
-            value = first
-        result = [float(item) for item in value]
-        if not result or any(not math.isfinite(item) for item in result):
-            raise ValueError("embedding model returned an invalid vector")
-        if not self.dimension:
-            self.dimension = len(result)
-        return result
+    def __repr__(self) -> str:
+        return f"HashEmbedding(dimension={self.dimension})"
 
 
-class DashScopeEmbedding(BaseEmbedding):
-    """DashScope compatible embedding API adapter using the standard library.
+class APIEmbedding(BaseEmbedding):
+    """OpenAI-compatible ``/embeddings`` client for any cloud provider.
 
-    ``batch_size`` caps the number of texts sent per request; DashScope
-    text-embedding-v3 accepts at most 10 texts per call, so ``embed_batch``
-    splits larger inputs automatically while preserving input order.
+    ``base_url`` is the provider root without the trailing ``/embeddings``
+    path (e.g. ``https://api.siliconflow.cn/v1``).  The request body and the
+    response parser follow the OpenAI shape, and the parser additionally
+    accepts DashScope's native ``output.embeddings`` layout so either gateway
+    works.  The API key comes from ``config/services.toml [embedding].api_key``
+    (resolved by ``memory.base.make_default_embedding``), never from the
+    environment.
+
+    Visual-language embedding models (SiliconFlow's
+    ``Qwen/Qwen3-VL-Embedding-*``, whose model id contains ``vl``) keep the same
+    endpoint, auth header and ``data[].embedding`` response, but their ``input``
+    additionally accepts content objects - ``{"text": "..."}``,
+    ``{"image": "<url|base64>"}`` - and mixed lists of them, where one request
+    fuses the list into a single vector.  :attr:`multimodal` is derived from the
+    model name and gates the automatic routing in :meth:`embed_item`;
+    ``embed_image``/``embed_multimodal`` always work regardless of the name.
+
+    ``client`` may be injected for tests: a callable ``client(payload, *)``
+    returning a parsed JSON object, or an object exposing
+    ``embeddings.create(input=..., model=...)``.
     """
 
     def __init__(
         self,
-        api_key: str,
-        model: str = "text-embedding-v3",
-        base_url: str = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+        api_key: str | None = None,
         *,
-        client: Any = None,
+        model: str = DEFAULT_EMBEDDING_MODEL,
+        base_url: str = "",
+        dimension: int | None = None,
         timeout: float = 30.0,
-        batch_size: int = 10,
+        batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+        client: Any = None,
     ) -> None:
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ValueError("api_key must be non-empty")
         if not isinstance(model, str) or not model.strip():
-            raise ValueError("model must be non-empty")
-        self.api_key, self.model, self.base_url = api_key.strip(), model.strip(), base_url.strip()
-        if not self.base_url:
-            raise ValueError("base_url must be non-empty")
+            raise ValueError("model must be a non-empty string")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("base_url must be a non-empty string (config/services.toml [embedding].base_url)")
+        parsed_base_url = urlsplit(base_url.strip())
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("base_url must be an absolute HTTP(S) URL")
+        if dimension is not None and (isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1):
+            raise ValueError("dimension must be a positive integer")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("timeout must be positive")
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError("batch_size must be a positive integer")
-        self.client = client
-        self.timeout = timeout
+        if not api_key or not str(api_key).strip():
+            raise RuntimeError(
+                "APIEmbedding requires an API key: pass api_key= (config/services.toml [embedding].api_key)"
+            )
+        self.api_key = str(api_key).strip()
+        self.model = model.strip()
+        self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
         self.batch_size = batch_size
-        self.dimension = 0
+        self.client = client
+        self.dimension = dimension or 0
+        #: 是否按视觉语言嵌入发送内容对象；可显式改写以支持名字里没有 vl 的多模态模型。
+        self.multimodal = VL_EMBEDDING_MODEL_MARKER in self.model.casefold()
+
+    # ------------------------------------------------------------------ embed
 
     def embed(self, text: str) -> list[float]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
         return self.embed_batch([text])[0]
 
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
@@ -213,95 +222,251 @@ class DashScopeEmbedding(BaseEmbedding):
             return []
         result: list[list[float]] = []
         for start in range(0, len(values), self.batch_size):
-            batch = values[start : start + self.batch_size]
-            result.extend(self._embed_batch_once(batch))
+            result.extend(_embed_batch_once(self, values[start : start + self.batch_size]))
         return result
 
-    def _embed_batch_once(self, values: list[str]) -> list[list[float]]:
-        if self.client is not None:
-            if callable(self.client):
-                response = self.client(values, model=self.model)
-            elif callable(getattr(self.client, "embed", None)):
-                response = self.client.embed(values, model=self.model)
-            elif callable(getattr(getattr(self.client, "embeddings", None), "create", None)):
-                response = self.client.embeddings.create(input=values, model=self.model)
-            else:
-                raise TypeError("client must be callable or expose embed()/embeddings.create()")
-            result = _extract_embeddings(response)
-        else:
-            body = json.dumps({"model": self.model, "input": {"texts": values}}).encode("utf-8")
-            request = urllib.request.Request(
-                self.base_url,
-                data=body,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                method="POST",
+    # -------------------------------------------------------- VL input objects
+
+    @staticmethod
+    def text_input(text: str) -> dict[str, str]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return {"text": text}
+
+    @staticmethod
+    def image_input(data: Any, *, mime_type: str | None = None) -> dict[str, str]:
+        """Build the ``{"image": ...}`` content object.
+
+        A URL or an already-encoded base64 string (raw or data URI) is passed
+        through untouched, so callers control the encoding the provider wants.
+        ``bytes`` become a ``data:<mime>;base64,...`` URI, since a bare base64
+        blob is not self-describing.
+        """
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            mime = mime_type or _image_mime_type(data)
+            encoded = base64.b64encode(bytes(data)).decode("ascii")
+            return {"image": f"data:{mime};base64,{encoded}"}
+        if isinstance(data, str) and data.strip():
+            return {"image": data.strip()}
+        raise TypeError("image data must be bytes, or a non-empty URL/base64 string")
+
+    def inputs_for(self, text: str = "", *, image: Any = None, mime_type: str | None = None) -> list[Any]:
+        """Assemble the VL ``input`` list: text object, image object, or both."""
+        items: list[Any] = []
+        if isinstance(text, str) and text.strip():
+            items.append(self.text_input(text))
+        if image is not None:
+            items.append(self.image_input(image, mime_type=mime_type))
+        if not items:
+            raise ValueError("at least one of text/image must be provided")
+        return items
+
+    def embed_inputs(self, items: list[Any]) -> list[float]:
+        """Send one VL ``input`` list, fused by the model into a single vector.
+
+        A mixed list (``[{"text": ...}, {"image": ...}]``) is one request that
+        yields exactly one vector, so it must not go through the per-item batch
+        count check.
+        """
+        if not isinstance(items, list) or not items:
+            raise ValueError("items must be a non-empty list")
+        vectors = _extract_embedding_vectors(_request(self, items))
+        if len(vectors) != 1:
+            raise RuntimeError(
+                f"embedding response count {len(vectors)} did not match the single fused vector "
+                "expected for a VL input list"
             )
+        _learn_dimension(self, vectors)
+        return vectors[0]
+
+    def embed_image(self, data: Any, *, mime_type: str | None = None) -> list[float]:
+        """Embed one image on its own (no accompanying text)."""
+        return self.embed_inputs([self.image_input(data, mime_type=mime_type)])
+
+    def embed_multimodal(self, text: str, data: Any, *, mime_type: str | None = None) -> list[float]:
+        """Embed text and image together into one fused vector."""
+        return self.embed_inputs(self.inputs_for(text, image=data, mime_type=mime_type))
+
+    def embed_item(self, text: str, *, payload: Any = None, modality: str | None = None) -> list[float]:
+        """Route one stored item; text-only models ignore ``payload`` as before."""
+        if payload is None or not self.multimodal:
+            return self.embed(text)
+        if isinstance(text, str) and text.strip():
+            return self.embed_multimodal(text, payload)
+        return self.embed_image(payload)
+
+    # ------------------------------------------------------------------ config
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": type(self).__name__,
+            "model": self.model,
+            "base_url": self.base_url,
+            "dimension": self.dimension,
+            "batch_size": self.batch_size,
+            # 便于 /api/health 直接看出当前是不是按 VL 内容对象在发请求。
+            "multimodal": self.multimodal,
+        }
+
+    def __repr__(self) -> str:
+        return f"APIEmbedding(model={self.model!r}, dimension={self.dimension}, base_url={self.base_url!r})"
+
+
+def _embed_batch_once(embedding: APIEmbedding, values: list[Any]) -> list[list[float]]:
+    """Send one batch and normalize the response into a list of vectors.
+
+    ``values`` are plain strings for text models, or VL content objects
+    (``{"text": ...}`` / ``{"image": ...}``) for visual-language models - both
+    travel in the same OpenAI-compatible ``input`` field.  One input item yields
+    one vector here; a *fused* VL list is handled by :meth:`APIEmbedding.embed_inputs`.
+    """
+    response = _request(embedding, values)
+    vectors = _extract_embedding_vectors(response)
+    if len(vectors) != len(values):
+        raise RuntimeError(
+            f"embedding response count {len(vectors)} did not match input count {len(values)}"
+        )
+    _learn_dimension(embedding, vectors)
+    return vectors
+
+
+def _learn_dimension(embedding: APIEmbedding, vectors: list[list[float]]) -> None:
+    """Validate vector shapes and record the dimension learned from a response."""
+    dimension = len(vectors[0]) if vectors else 0
+    if dimension == 0:
+        raise RuntimeError("embedding response contained empty vectors")
+    if any(len(vector) != dimension for vector in vectors):
+        raise RuntimeError("embedding response contained inconsistent dimensions")
+    if any(not math.isfinite(value) for vector in vectors for value in vector):
+        raise RuntimeError("embedding response contained non-finite values")
+    if embedding.dimension and embedding.dimension != dimension:
+        raise RuntimeError(
+            f"embedding dimension {dimension} does not match expected dimension {embedding.dimension}"
+        )
+    embedding.dimension = dimension
+
+
+def _request(embedding: APIEmbedding, values: list[Any]) -> Any:
+    """Perform the HTTP call (or the injected test client) and parse JSON."""
+    payload = {"model": embedding.model, "input": values}
+    client = embedding.client
+    if client is not None:
+        if callable(client):
+            return client(payload, model=embedding.model)
+        if callable(getattr(client, "embed", None)):
+            return client.embed(values, model=embedding.model)
+        if callable(getattr(getattr(client, "embeddings", None), "create", None)):
+            return client.embeddings.create(input=values, model=embedding.model)
+        raise TypeError("client must be callable or expose embed()/embeddings.create()")
+    parsed_endpoint = urlsplit(embedding.base_url)
+    if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
+        raise ValueError("embedding base_url must be an absolute HTTP(S) URL")
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{embedding.base_url}/embeddings",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {embedding.api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=embedding.timeout) as response:  # nosec B310 - base_url 已强制 http/https
+
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    result = _extract_embeddings(json.loads(response.read().decode("utf-8")))
-            except (urllib.error.URLError, ValueError) as exc:
-                raise RuntimeError(f"DashScope embedding request failed: {exc}") from exc
-        if result:
-            self.dimension = len(result[0])
-            if any(len(vector) != self.dimension for vector in result) or len(result) != len(values):
-                raise RuntimeError("embedding response count or dimensions did not match input")
-        return result
+                body = response.read(EMBEDDING_RESPONSE_MAX_BYTES + 1)
+            except TypeError:
+                # 测试替身与小适配器只暴露无参 read()；它们仍受下面长度检查约束。
+                body = response.read()
+            if len(body) > EMBEDDING_RESPONSE_MAX_BYTES:
+                raise OverflowError(
+                    f"body exceeds {EMBEDDING_RESPONSE_MAX_BYTES} bytes"
+                )
+            return json.loads(body.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(
+            f"embedding API HTTP {exc.code}: {detail}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"embedding API request failed: {exc.reason}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"embedding API returned invalid JSON: {exc}") from exc
+    except OverflowError as exc:
+        raise RuntimeError(f"embedding API response is too large: {exc}") from exc
 
 
-def _extract_embeddings(response: Any) -> list[list[float]]:
+def _extract_embedding_vectors(response: Any) -> list[list[float]]:
+    """Accept OpenAI ``data[].embedding`` and DashScope ``output.embeddings``."""
     if isinstance(response, dict):
-        data = response.get("output", response)
+        data = response.get("data")
+        if data is None:
+            output = response.get("output", {})
+            data = output.get("embeddings") if isinstance(output, dict) else None
     else:
-        data = getattr(response, "output", None) or getattr(response, "data", response)
-    if isinstance(data, dict):
-        data = data.get("embeddings", data.get("data", []))
-    if not isinstance(data, (list, tuple)):
-        try:
-            data = list(data)
-        except TypeError:
-            data = []
-    indexed: list[tuple[int | None, list[float]]] = []
-    for item in data or []:
+        data = getattr(response, "data", None)
+        if data is None:
+            output = getattr(response, "output", None)
+            data = getattr(output, "embeddings", None) if output is not None else None
+    if data is None:
+        raise RuntimeError("embedding response contained no data/embeddings list")
+
+    indexed: list[tuple[int, list[float]]] = []
+    for index, item in enumerate(data):
         if isinstance(item, dict):
             values = item.get("embedding")
-            index = item.get("text_index", item.get("index"))
+            explicit = item.get("index", item.get("text_index"))
         else:
             values = getattr(item, "embedding", item)
-            index = getattr(item, "text_index", None)
-            if index is None:
-                index = getattr(item, "index", None)
+            explicit = getattr(item, "index", None)
+            if explicit is None:
+                explicit = getattr(item, "text_index", None)
         if values is None:
-            continue
-        vector = [float(value) for value in values]
-        if not vector or any(not math.isfinite(value) for value in vector):
-            raise RuntimeError("embedding response contained an invalid vector")
-        indexed.append((int(index) if index is not None else None, vector))
-    if not indexed:
-        raise RuntimeError("embedding response contained no vectors")
-    if any(index is not None for index, _ in indexed):
-        # Providers such as DashScope label each embedding with its input
-        # position; reassemble strictly in that order and reject gaps.
-        size = max(index for index, _ in indexed if index is not None) + 1
-        if any(index is None for index, _ in indexed) or size != len(indexed):
-            raise RuntimeError("embedding response indices were incomplete")
-        ordered: list[list[float] | None] = [None] * size
-        for index, vector in indexed:
-            if index < 0 or index >= size:
-                raise RuntimeError("embedding response index was out of range")
-            ordered[index] = vector
-        if any(vector is None for vector in ordered):
-            raise RuntimeError("embedding response indices were incomplete")
-        return [vector for vector in ordered if vector is not None]
+            raise RuntimeError("embedding response item contained no embedding vector")
+        try:
+            vector = [float(value) for value in values]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("embedding response item contained an invalid vector") from exc
+        if not vector:
+            raise RuntimeError("embedding response item contained an empty vector")
+        # Reorder explicitly when providers label each vector with a position.
+        if explicit is not None:
+            indexed.append((int(explicit), vector))
+        else:
+            indexed.append((index, vector))
+
+    indexed.sort(key=lambda pair: pair[0])
+    positions = [position for position, _ in indexed]
+    if positions != list(range(len(indexed))):
+        raise RuntimeError("embedding response indices were incomplete")
     return [vector for _, vector in indexed]
 
 
-# Friendly alias used by integrations that call this layer an embedding service.
-EmbeddingService = BaseEmbedding
+#: 图片魔数 → MIME。声明错 MIME 会被服务端拒收，所以按魔数猜而不是一律写 PNG。
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def _image_mime_type(data: Any, fallback: str = "image/png") -> str:
+    """按魔数猜图片 MIME，猜不出就用 ``fallback``。"""
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        head = bytes(data)[:12]
+        for magic, mime in _IMAGE_MAGIC:
+            if head.startswith(magic):
+                return mime
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            return "image/webp"
+    return fallback
+
 
 __all__ = [
+    "VL_EMBEDDING_MODEL_MARKER",
+    "APIEmbedding",
     "BaseEmbedding",
-    "EmbeddingService",
-    "DashScopeEmbedding",
-    "LocalTransformerEmbedding",
-    "TFIDFEmbedding",
+    "HashEmbedding",
 ]

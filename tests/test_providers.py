@@ -80,3 +80,22 @@ def test_registry_uses_legacy_single_profile_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_MODEL", "legacy-model")
     registry = ProviderRegistry(config)
     assert registry.get("local").base_url == "http://localhost:8000/v1"
+
+
+def test_load_project_dotenv_reads_missing_env_var(tmp_path, monkeypatch):
+    from agents.providers import load_project_dotenv
+
+    envfile = tmp_path / ".env"
+    envfile.write_text("TEST_DOTENV_KEY=from-file\n# comment\nexport TEST_DOTENV_EXPORT=ok\n", encoding="utf-8")
+    monkeypatch.delenv("TEST_DOTENV_KEY", raising=False)
+    monkeypatch.delenv("TEST_DOTENV_EXPORT", raising=False)
+    monkeypatch.setenv("TEST_DOTENV_KEEP", "existing")
+    envfile.write_text(
+        "TEST_DOTENV_KEY=from-file\nTEST_DOTENV_KEEP=ignored\nexport TEST_DOTENV_EXPORT=ok\n",
+        encoding="utf-8",
+    )
+    load_project_dotenv(envfile)
+    import os
+    assert os.environ["TEST_DOTENV_KEY"] == "from-file"
+    assert os.environ["TEST_DOTENV_EXPORT"] == "ok"
+    assert os.environ["TEST_DOTENV_KEEP"] == "existing"

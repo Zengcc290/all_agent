@@ -11,15 +11,54 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 _PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _TOOL_MODES = frozenset({"native_strict", "native_loose", "text_react", "none"})
+_DOTENV_LOADED = False
+
+
+def load_project_dotenv(path: Path | None = None) -> None:
+    """Load repo-root ``.env`` into ``os.environ`` without overriding live vars.
+
+    ``provider.toml`` commonly points ``api_key_env`` at ``DEEPSEEK_API_KEY``
+    which lives in ``.env``. Extraction used to skip that file, so ingest
+    silently ran ``NullKnowledgeExtractor`` and wrote zero entities.
+    """
+
+    global _DOTENV_LOADED
+    explicit = path is not None
+    if not explicit:
+        if _DOTENV_LOADED:
+            return
+        _DOTENV_LOADED = True
+        path = Path(__file__).resolve().parent.parent / ".env"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
 
 
 @dataclass(frozen=True)
@@ -34,12 +73,6 @@ class ProviderProfile:
     api_key_env: str | None = None
     adapter: str = "openai_compatible"
     tool_mode: str = "native_strict"
-
-    @property
-    def api_url(self) -> str:
-        """Public spelling for the normalized URL used by the client."""
-
-        return self.base_url
 
     def public_info(self) -> dict[str, Any]:
         """Return inspectable profile metadata without resolving its secret."""
@@ -117,6 +150,7 @@ class ProviderRegistry:
     def resolve_api_key(self, profile_name: str) -> str:
         """Return the key stored in the selected profile."""
 
+        load_project_dotenv()
         profile = self.get(profile_name)
         if profile.api_key:
             return profile.api_key
@@ -131,48 +165,16 @@ class ProviderRegistry:
             )
         raise ValueError(f"provider profile '{profile.name}' has an empty api_key")
 
-    def register_ephemeral(
-        self,
-        name: str,
-        *,
-        api_key: str,
-        base_url: str,
-        default_model: str,
-    ) -> None:
-        """Register an in-memory profile for legacy integrations.
-
-        New applications should put metadata and credentials in TOML. This
-        escape hatch exists only for callers that inject
-        credentials programmatically (for example test doubles).
-        """
-
-        if not isinstance(api_key, str) or not api_key.strip():
-            raise ValueError("api_key must be a non-empty string")
-        profile = _parse_profile(
-            name,
-            {
-                "base_url": base_url,
-                "api_key": api_key,
-                "default_model": default_model,
-                "models": [default_model],
-            },
-        )
-        profiles = dict(self._profiles)
-        if name in profiles:
-            raise ValueError(f"provider profile '{name}' already exists")
-        profiles[name] = profile
-        self._profiles = MappingProxyType(profiles)
-
 
 def _parse_document(
     document: Mapping[str, Any], config_path: Path
 ) -> tuple[dict[str, ProviderProfile], str]:
     if not isinstance(document, Mapping):
-        raise ValueError(f"provider profile configuration must be a TOML table: {config_path}")
+        raise TypeError(f"provider profile configuration must be a TOML table: {config_path}")
     defaults = document.get("defaults")
     raw_profiles = document.get("profiles")
     if not isinstance(defaults, Mapping):
-        raise ValueError(f"provider profile configuration needs a [defaults] table: {config_path}")
+        raise TypeError(f"provider profile configuration needs a [defaults] table: {config_path}")
     if not isinstance(raw_profiles, Mapping) or not raw_profiles:
         raise ValueError(f"provider profile configuration needs one [profiles.<name>] table: {config_path}")
     active_profile = _required_string(defaults, "active_profile", "[defaults]")
@@ -184,7 +186,7 @@ def _parse_document(
                 "and start with a letter or number"
             )
         if not isinstance(raw_profile, Mapping):
-            raise ValueError(f"[profiles.{name}] must be a TOML table")
+            raise TypeError(f"[profiles.{name}] must be a TOML table")
         profiles[name] = _parse_profile(name, raw_profile)
     if active_profile not in profiles:
         raise ValueError(
@@ -224,7 +226,7 @@ def _parse_profile(name: str, raw_profile: Mapping[str, Any]) -> ProviderProfile
         else:
             raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
     if not isinstance(raw_api_key, str):
-        raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
+        raise TypeError(f"profile '{name}' requires non-empty 'api_key'")
     if not raw_api_key.strip() and api_key_env is None:
         raise ValueError(f"profile '{name}' requires non-empty 'api_key'")
     default_model = _required_string(raw_profile, "default_model", f"profile '{name}'")
@@ -272,4 +274,4 @@ def _validate_model(profile_name: str, value: Any) -> str:
     return value.strip()
 
 
-__all__ = ["ProviderProfile", "ProviderRegistry"]
+__all__ = ["ProviderProfile", "ProviderRegistry", "load_project_dotenv"]

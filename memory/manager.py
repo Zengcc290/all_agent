@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from types import TracebackType
+from typing import Any, Self
+from urllib.parse import urlsplit
 
-from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType
-from .embedding import BaseEmbedding, TFIDFEmbedding
-from .storage import BaseDocumentStore, BaseVectorStore, InMemoryVectorStore, Neo4jGraphStore, QdrantVectorStore, SQLiteDocumentStore
+from constants import DEFAULT_PROXY_URL
+
+from .base import BaseMemory, MemoryConfig, MemoryItem, MemorySearchResult, MemoryType, make_default_embedding
+from .embedding import BaseEmbedding
+from .storage import (
+    BaseDocumentStore,
+    BaseVectorStore,
+    InMemoryVectorStore,
+    Neo4jGraphStore,
+    QdrantVectorStore,
+    SQLiteDocumentStore,
+)
 from .types import EpisodicMemory, PerceptualMemory, SemanticMemory, WorkingMemory
+
+
+def _is_loopback_endpoint(value: str | None) -> bool:
+    hostname = (urlsplit(value or "").hostname or "").casefold()
+    return hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def cloud_proxy_url(config: MemoryConfig, endpoint: str | None) -> str | None:
+    """Cloud Qdrant/Neo4j 默认走本机 7890；回环地址与显式 [proxy] 覆盖除外。"""
+
+    if not endpoint or _is_loopback_endpoint(endpoint):
+        return None
+    if config.proxy_url:
+        return config.proxy_url
+    return DEFAULT_PROXY_URL
 
 
 class MemoryManager:
@@ -22,7 +49,7 @@ class MemoryManager:
             if embedding is not None
             else embedding_service
             if embedding_service is not None
-            else TFIDFEmbedding(self.config.embedding_dimension)
+            else make_default_embedding(self.config)
         )
         self.document_store = (
             document_store
@@ -35,7 +62,8 @@ class MemoryManager:
             self.vector_store = QdrantVectorStore(
                 url=self.config.qdrant_url,
                 collection_name=self.config.qdrant_collection,
-                dimension=self.config.embedding_dimension,
+                api_key=self.config.qdrant_api_key,
+                proxy_url=cloud_proxy_url(self.config, self.config.qdrant_url),
             )
         else:
             self.vector_store = InMemoryVectorStore()
@@ -46,6 +74,7 @@ class MemoryManager:
                 self.config.neo4j_uri,
                 self.config.neo4j_username,
                 self.config.neo4j_password,
+                proxy_url=cloud_proxy_url(self.config, self.config.neo4j_uri),
             )
         )
         common = {
@@ -64,9 +93,12 @@ class MemoryManager:
             MemoryType.SEMANTIC: self.semantic,
             MemoryType.PERCEPTUAL: self.perceptual,
         }
-        # Rebuild a local index when reopening a persistent SQLite store.
-        for item in self.document_store.list():
-            self.vector_store.upsert(item)
+        # Only a local in-process index needs rebuilding from the document store
+        # on startup; a remote/durable vector store already holds the vectors,
+        # so re-upserting every item there is pure startup cost.
+        if isinstance(self.vector_store, InMemoryVectorStore):
+            for item in self.document_store.list():
+                self.vector_store.upsert(item)
 
     def for_type(self, memory_type: MemoryType | str) -> BaseMemory:
         try:
@@ -76,9 +108,6 @@ class MemoryManager:
 
     def add(self, content: str, *, memory_type: MemoryType | str = MemoryType.WORKING, **kwargs: Any) -> MemoryItem:
         return self.for_type(memory_type).add(content, **kwargs)
-
-    remember = add
-    store = add
 
     def get(self, item_id: str, *, memory_type: MemoryType | str | None = None) -> MemoryItem | None:
         if memory_type is not None:
@@ -97,9 +126,6 @@ class MemoryManager:
             return False
         return self.for_type(item.memory_type).delete(item_id)
 
-    remove = delete
-    retrieve = get
-
     def search(self, query: str, *, memory_type: MemoryType | str | None = None, limit: int | None = None, threshold: float | None = None, metadata: Mapping[str, Any] | None = None) -> list[MemorySearchResult]:
         if memory_type is not None:
             return self.for_type(memory_type).search(query, limit=limit, threshold=threshold, metadata=metadata)
@@ -115,15 +141,6 @@ class MemoryManager:
         found.sort(key=lambda result: (-result.score, result.item.created_at))
         return found[:limit]
 
-    query = search
-
-    def cleanup_expired(self) -> int:
-        removed = 0
-        for item in self.document_store.list(include_expired=True):
-            if item.is_expired and self.delete(item.id):
-                removed += 1
-        return removed
-
     def list(self, *, memory_type: MemoryType | str | None = None, include_expired: bool = False) -> list[MemoryItem]:
         if memory_type is not None:
             return self.for_type(memory_type).list(include_expired=include_expired)
@@ -134,9 +151,6 @@ class MemoryManager:
             return self.for_type(memory_type).clear()
         return sum(memory.clear() for memory in self.memories.values())
 
-    def stats(self) -> dict[str, int]:
-        return {memory_type.value: len(self.document_store.list(memory_type=memory_type)) for memory_type in MemoryType}
-
     def close(self) -> None:
         self.document_store.close()
         close_vector = getattr(self.vector_store, "close", None)
@@ -146,11 +160,16 @@ class MemoryManager:
         if callable(close):
             close()
 
-    def __enter__(self) -> "MemoryManager":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
 
-__all__ = ["MemoryManager"]
+__all__ = ["MemoryManager", "cloud_proxy_url"]

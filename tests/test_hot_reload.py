@@ -6,8 +6,8 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from agents.react import ReActAgent
-from core.registry import BaseTool, ToolRegistry
 from core import ToolSpec
+from core.registry import BaseTool, ToolRegistry
 
 
 class EchoInput(BaseModel):
@@ -85,9 +85,6 @@ def test_initial_request_builds_frozen_manifest_and_empty_hot_zone():
     agent._sync_frozen_manifest()
     assert agent._frozen_manifest == {
         "test.react_echo": agent._prompt_fingerprint(EchoTool().spec),
-        "system.skill_catalog": agent._prompt_fingerprint(
-            agent.tools.get("system.skill_catalog").spec
-        ),
         "system.tool_catalog": agent._prompt_fingerprint(
             agent.tools.get("system.tool_catalog").spec
         ),
@@ -129,15 +126,18 @@ def test_hot_zone_lines_render_schema_only_for_recent_tools():
     rendered = "\n".join(lines)
 
     assert lines[0].startswith("Hot-loaded tools")
-    # The four most recent hot tools keep full schemas; the oldest degrades.
-    assert "- test.react_echo: Echo one integer (loud description)." in rendered
+    # The four most recent hot tools keep full contracts; the oldest degrades.
+    assert "- test.react_echo@" in rendered
+    assert "[只读 · 免确认" in rendered
+    assert "Echo one integer (loud description)." in rendered
     roster = [
         line
         for line in rendered.splitlines()
         if line.startswith("- test.extra0:")
     ]
     assert roster == ["- test.extra0: (see schema above or via catalog)"]
-    assert "- test.extra1: Extra tool 1." in rendered
+    assert "- test.extra1@" in rendered
+    assert "Extra tool 1." in rendered
     assert QuietEchoTool().spec.schema_hash in agent.tools.confirmation_key("test.extra1")
 
 
@@ -222,7 +222,51 @@ async def test_hot_tool_is_callable_after_hot_reload():
     last_message = agent.llm.requests[0][-1]
     assert last_message["role"] == "system"
     assert "Hot-loaded tools" in last_message["content"]
-    assert "test.react_echo: Echo one integer (loud description)." in last_message["content"]
+    assert "- test.react_echo@" in last_message["content"]
+    assert "Echo one integer (loud description)." in last_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_whitelist_excludes_hot_loaded_tool():
+    class ExcludedHotLLM:
+        model = "test-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.requests: list[list[dict]] = []
+
+        def complete(self, messages, **_options):
+            self.requests.append([dict(message) for message in messages])
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    "Thought: use excluded hot tool\n"
+                    "Action: test.excluded_hot\n"
+                    'Action Input: {"value": 7}'
+                )
+            return "Final Answer: blocked"
+
+    llm = ExcludedHotLLM()
+    agent = ReActAgent("hot-whitelist-test", llm=llm, auto_discover_tools=False)
+    agent.register_tool(EchoTool())
+    agent._sync_frozen_manifest()
+    agent.register_hot_tool(
+        _named_echo_tool("test.excluded_hot", "Must stay request-disabled.")
+    )
+
+    answer = await agent.run_with_react(
+        "echo 7",
+        max_rounds=3,
+        tool_names=["test.react_echo"],
+        defer_tool_loading=False,
+        use_history=False,
+    )
+
+    assert answer == "blocked"
+    first_round = "\n".join(str(message.get("content") or "") for message in llm.requests[0])
+    second_round = "\n".join(str(message.get("content") or "") for message in llm.requests[1])
+    assert "Must stay request-disabled." not in first_round
+    assert "TOOL_NOT_ENABLED" in second_round
 
 
 @pytest.mark.asyncio
@@ -247,7 +291,7 @@ async def test_frozen_inventory_stays_stable_after_hot_reload():
     first_inventory = agent.llm.requests[0][0]["content"]
     second_inventory = agent.llm.requests[1][0]["content"]
     assert first_inventory == second_inventory
-    assert "test.react_echo: Echo one integer (loud description)." not in first_inventory
+    assert "- test.react_echo@" not in first_inventory
     assert "Hot-loaded tools" in agent.llm.requests[1][-1]["content"]
 
 

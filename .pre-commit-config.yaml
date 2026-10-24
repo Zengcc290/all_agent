@@ -1,0 +1,12 @@
+# Local hooks only: nothing is fetched from third-party hook repositories.
+# Requires `pre-commit` plus `ruff`/`pytest` in the environment that runs the
+# hook (`python -m pip install -e '.[dev]'`).
+repos:
+  - repo: local
+    hooks:
+      - id: check
+        name: ruff + pytest
+        entry: python scripts/check.py
+        language: system
+        pass_filenames: false
+        always_run: true

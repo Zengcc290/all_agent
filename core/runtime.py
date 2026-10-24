@@ -116,16 +116,6 @@ class ToolExecutionManager:
             # execution is deliberately unrestricted so every caller can use
             # every registered tool; keep the metadata for cataloging and a
             # possible future authorization policy.
-            confirmation_key = self.registry.confirmation_key(spec.name)
-            if (
-                spec.side_effect != "read"
-                and confirmation_key not in context.confirmed_side_effects
-            ):
-                errors[index] = ToolError(
-                    code="CONFIRMATION_REQUIRED",
-                    message="side-effecting tool requires confirmation",
-                )
-                continue
             try:
                 normalized_arguments[index] = spec.input_model.model_validate(
                     call.arguments, strict=True
@@ -142,6 +132,22 @@ class ToolExecutionManager:
                 )
                 errors[index] = ToolError(
                     code="INVALID_ARGUMENTS", message="argument validation failed"
+                )
+            if errors[index] is not None or spec.side_effect == "read":
+                continue
+            confirmation_key = self.registry.confirmation_key(spec.name)
+            confirmed = confirmation_key in context.confirmed_side_effects
+            if spec.side_effect == "destructive":
+                normalized = normalized_arguments[index]
+                assert normalized is not None
+                call_key = self.registry.call_confirmation_key(
+                    spec.name, normalized.model_dump(mode="json")
+                )
+                confirmed = call_key in context.confirmed_side_effects
+            if not confirmed:
+                errors[index] = ToolError(
+                    code="CONFIRMATION_REQUIRED",
+                    message="side-effecting tool requires confirmation",
                 )
 
         dependencies: list[list[int]] = [[] for _ in calls]

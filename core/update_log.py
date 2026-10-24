@@ -14,7 +14,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -158,7 +158,7 @@ class UpdateLogRepository:
         normalized_system = (system_name or platform.system() or "Unknown").strip()
         if not normalized_system:
             normalized_system = "Unknown"
-        normalized_timestamp = timestamp or datetime.now(timezone.utc).isoformat(
+        normalized_timestamp = timestamp or datetime.now(UTC).isoformat(
             timespec="seconds"
         )
         if not isinstance(normalized_timestamp, str) or not normalized_timestamp.strip():

@@ -11,47 +11,55 @@ from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
 
-from core import (
-    ExecutionContext,
-    SkillCatalogTool,
-    SkillDiscoveryReport,
-    SkillRegistry,
-    ToolCall,
-    ToolCatalogTool,
-    ToolDiscoveryReport,
-    ToolError,
-    ToolExecutionManager,
-    ToolRegistry,
-    ToolResult,
-    ToolSpecRepository,
-    ToolLoop,
-    parse_openai_tool_calls,
-)
-from core import discover_tools as discover_tool_modules
-from core import discover_skills as discover_skill_packages
 from constants import (
     DEFAULT_MAX_RETRIES,
-    DEFAULT_SKILLS_ROOT,
     DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT,
+    HISTORY_MAX_MESSAGES,
     OBSERVATION_COMPRESS_THRESHOLD,
     OBSERVATION_PREVIEW_CHARS,
     OBSERVATION_STUB_PREFIX,
     PROMPT_CACHE_KEY_VERSION,
 )
+from core import (
+    ExecutionContext,
+    ToolCall,
+    ToolCatalogTool,
+    ToolDiscoveryReport,
+    ToolError,
+    ToolExecutionManager,
+    ToolLoop,
+    ToolRegistry,
+    ToolResult,
+    ToolSpecRepository,
+    parse_openai_tool_calls,
+)
+from core import discover_tools as discover_tool_modules
 from core.activity_log import log_model_completed, log_model_first_chunk
 from core.registry import BaseTool
+from core.tool_docs import render_tool_catalog
 
-from .llm import EchoMode, LLM
-from .providers import ProviderProfile, ProviderRegistry
+from .llm import LLM, EchoMode
+from .message_utils import (
+    field as _field,
+)
+from .message_utils import (
+    message_dict as _message_dict,
+)
+from .message_utils import (
+    result_json as _result_json,
+)
+from .message_utils import (
+    safe_tool_call_error as _safe_tool_call_error,
+)
+from .message_utils import (
+    safe_tool_name as _safe_tool_name,
+)
+from .providers import ProviderRegistry
 
 
 class Agent(ABC):
     """Agent shell with provider management and centralized tool execution."""
-
-    # An omitted max_rounds should not allow a malfunctioning provider to keep
-    # making requests forever.
-    UNBOUNDED_ROUND_SAFETY_LIMIT = ToolLoop.DEFAULT_SAFETY_LIMIT
 
     # ``None`` means "use the active profile's tool_mode". Only a profile that
     # explicitly declares ``tool_mode = "none"`` disables tool support.
@@ -77,9 +85,15 @@ class Agent(ABC):
         return protocol
 
     def _save_history(self, history_key: str, conversation: list[dict[str, Any]]) -> None:
-        """Persist the conversation with oversized tool payloads compressed."""
+        """Persist the conversation with oversized tool payloads compressed.
+
+        The stored history replaces the configured prompt on the next turn, so
+        the leading ``system`` block must survive trimming; only old turns are
+        dropped once the message count exceeds ``HISTORY_MAX_MESSAGES``.
+        """
 
         compressed = compress_saved_history(conversation)
+        compressed = trim_saved_history(compressed)
         self._profile_histories[history_key] = compressed
         self.history = [dict(item) for item in compressed]
 
@@ -197,8 +211,6 @@ class Agent(ABC):
         auto_discover_tools: bool = True,
         tool_package: str | ModuleType = "tool",
         discovery_strict: bool = False,
-        auto_discover_skills: bool = True,
-        skills_root: str = DEFAULT_SKILLS_ROOT,
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string")
@@ -208,10 +220,6 @@ class Agent(ABC):
             raise TypeError("auto_discover_tools must be a boolean")
         if not isinstance(discovery_strict, bool):
             raise TypeError("discovery_strict must be a boolean")
-        if not isinstance(auto_discover_skills, bool):
-            raise TypeError("auto_discover_skills must be a boolean")
-        if not isinstance(skills_root, str) or not skills_root.strip():
-            raise TypeError("skills_root must be a non-empty string")
         if not isinstance(tool_package, ModuleType) and not (
             isinstance(tool_package, str) and tool_package.strip()
         ):
@@ -240,22 +248,12 @@ class Agent(ABC):
         if self.repository is not None:
             self.repository.save(self.catalog_tool.spec, replace=True)
         self.tool_discovery_report: ToolDiscoveryReport | None = None
-        # Skills are read-only instruction packages: the registry keeps specs
-        # only, and the catalog tool reads the skill file content on demand.
-        self.skills_root = skills_root
-        self.skills = SkillRegistry()
-        self.skill_catalog_tool = SkillCatalogTool(self.skills, root=skills_root)
-        self.skill_discovery_report: SkillDiscoveryReport | None = None
-        self.tools.register(self.skill_catalog_tool)
-        if auto_discover_skills:
-            self.discover_skills(strict=discovery_strict)
         if auto_discover_tools:
             self.discover_tools(strict=discovery_strict)
         self.execution_manager = ToolExecutionManager(self.tools)
-        # ``providers`` and ``global_model`` remain read-only compatibility
-        # views for callers of the original prototype. New code should use
+        # ``providers`` remains a read-only compatibility
+        # view for callers of the original prototype. New code should use
         # ``provider_registry`` and ``active_profile``.
-        self.global_model: str | None = None
         self.role = ["user", "assistant", "system", "tool"]
         self.prompt: dict[str, str] = {}
         self.history: list[dict[str, Any]] = []
@@ -271,10 +269,6 @@ class Agent(ABC):
         self._frozen_manifest: dict[str, str] | None = None
         self._hot_tools: dict[str, str] = {}
         self.cache_epoch: int = 0
-
-    def clear_history(self) -> None:
-        self.history.clear()
-        self._profile_histories.clear()
 
     @abstractmethod
     def run(self, query: str) -> str:
@@ -382,25 +376,6 @@ class Agent(ABC):
             reload_modules=reload_modules,
         )
         self.tool_discovery_report = report
-        return report
-
-    def discover_skills(
-        self,
-        *,
-        root: str | None = None,
-        replace: bool = False,
-        strict: bool = False,
-    ) -> SkillDiscoveryReport:
-        """Scan the skills root and register discovered instruction packages."""
-
-        selected_root = self.skills_root if root is None else root
-        report = discover_skill_packages(
-            self.skills,
-            root=selected_root,
-            replace=replace,
-            strict=strict,
-        )
-        self.skill_discovery_report = report
         return report
 
     def is_tool_registered(
@@ -588,7 +563,7 @@ class Agent(ABC):
 
         round_loop = ToolLoop(
             max_rounds,
-            safety_limit=self.UNBOUNDED_ROUND_SAFETY_LIMIT,
+            safety_limit=ToolLoop.DEFAULT_SAFETY_LIMIT,
         )
         for round_number in round_loop.rounds():
             current_snapshot = self.tools.snapshot()
@@ -615,7 +590,7 @@ class Agent(ABC):
             response = await asyncio.to_thread(
                 self._dispatch_model_call,
                 completion_llm,
-                self._with_registered_tool_names(conversation),
+                self._with_registered_tool_names(conversation, registrations),
                 completion_options,
                 round_number=round_number,
                 echo_mode=echo_mode,
@@ -741,58 +716,44 @@ class Agent(ABC):
             )
         return messages
 
-    def _with_registered_skill_names(self) -> dict[str, str] | None:
-        """Return the persistent skill-directory system message, or ``None``.
-
-        The message is deterministic for a fixed set of skills so the
-        provider's prefix cache stays reusable across rounds. Only names,
-        descriptions, versions, and triggers belong here; skill file content is
-        deliberately excluded and loaded on demand through
-        ``system.skill_catalog`` so it never fragments the cached prefix.
-        """
-
-        snapshot = self.skills.snapshot()
-        if not snapshot:
-            return None
-        lines = [
-            "Available skills (read-only instruction packages; content is NOT "
-            "loaded yet). When the current task matches a skill's description "
-            "or triggers below, FIRST call system.skill_catalog with "
-            "action=view and that skill_name, then follow the returned "
-            "content. Never guess a skill's content from its description "
-            "alone:"
-        ]
-        for name, (spec, _) in snapshot.items():
-            entry = f"- {name} (v{spec.version}): {spec.description}"
-            if spec.triggers:
-                entry += " Triggers: " + ", ".join(spec.triggers)
-            lines.append(entry)
-        return {"role": "system", "content": "\n".join(lines)}
-
     def _with_registered_tool_names(
-        self, conversation: list[dict[str, Any]]
+        self,
+        conversation: list[dict[str, Any]],
+        registrations: Mapping[str, tuple[BaseTool, int]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Add all known tool names to every model request.
+        """Add the tool inventory and the full contract of every callable tool.
 
         The inventory intentionally includes repository-only tools used by
         lazy loading, even when their full schemas are not yet supplied in the
-        provider's tool definitions. The skill directory is appended as a
-        second stable system message when any skill is registered.
+        provider's tool definitions.
+
+        ``registrations`` (the tools actually callable in this request) are
+        additionally rendered as **variable-level contracts** — purpose, usage
+        rules, every input variable with type/required/default/constraints and
+        its description, output fields, and whether the tool needs human
+        confirmation. The provider's ``tools`` field carries the same schemas
+        in machine form; putting the human-readable contract in the prompt as
+        well is what lets a model use the tools correctly even when it ignores
+        or mis-reads the function-calling payload.
         """
 
         names = set(self.tools.snapshot())
         if self.repository is not None:
             names.update(self.repository.active_tool_names())
         inventory = ", ".join(sorted(names)) or "(none)"
+        content = ["All registered tool names: " + inventory]
+        if registrations:
+            header = (
+                "Tool contracts (full variable-level specification of the tools "
+                "callable in this request):"
+            )
+            content.extend(("", header, *render_tool_catalog(registrations)))
         prefix: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": "All registered tool names: " + inventory,
+                "content": "\n".join(content),
             }
         ]
-        skill_message = self._with_registered_skill_names()
-        if skill_message is not None:
-            prefix.append(skill_message)
         return [*prefix, *conversation]
 
     @staticmethod
@@ -835,11 +796,7 @@ class Agent(ABC):
         tool names are included through the hot-zone roster because their
         rendered block is part of the request tail, but hot reloads must not
         change the routing key: only ``cache_epoch`` (frozen-zone structural
-        changes) starts a new cache namespace.  Skill directory entries
-        (name, version, and content hash) are part of the cached system
-        message, so they are included for the same reason: adding, removing,
-        or editing a skill changes the cached prefix and therefore must start
-        a new cache namespace.
+        changes) starts a new cache namespace.
         """
 
         names = set(self.tools.snapshot())
@@ -850,10 +807,6 @@ class Agent(ABC):
         # frozen manifest only changes together with ``cache_epoch``.
         if self._frozen_manifest is not None:
             names = set(self._frozen_manifest)
-        skill_entries = [
-            (name, spec.version, spec.content_hash)
-            for name, (spec, _) in self.skills.snapshot().items()
-        ]
         material = {
             "version": PROMPT_CACHE_KEY_VERSION,
             "provider": provider_key,
@@ -861,7 +814,6 @@ class Agent(ABC):
             "mode": mode,
             "configured_prompt": self._configured_prompt_messages(),
             "tool_names": sorted(names),
-            "skill_entries": skill_entries,
             "cache_epoch": self.cache_epoch,
         }
         # ReAct keeps its protocol instructions in class constants.  Include
@@ -871,7 +823,6 @@ class Agent(ABC):
             material["react_instructions"] = [
                 getattr(self, "REACT_INSTRUCTIONS", ""),
                 getattr(self, "CATALOG_FIRST_REACT_INSTRUCTIONS", ""),
-                getattr(self, "SKILL_VIEW_REACT_INSTRUCTIONS", ""),
             ]
         encoded = json.dumps(
             material,
@@ -881,71 +832,6 @@ class Agent(ABC):
         ).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()[:48]
         return f"{PROMPT_CACHE_KEY_VERSION}-{digest}"
-
-    @property
-    def profiles(self) -> Mapping[str, ProviderProfile]:
-        """Configured provider profiles (without resolved API keys)."""
-
-        return self.provider_registry.profiles
-
-    def set_active_profile(self, profile_name: str) -> None:
-        """Select the default profile for subsequent requests."""
-
-        profile = self.provider_registry.get(profile_name)
-        self.active_profile = profile.name
-        self.provider_registry.active_profile = profile.name
-
-    def reload_provider_profiles(self) -> None:
-        """Reload TOML and environment-backed credentials.
-
-        Existing clients are discarded so URL/key changes take effect on the
-        next request. Conversation history remains isolated per profile.
-        """
-
-        self.provider_registry.reload()
-        self.active_profile = self.provider_registry.active_profile
-        self._profile_clients.clear()
-
-    def profile_info(self, profile_name: str | None = None) -> dict[str, Any]:
-        selected = profile_name or self.active_profile
-        return self.provider_registry.get(selected).public_info()
-
-    def list_profiles(self) -> list[dict[str, Any]]:
-        return [profile.public_info() for profile in self.provider_registry.profiles.values()]
-
-    def add_provider(
-        self,
-        provider_name: str,
-        api_key: str,
-        base_url: str,
-        default_model: str,
-    ) -> None:
-        """Deprecated compatibility shim; prefer a TOML profile.
-
-        It deliberately does not probe ``/models``. The old API's network
-        probe made valid gateways impossible to configure when that endpoint
-        was unavailable.
-        """
-
-        self.provider_registry.register_ephemeral(
-            provider_name,
-            api_key=api_key,
-            base_url=base_url,
-            default_model=default_model,
-        )
-
-    def detect_models(self, base_url: str, api_key: str) -> list[str]:
-        """Deprecated compatibility helper for callers migrating to profiles."""
-
-        from openai import OpenAI
-
-        response = OpenAI(
-            api_key=api_key, base_url=base_url, max_retries=self.max_retries
-        ).models.list()
-        raw_models = _field(response, "data")
-        if not isinstance(raw_models, (list, tuple)):
-            raise TypeError("provider model response data must be a list")
-        return list(dict.fromkeys(str(_field(item, "id", item)).strip() for item in raw_models if str(_field(item, "id", item)).strip()))
 
     def _completion_target(
         self,
@@ -967,23 +853,6 @@ class Agent(ABC):
 
         selected_provider = profile_name
         selected_model = model
-        if selected_model is None and isinstance(self.global_model, str):
-            possible_provider, separator, possible_model = self.global_model.partition(
-                ":"
-            )
-            qualified = (
-                separator
-                and possible_provider in self.provider_registry.profiles
-                and bool(possible_model)
-            )
-            if selected_provider is None and qualified:
-                selected_provider = possible_provider
-                selected_model = possible_model
-            elif selected_provider is not None and qualified:
-                if selected_provider == possible_provider:
-                    selected_model = possible_model
-            else:
-                selected_model = self.global_model
 
         if selected_provider is None and self.llm is not None:
             return self.llm, selected_model, "__injected__"
@@ -1011,29 +880,10 @@ class Agent(ABC):
     def set_system_prompt(self, prompt: str) -> None:
         self._set_prompt("system", prompt)
 
-    def set_user_prompt(self, prompt: str) -> None:
-        self._set_prompt("user", prompt)
-
-    def set_assistant_prompt(self, prompt: str) -> None:
-        self._set_prompt("assistant", prompt)
-
-    def set_tool_prompt(self, prompt: str) -> None:
-        self._set_prompt("tool", prompt)
-
     def _set_prompt(self, role: str, prompt: str) -> None:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
         self.prompt[role] = prompt
-
-    def set_global_model(self, model: str | None) -> None:
-        """Deprecated compatibility setter; prefer ``set_active_profile`` and ``model=``."""
-        if model is not None and (not isinstance(model, str) or not model.strip()):
-            raise ValueError("model must be a non-empty string or None")
-        self.global_model = model
-
-
-# Preserve the original public name while offering the conventional class name.
-agent = Agent
 
 
 def _strict_function_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -1067,56 +917,6 @@ def _strict_function_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
     normalize(normalized)
     return normalized
-
-
-def _safe_tool_name(value: Any) -> str:
-    name = value.strip() if isinstance(value, str) else "unknown.tool"
-    return (name or "unknown.tool")[:200]
-
-
-def _safe_tool_call_error(error: Exception) -> str:
-    message = str(error) or type(error).__name__
-    return message[:1000]
-
-
-def _message_dict(message: Any) -> dict[str, Any]:
-    if hasattr(message, "model_dump"):
-        data = message.model_dump(exclude_none=True)
-    elif isinstance(message, dict):
-        data = dict(message)
-    else:
-        data = {
-            key: value
-            for key in ("role", "content", "tool_calls")
-            if (value := getattr(message, key, None)) is not None
-        }
-    data.setdefault("role", "assistant")
-    if "tool_calls" in data and data["tool_calls"] is not None:
-        data["tool_calls"] = [_tool_call_dict(item) for item in data["tool_calls"]]
-    return data
-
-
-def _tool_call_dict(item: Any) -> dict[str, Any]:
-    """Convert SDK tool-call objects to JSON-compatible assistant messages."""
-    function = _field(item, "function")
-    result: dict[str, Any] = {
-        "id": _field(item, "id"),
-        "type": _field(item, "type", "function"),
-        "function": {
-            "name": _field(function, "name"),
-            "arguments": _field(function, "arguments", "{}"),
-        },
-    }
-    return {key: value for key, value in result.items() if value is not None}
-
-
-def _result_json(result: Any) -> str:
-    """Serialize tool results for providers, including permissive Any fields."""
-    try:
-        payload = result.model_dump(mode="json")
-    except Exception:  # noqa: BLE001
-        payload = result.model_dump()
-    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def compress_saved_history(
@@ -1153,15 +953,41 @@ def compress_saved_history(
     return compressed
 
 
+def trim_saved_history(
+    conversation: list[dict[str, Any]],
+    *,
+    max_messages: int = HISTORY_MAX_MESSAGES,
+) -> list[dict[str, Any]]:
+    """Bound the persisted history while keeping the leading ``system`` block.
+
+    Without this cap every turn resends the entire conversation, so token cost
+    grows without limit for a long-lived agent. Older turns are dropped from the
+    front; an ``Observation`` orphaned by the cut is dropped too, because it
+    would otherwise appear without the action that produced it.
+    """
+
+    if max_messages < 1 or len(conversation) <= max_messages:
+        return conversation
+
+    leading: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for message in conversation:
+        if not rest and message.get("role") == "system":
+            leading.append(dict(message))
+            continue
+        rest.append(dict(message))
+    if len(rest) <= max_messages:
+        return conversation
+
+    kept = rest[-max_messages:]
+    while kept and str(kept[0].get("content", "")).startswith("Observation: "):
+        kept = kept[1:]
+    return leading + kept
+
+
 def _observation_stub(payload: str) -> str:
     preview = payload[:OBSERVATION_PREVIEW_CHARS]
     return (
         f"{OBSERVATION_STUB_PREFIX} | 原始大小: {len(payload):,} 字符 | "
         f"预览: {preview}... | 如需完整数据请让 AI 重新调用同一工具查询。]"
     )
-
-
-def _field(value: Any, key: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)

@@ -26,3 +26,14 @@ Thumbs.db
 config/provider.toml
 config/providers.toml
 !config/provider.example.toml
+
+# Local services profile (embedding/search/Qdrant/Neo4j) may contain plaintext
+# credentials. Publish only the sanitized services.example.toml template.
+config/services.toml
+!config/services.example.toml
+
+# One-off migration backups (scripts/migrate_storage.py, scripts/migrate_to_cloud.py)
+*.bak.pre_migration
+
+# Editor metadata / attachments
+.opensquilla/

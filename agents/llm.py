@@ -4,7 +4,6 @@ import logging
 import math
 import re
 import sys
-import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Literal
 
@@ -13,6 +12,8 @@ from constants import (
     DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT,
 )
+
+from .message_utils import field
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ class _FinalAnswerEchoer:
         write: Callable[[str], None] | None,
         prefix: str = "\nAI：",
     ) -> None:
-        self._mode = mode
         self._write = write or _default_echo_write
         self._prefix = prefix
         self._buffer = ""
@@ -80,12 +80,12 @@ class _FinalAnswerEchoer:
         if not self.echoed and self._prefix:
             try:
                 self._write(self._prefix)
-            except Exception:  # noqa: BLE001 - echo must never break assembly
+            except Exception:
                 LOGGER.debug("stream echo write failed", exc_info=True)
         self.echoed = True
         try:
             self._write(text)
-        except Exception:  # noqa: BLE001 - echo must never break assembly
+        except Exception:
             LOGGER.debug("stream echo write failed", exc_info=True)
 
 
@@ -115,7 +115,7 @@ def _assemble_streaming_response(
     echoer = _FinalAnswerEchoer(echo_mode, echo_write) if echo_mode else None
     try:
         for chunk in stream:
-            choices = _field(chunk, "choices")
+            choices = field(chunk, "choices")
             if not choices:
                 continue
             choice = choices[0]
@@ -124,36 +124,36 @@ def _assemble_streaming_response(
                 if on_first_chunk is not None:
                     try:
                         on_first_chunk()
-                    except Exception:  # noqa: BLE001 - callback must not break the loop
+                    except Exception:
                         LOGGER.debug("on_first_chunk callback failed", exc_info=True)
-            if (reason := _field(choice, "finish_reason")) is not None:
+            if (reason := field(choice, "finish_reason")) is not None:
                 finish_reason = reason
-            delta = _field(choice, "delta")
+            delta = field(choice, "delta")
             if delta is None:
                 continue
-            if (piece := _field(delta, "content")):
+            if (piece := field(delta, "content")):
                 content_parts.append(piece)
                 if echoer is not None:
                     echoer.feed(piece)
-            raw_fragments = _field(delta, "tool_calls")
+            raw_fragments = field(delta, "tool_calls")
             if not raw_fragments:
                 continue
             for fragment in raw_fragments:
-                index = _field(fragment, "index") or 0
+                index = field(fragment, "index") or 0
                 entry = tool_calls.setdefault(
                     index,
                     {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
                 )
-                if (fragment_id := _field(fragment, "id")):
+                if (fragment_id := field(fragment, "id")):
                     entry["id"] = (
                         fragment_id if not entry["id"] else entry["id"] + fragment_id
                     )
-                function = _field(fragment, "function")
+                function = field(fragment, "function")
                 if function is None:
                     continue
-                if (name := _field(function, "name")):
+                if (name := field(function, "name")):
                     entry["function"]["name"] += name
-                if (arguments := _field(function, "arguments")):
+                if (arguments := field(function, "arguments")):
                     entry["function"]["arguments"] += arguments
     finally:
         if echoer is not None:
@@ -162,7 +162,7 @@ def _assemble_streaming_response(
         if callable(close):
             try:
                 close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 LOGGER.debug("failed to close LLM stream", exc_info=True)
 
     message: dict[str, Any] = {
@@ -234,19 +234,24 @@ class LLM:
                 f"Configuration Error: {', '.join(missing)} is not configured."
             )
         try:
+            import httpx
             from openai import OpenAI
 
+            from core.services_config import load_services_config
+
+            proxy = load_services_config().proxy.url
+            http_client = httpx.Client(
+                proxy=proxy or None,
+                trust_env=False,
+            )
             self.client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 max_retries=self.max_retries,
+                http_client=http_client,
             )
         except ImportError as exc:
             raise RuntimeError("The 'openai' package is required to use LLM.") from exc
-
-    @staticmethod
-    def get_query() -> str:
-        return input("请输入你的问题：")
 
     def complete_streaming(
         self,
@@ -359,11 +364,13 @@ class LLM:
                     "prompt_cache_key must be a non-empty string of at most 64 characters"
                 )
             prompt_cache_key = prompt_cache_key.strip()
-        if prompt_cache_retention is not None:
-            if prompt_cache_retention not in {"in_memory", "24h"}:
-                raise ValueError(
-                    "prompt_cache_retention must be 'in_memory', '24h', or None"
-                )
+        if prompt_cache_retention is not None and prompt_cache_retention not in {
+            "in_memory",
+            "24h",
+        }:
+            raise ValueError(
+                "prompt_cache_retention must be 'in_memory', '24h', or None"
+            )
         reserved = {
             "messages",
             "model",
@@ -427,12 +434,12 @@ class LLM:
         """
         try:
             for chunk in response:
-                choices = _field(chunk, "choices")
+                choices = field(chunk, "choices")
                 if not choices:
                     continue
                 choice = choices[0]
-                delta = _field(choice, "delta")
-                content = _field(delta, "content")
+                delta = field(choice, "delta")
+                content = field(delta, "content")
                 if content:
                     print(content, end="", flush=True)
                     yield content
@@ -444,9 +451,3 @@ class LLM:
                 except Exception:
                     # Closing is best effort; never hide a useful stream error.
                     LOGGER.debug("failed to close LLM stream", exc_info=True)
-
-
-def _field(value: Any, key: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)

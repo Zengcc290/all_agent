@@ -312,7 +312,7 @@ def test_lazy_registration_logs_all_persisted_tool_names(capsys):
     assert output == ""
     instruction = agent._with_tool_instructions([], agent.tools.snapshot())
     assert (
-        "All registered tool names: system.skill_catalog, system.tool_catalog, "
+        "All registered tool names: system.tool_catalog, "
         "test.react_echo" in instruction[0]["content"]
     )
     repository.close()
@@ -339,8 +339,8 @@ async def test_lazy_catalog_loads_all_resolved_specs_and_sends_schemas():
     assert agent.is_tool_registered("web.search")
     second_system_prompt = llm.requests[1][0]["content"]
     assert "Loaded tool input schemas:" in second_system_prompt
-    assert "system.current_time:" in second_system_prompt
-    assert "web.search:" in second_system_prompt
+    assert "- system.current_time" in second_system_prompt
+    assert "- web.search" in second_system_prompt
     repository.close()
 
 
@@ -484,7 +484,7 @@ async def test_react_logs_progress_and_each_round_result(capsys):
     assert "Action Input" not in output
     assert '"value": 7' not in output
     assert all(
-        "All registered tool names: system.skill_catalog, system.tool_catalog, "
+        "All registered tool names: system.tool_catalog, "
         "test.react_echo" in request[0]["content"]
         for request in llm.requests
     )
@@ -506,15 +506,18 @@ async def test_react_exposes_registered_names_and_catalog_schema_by_default():
     assert answer == "done"
     first_instruction = llm.requests[0][0]["content"]
     assert (
-        "All registered tool names: system.skill_catalog, system.tool_catalog, "
+        "All registered tool names: system.tool_catalog, "
         "test.react_echo" in first_instruction
     )
-    assert "- system.tool_catalog:" in first_instruction
-    assert "Action Input schema:" in first_instruction
-    assert "- test.react_echo:" not in first_instruction
+    assert "- system.tool_catalog@" in first_instruction
+    # 完整契约（用途 + 逐变量说明 + 输出字段 + 副作用）而不是原始 JSON Schema
+    assert "输入变量:" in first_instruction
+    assert "输出字段:" in first_instruction
+    assert "副作用与确认:" in first_instruction
+    assert "- test.react_echo@" not in first_instruction
     assert "already registered and usable" in first_instruction
     second_instruction = llm.requests[1][0]["content"]
-    assert "test.react_echo:" in second_instruction
+    assert "- test.react_echo@" in second_instruction
     assert "test.react_echo" in agent.tools
 
 
@@ -560,7 +563,7 @@ async def test_recommended_preceding_tool_is_advisory_only():
         "model news in the last two days",
     ]
     first_instruction = llm.requests[0][0]["content"]
-    assert "Recommended preceding tools (advisory only; not enforced): system.current_time." in first_instruction
+    assert "推荐前置: system.current_time" in first_instruction
     first_observation = llm.requests[1][-1]["content"]
     assert '"ok": true' in first_observation
     assert "TEMPORAL_CONTEXT_REQUIRED" not in first_observation
@@ -581,9 +584,9 @@ async def test_catalog_lookup_does_not_inject_tools_from_user_wording():
 
     assert answer == "done"
     second_instruction = llm.requests[1][0]["content"]
-    assert "web.search:" in second_instruction
-    assert "Recommended preceding tools (advisory only; not enforced): system.current_time." in second_instruction
-    assert "system.current_time:" not in second_instruction
+    assert "- web.search@" in second_instruction
+    assert "推荐前置: system.current_time" in second_instruction
+    assert "- system.current_time@" not in second_instruction
 
 
 @pytest.mark.asyncio
@@ -739,3 +742,339 @@ async def test_small_observations_are_saved_verbatim():
     assert observation.startswith("Observation: ")
     assert '"blob": "small"' in observation
     assert "[已压缩的历史工具结果" not in observation
+
+
+class SyncEntryLLM:
+    """Minimal sync ``complete`` transport for the synchronous entry point."""
+
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages, **_options):
+        self.calls += 1
+        return "Final Answer: sync-ok"
+
+
+def test_react_agent_sync_run_entrypoint():
+    """``ReActAgent.run()`` must work from a plain synchronous context.
+
+    Regression for the missing ``_run_sync`` helper: the sync entry point used
+    to raise ``NameError`` before any network request happened.  The helper
+    dispatches the coroutine to a worker thread so ``asyncio.run`` never
+    collides with a caller's running event loop.
+    """
+
+    llm = SyncEntryLLM()
+    agent = ReActAgent(
+        "sync-entry-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    answer = agent.run(
+        "hello",
+        max_rounds=2,
+        use_history=False,
+        defer_tool_loading=False,
+    )
+    assert answer == "sync-ok"
+    assert llm.calls == 1
+
+
+class ExcludedToolThenAnswerLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[list] = []
+
+    def complete(self, messages, **_options):
+        self.requests.append(list(messages))
+        self.calls += 1
+        if self.calls == 1:
+            return (
+                "Thought: search the web\n"
+                "Action: web.search\n"
+                'Action Input: {"query":"python"}'
+            )
+        return "Final Answer: 改用可用工具回答"
+
+
+class NativeCatalogLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[list] = []
+
+    def complete(self, messages, **_options):
+        self.requests.append(list(messages))
+        self.calls += 1
+        if self.calls == 1:
+            tool_call = SimpleNamespace(
+                id="native-catalog",
+                function=SimpleNamespace(
+                    name="system__tool_catalog",
+                    arguments='{"action":"resolve","intent":"web search"}',
+                ),
+            )
+            message = SimpleNamespace(
+                role="assistant", content=None, tool_calls=[tool_call]
+            )
+        else:
+            message = SimpleNamespace(
+                role="assistant",
+                content="Final Answer: catalog blocked",
+                tool_calls=[],
+            )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class NativeExcludedToolLLM:
+    model = "test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[list] = []
+
+    def complete(self, messages, **_options):
+        self.requests.append(list(messages))
+        self.calls += 1
+        if self.calls == 1:
+            tool_call = SimpleNamespace(
+                id="native-search",
+                function=SimpleNamespace(
+                    name="web__search", arguments='{"query": "python"}'
+                ),
+            )
+            message = SimpleNamespace(
+                role="assistant", content=None, tool_calls=[tool_call]
+            )
+        else:
+            message = SimpleNamespace(
+                role="assistant",
+                content="Final Answer: 已改用本地知识回答",
+                tool_calls=[],
+            )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def _rendered(messages) -> str:
+    """把一轮请求里的消息渲染成纯文本，便于断言 Observation 内容。"""
+
+    parts: list[str] = []
+    for message in messages:
+        content = (
+            message.get("content", "")
+            if isinstance(message, dict)
+            else getattr(message, "content", "")
+        )
+        parts.append(str(content or ""))
+    return "\n".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_request_scoped_whitelist_reports_tool_not_enabled():
+    """离线模式（tool_names 白名单）下调用被摘除的工具必须给出准确报错。
+
+    历史缺陷：报错说「registered and usable，请先调 catalog resolve 加载
+    schema」并返回 TOOL_SCHEMA_REQUIRED，但 resolve 根本无法把被白名单排除的
+    工具重新启用，模型会据此反复重试。
+    """
+
+    llm = ExcludedToolThenAnswerLLM()
+    agent = ReActAgent(
+        "disabled-tool-text-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(EchoTool())
+    search = SearchProbeTool()
+    agent.register_tool(search)
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=4,
+        tool_names=["test.react_echo"],
+        use_history=False,
+    )
+
+    assert answer == "改用可用工具回答"
+    assert search.queries == [], "被禁用的工具绝不能被执行"
+
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert "TOOL_SCHEMA_REQUIRED" not in second_round
+
+
+@pytest.mark.asyncio
+async def test_lazy_text_path_cannot_load_tool_outside_explicit_whitelist():
+    repository = ToolSpecRepository(":memory:")
+    llm = ExcludedToolThenAnswerLLM()
+    agent = ReActAgent(
+        "disabled-lazy-text-test",
+        llm=llm,
+        repository=repository,
+        auto_discover_tools=False,
+        lazy_tools=True,
+    )
+    agent.register_tool(EchoTool())
+    agent.register_tool(SearchProbeTool())
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=4,
+        tool_names=["test.react_echo"],
+        use_history=False,
+    )
+
+    assert answer == "改用可用工具回答"
+    assert "web.search" not in agent.tools, "白名单外工具不应被延迟加载"
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert "TOOL_SCHEMA_REQUIRED" not in second_round
+    repository.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_names", [["test.react_echo"], []])
+async def test_explicit_whitelist_does_not_implicitly_enable_lazy_catalog(tool_names):
+    repository = ToolSpecRepository(":memory:")
+    llm = TemporalCatalogOmitsTimeLLM()
+    agent = ReActAgent(
+        "disabled-lazy-catalog-test",
+        llm=llm,
+        repository=repository,
+        auto_discover_tools=False,
+        lazy_tools=True,
+    )
+    agent.register_tool(EchoTool())
+    agent.register_tool(SearchProbeTool())
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=3,
+        tool_names=tool_names,
+        use_history=False,
+    )
+
+    assert answer == "done"
+    assert "web.search" not in agent.tools
+    first_round = _rendered(llm.requests[0])
+    second_round = _rendered(llm.requests[1])
+    assert "system.tool_catalog@" not in first_round
+    assert "web.search" not in first_round
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert '"spec"' not in second_round
+    repository.close()
+
+
+@pytest.mark.asyncio
+async def test_native_catalog_is_disabled_when_omitted_from_explicit_whitelist():
+    repository = ToolSpecRepository(":memory:")
+    llm = NativeCatalogLLM()
+    agent = ReActAgent(
+        "disabled-native-catalog-test",
+        llm=llm,
+        repository=repository,
+        auto_discover_tools=False,
+        lazy_tools=True,
+    )
+    agent.register_tool(EchoTool())
+    agent.register_tool(SearchProbeTool())
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=3,
+        tool_names=["test.react_echo"],
+        use_history=False,
+    )
+
+    assert answer == "catalog blocked"
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert '"spec"' not in second_round
+    assert "web.search" not in agent.tools
+    repository.close()
+
+
+@pytest.mark.asyncio
+async def test_native_path_reports_tool_not_enabled_for_excluded_tool():
+    llm = NativeExcludedToolLLM()
+    agent = ReActAgent(
+        "disabled-tool-native-test",
+        llm=llm,
+        auto_discover_tools=False,
+        lazy_tools=False,
+    )
+    agent.register_tool(EchoTool())
+    search = SearchProbeTool()
+    agent.register_tool(search)
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=3,
+        tool_names=["test.react_echo"],
+        defer_tool_loading=False,
+        use_history=False,
+    )
+
+    assert answer == "已改用本地知识回答"
+    assert search.queries == [], "被禁用的工具绝不能被执行"
+
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert "TOOL_SCHEMA_REQUIRED" not in second_round
+
+
+@pytest.mark.asyncio
+async def test_lazy_native_path_cannot_load_tool_outside_explicit_whitelist():
+    repository = ToolSpecRepository(":memory:")
+    llm = NativeExcludedToolLLM()
+    agent = ReActAgent(
+        "disabled-lazy-native-test",
+        llm=llm,
+        repository=repository,
+        auto_discover_tools=False,
+        lazy_tools=True,
+    )
+    agent.register_tool(EchoTool())
+    agent.register_tool(SearchProbeTool())
+
+    answer = await agent.run_with_react(
+        "查一下最新消息",
+        max_rounds=3,
+        tool_names=["test.react_echo"],
+        use_history=False,
+    )
+
+    assert answer == "已改用本地知识回答"
+    assert "web.search" not in agent.tools, "原生调用也不能延迟加载白名单外工具"
+    second_round = _rendered(llm.requests[1])
+    assert "TOOL_NOT_ENABLED" in second_round
+    assert "TOOL_SCHEMA_REQUIRED" not in second_round
+    repository.close()
+
+
+def test_unavailable_tool_error_distinguishes_whitelist_from_unloaded_schema():
+    """报错语义按原因分流：白名单摘除 → TOOL_NOT_ENABLED；schema 未加载 → 保留
+    catalog 引导。defer_tool_loading 默认开启，因此不能只用 lazy_tools 判断。"""
+
+    agent = ReActAgent("error-semantics-test", auto_discover_tools=False)
+
+    excluded = agent._unavailable_tool_error(
+        "web.search", "call-1", requested_names={"memory.rag"}
+    )
+    assert excluded.ok is False
+    assert excluded.error is not None
+    assert excluded.error.code == "TOOL_NOT_ENABLED"
+    assert "disabled" in excluded.error.message
+    assert "do not" in excluded.error.message
+
+    unloaded = agent._unavailable_tool_error("web.search", "call-2")
+    assert unloaded.error is not None
+    assert unloaded.error.code == "TOOL_SCHEMA_REQUIRED"
+    assert "resolve" in unloaded.error.message

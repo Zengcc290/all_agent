@@ -22,9 +22,9 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from memory import MemoryConfig, MemoryManager          # noqa: E402
+from memory import HashEmbedding, MemoryConfig, MemoryManager          # noqa: E402
 from memory import embedding as embedding_module       # noqa: E402
-from memory.rag.pipeline import RAGPipeline            # noqa: E402
+from memory import RAGPipeline            # noqa: E402
 
 CHUNK_SIZE = 300
 OVERLAP = 0
@@ -57,8 +57,8 @@ def cjk_bigram_tokenize(text: str) -> list[str]:
     return tokens
 
 
-legacy_baseline_tokenize = embedding_module.TFIDFEmbedding.tokenize
-_ORIGINAL_TOKENIZE = embedding_module.TFIDFEmbedding.tokenize
+legacy_baseline_tokenize = embedding_module.HashEmbedding.tokenize
+_ORIGINAL_TOKENIZE = embedding_module.HashEmbedding.tokenize
 
 
 def apply_tokenizer(mode: str) -> None:
@@ -70,11 +70,11 @@ def apply_tokenizer(mode: str) -> None:
     tokenizer and the comparison would read as a flat 0 delta.
     """
     if mode == "cjk-bigram":
-        embedding_module.TFIDFEmbedding.tokenize = staticmethod(cjk_bigram_tokenize)
+        embedding_module.HashEmbedding.tokenize = staticmethod(cjk_bigram_tokenize)
     elif mode == "baseline":
-        embedding_module.TFIDFEmbedding.tokenize = staticmethod(legacy_tokenize)
+        embedding_module.HashEmbedding.tokenize = staticmethod(legacy_tokenize)
     else:
-        embedding_module.TFIDFEmbedding.tokenize = _ORIGINAL_TOKENIZE
+        embedding_module.HashEmbedding.tokenize = _ORIGINAL_TOKENIZE
 
 
 def legacy_tokenize(text: str) -> list[str]:
@@ -129,8 +129,8 @@ ZH_QUERIES = [
 CORPORA = {
     "en": {"label": "README.md (English)", "docs": ["README.md"], "queries": EN_QUERIES},
     "zh": {
-        "label": "tool/README.md + memory/README.md + skills/README.md (中文)",
-        "docs": ["tool/README.md", "memory/README.md", "skills/README.md"],
+        "label": "tool/README.md + memory/README.md (中文)",
+        "docs": ["tool/README.md", "memory/README.md"],
         "queries": ZH_QUERIES,
     },
 }
@@ -150,7 +150,7 @@ def evaluate(corpus_key: str, tokenizer_mode: str) -> dict:
     if os.path.exists(db):
         os.remove(db)
 
-    with MemoryManager(MemoryConfig(sqlite_path=db)) as manager:
+    with MemoryManager(MemoryConfig(sqlite_path=db), embedding=HashEmbedding()) as manager:
         pipe = RAGPipeline(manager)
         ids, texts = [], []
         for doc in spec["docs"]:

@@ -58,6 +58,17 @@ def test_search_normalizes_a_local_http_response():
     seen = {}
 
     class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            # 501 同样要先读完请求体再响应：否则服务器在客户端仍发送时就关闭
+            # 连接，Windows 上会偶发 ConnectionAbortedError，501 回退路径
+            # （本用例真正要覆盖的分支）便永远走不到。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self.send_response(501)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_GET(self):
             seen["query"] = parse_qs(urlsplit(self.path).query)
             seen["authorization"] = self.headers.get("Authorization")
@@ -118,3 +129,40 @@ def test_search_normalizes_a_local_http_response():
         "limit": ["1"],
     }
     assert seen["authorization"] == "Bearer test-key"
+
+
+def test_search_reports_non_finite_json_as_invalid_response():
+    """回归：网关返回 NaN/Infinity 时 parse_constant 抛的是裸 ValueError，
+    原先只捕获 JSONDecodeError，错误因此逃逸成内部异常而不是统一提示。"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            # 必须先读完请求体再响应：否则服务器在客户端仍发送时就关闭连接，
+            # Windows 上会偶发 ConnectionAbortedError。
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            body = b'{"results": [{"title": "x", "score": NaN}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        tool = SearchTool(
+            base_url=f"http://127.0.0.1:{server.server_port}/search",
+            api_key="test-key",
+        )
+        with pytest.raises(ValueError, match="not valid UTF-8 JSON"):
+            tool.execute(SearchInput(query="typed tools", limit=1))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

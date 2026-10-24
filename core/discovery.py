@@ -4,10 +4,10 @@ import importlib
 import inspect
 import pkgutil
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Literal
 
 from .activity_log import log_discovery_summary
 from .models import ToolSpec
@@ -35,9 +35,6 @@ class ToolDiscoveryRecord:
     version: str | None = None
     generation: int | None = None
     error: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -70,14 +67,6 @@ class ToolDiscoveryReport:
             (record for record in self.records if record.tool_name == name),
             None,
         )
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "package": self.package,
-            "ok": self.ok,
-            "records": [record.as_dict() for record in self.records],
-        }
-
 
 class ToolDiscoveryError(RuntimeError):
     """Raised after a strict scan if one or more modules could not be loaded."""

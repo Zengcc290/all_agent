@@ -1,18 +1,21 @@
-"""End-to-end integration test for the P0 code-change loop.
+"""End-to-end integration test for the real runtime chain.
 
-Binds the P0 tools to one scratch workspace like a real agent deployment,
-executes them through the real runtime chain (ToolCall -> confirmation gate ->
-execute) and walks the complete closed loop: write -> edit -> read verify ->
-git status -> commit+push -> clean status. Also covers depends_on batching and
-the side-effect confirmation gate.
+The old P0 filesystem/shell loop is gone, but two runtime behaviours were only
+ever covered here, so they are re-bound to the surviving memory tools:
+
+* a ``side_effect="write"`` tool without a confirmation key is refused with
+  ``CONFIRMATION_REQUIRED`` and leaves no trace behind;
+* ``depends_on`` inside one batch really orders the dependent read after the
+  write it waits for.
+
+Both go through the production chain (ToolCall -> permission gate ->
+confirmation gate -> execute) against an isolated in-memory memory.
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
 import pytest
+from conftest import HashEmbedding
 
 from core import (
     ExecutionContext,
@@ -20,66 +23,37 @@ from core import (
     ToolExecutionManager,
     ToolRegistry,
 )
-from tool.fs_edit_text import EditTextTool
-from tool.fs_read_text import ReadTextTool
-from tool.fs_write_text import WriteTextTool
-from tool.git_commit_push import GitCommitPushTool
-from tool.git_status import GitStatusTool
+from memory import MemoryConfig, MemoryManager
+from tool.memory_add import MemoryAddTool
+from tool.memory_query import MemoryQueryTool
+
+MEMORY_CONTENT = "batch dependency probe: qdrant holds vectors, neo4j holds relations"
 
 
-def run_git(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    import os
+class RuntimeLoop:
+    """One isolated memory instance bound to the real runtime chain."""
 
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"GIT_TERMINAL_PROMPT": "0", "PATH": os.environ.get("PATH", "")},
-    )
-
-
-def init_repo(tmp_path: Path, name: str = "repo", do_configure: bool = True) -> Path:
-    repo = tmp_path / name
-    repo.mkdir()
-    assert run_git(["init", "-b", "main"], cwd=repo).returncode == 0
-    if do_configure:
-        assert run_git(["config", "user.name", "Test Agent"], cwd=repo).returncode == 0
-        assert run_git(["config", "user.email", "test@example.com"], cwd=repo).returncode == 0
-        assert run_git(["config", "core.autocrlf", "false"], cwd=repo).returncode == 0
-    return repo
-
-
-def init_bare_remote(tmp_path: Path, name: str = "remote.git") -> Path:
-    remote = tmp_path / name
-    assert run_git(["init", "--bare", "-b", "main", str(remote)]).returncode == 0
-    return remote
-
-
-class P0Loop:
-    """One workspace's P0 tool instances bound to the real runtime chain."""
-
-    def __init__(self, base_dir: Path) -> None:
-        self.base_dir = base_dir
+    def __init__(self) -> None:
+        self.manager = MemoryManager(
+            MemoryConfig(sqlite_path=":memory:"), embedding=HashEmbedding()
+        )
         self.registry = ToolRegistry()
         for tool in (
-            ReadTextTool(base_dir=base_dir),
-            WriteTextTool(base_dir=base_dir),
-            EditTextTool(base_dir=base_dir),
-            GitStatusTool(base_dir=base_dir),
-            GitCommitPushTool(base_dir=base_dir),
+            MemoryAddTool(manager=self.manager),
+            MemoryQueryTool(manager=self.manager),
         ):
             self.registry.register(tool)
-        self.manager = ToolExecutionManager(self.registry)
+        self.execution = ToolExecutionManager(self.registry)
         self._counter = 0
+
+    def close(self) -> None:
+        self.manager.close()
 
     def _call(
         self,
         call_id: str,
         name: str,
         arguments: dict,
-        confirm: bool,
         depends_on: list[str] | None = None,
     ) -> ToolCall:
         tool, generation = self.registry.resolve(name)
@@ -93,17 +67,28 @@ class P0Loop:
             depends_on=depends_on or [],
         )
 
+    def _permissions(self, names: list[str]) -> frozenset[str]:
+        """Grant exactly what each spec declares, so the test isolates the gate
+        under examination (confirmation / ordering) from the permission gate."""
+
+        granted: set[str] = set()
+        for name in names:
+            tool, _ = self.registry.resolve(name)
+            granted.update(tool.spec.permissions)
+        return frozenset(granted)
+
     async def call(self, name: str, arguments: dict, *, confirm: bool = False):
         self._counter += 1
         context = ExecutionContext(
-            confirmed_side_effects=frozenset(
-                {self.registry.confirmation_key(name)}
-            )
-            if confirm
-            else frozenset()
+            permissions=self._permissions([name]),
+            confirmed_side_effects=(
+                frozenset({self.registry.confirmation_key(name)})
+                if confirm
+                else frozenset()
+            ),
         )
-        batch = await self.manager.execute_batch(
-            [self._call(f"loop-{self._counter}", name, arguments, confirm)], context
+        batch = await self.execution.execute_batch(
+            [self._call(f"loop-{self._counter}", name, arguments)], context
         )
         return batch.results[0]
 
@@ -111,134 +96,67 @@ class P0Loop:
         confirmed: set[str] = set()
         built = []
         for call_id, name, arguments, needs_confirmation, depends_on in calls:
-            built.append(
-                self._call(call_id, name, arguments, needs_confirmation, depends_on)
-            )
+            built.append(self._call(call_id, name, arguments, depends_on))
             if needs_confirmation:
                 confirmed.add(self.registry.confirmation_key(name))
-        context = ExecutionContext(confirmed_side_effects=frozenset(confirmed))
-        outcomes = await self.manager.execute_batch(built, context)
+        context = ExecutionContext(
+            permissions=self._permissions([name for _, name, *_ in calls]),
+            confirmed_side_effects=frozenset(confirmed),
+        )
+        outcomes = await self.execution.execute_batch(built, context)
         return list(outcomes.results)
 
 
-@pytest.mark.asyncio
-async def test_complete_code_change_loop_with_push(tmp_path):
-    repo = init_repo(tmp_path)
-    remote = init_bare_remote(tmp_path)
-    assert run_git(["remote", "add", "origin", str(remote)], cwd=repo).returncode == 0
-    loop = P0Loop(repo)
-
-    created = await loop.call(
-        "fs.write_text",
-        {
-            "path": "greet.py",
-            "content": "def greet(name):\n    return f'hello {name}'\n",
-            "encoding": "utf-8",
-            "create_parents": True,
-            "overwrite": True,
-        },
-        confirm=True,
-    )
-    assert created.ok and created.data["created"] is True
-    assert (repo / "greet.py").exists()
-
-    edited = await loop.call(
-        "fs.edit_text",
-        {
-            "path": "greet.py",
-            "old_string": "f'hello {name}'",
-            "new_string": "f'Hi {name}!'",
-            "replace_all": False,
-            "encoding": "utf-8",
-        },
-        confirm=True,
-    )
-    assert edited.ok and edited.data["replacements"] == 1
-
-    read_back = await loop.call(
-        "fs.read_text", {"path": "greet.py", "encoding": "utf-8", "max_chars": None}
-    )
-    assert read_back.ok and "Hi {name}!" in read_back.data["content"]
-
-    before = await loop.call("git.status", {"repo_path": None})
-    assert before.ok and before.data["clean"] is False
-    assert "greet.py" in before.data["untracked"]
-
-    pushed = await loop.call(
-        "git.commit_push",
-        {
-            "repo_path": None,
-            "message": "feat: add greet",
-            "paths": None,
-            "remote": None,
-            "branch": None,
-            "allow_empty": False,
-            "push": True,
-        },
-        confirm=True,
-    )
-    assert pushed.ok and pushed.data["committed"] is True
-    assert pushed.data["push_succeeded"] is True
-
-    after = await loop.call("git.status", {"repo_path": None})
-    assert after.ok and after.data["clean"] is True
-    local_head = run_git(["rev-parse", "HEAD"], cwd=repo).stdout.strip()
-    remote_head = run_git(["-C", str(remote), "rev-parse", "HEAD"]).stdout.strip()
-    assert local_head == remote_head
+@pytest.fixture()
+def loop():
+    instance = RuntimeLoop()
+    try:
+        yield instance
+    finally:
+        instance.close()
 
 
 @pytest.mark.asyncio
-async def test_depends_on_read_after_write_in_one_batch(tmp_path):
-    repo = init_repo(tmp_path)
-    loop = P0Loop(repo)
-
+async def test_depends_on_read_after_write_in_one_batch(loop):
     results = await loop.batch(
         [
             (
-                "write-notes",
-                "fs.write_text",
+                "add-memory",
+                "memory.add",
                 {
-                    "path": "notes.txt",
-                    "content": "batch data\n",
-                    "encoding": "utf-8",
-                    "create_parents": True,
-                    "overwrite": True,
+                    "content": MEMORY_CONTENT,
+                    "memory_type": "episodic",
+                    "importance": 0.9,
                 },
                 True,
                 [],
             ),
             (
-                "read-notes",
-                "fs.read_text",
-                {"path": "notes.txt", "encoding": "utf-8", "max_chars": None},
+                "search-memory",
+                "memory.query",
+                {"action": "search", "query": MEMORY_CONTENT, "limit": 5},
                 False,
-                ["write-notes"],
+                ["add-memory"],
             ),
         ]
     )
 
-    assert results[0].ok
-    assert results[1].ok
-    assert results[1].data["content"] == "batch data\n"
+    assert results[0].ok, results[0].error
+    assert results[1].ok, results[1].error
+    # 读依赖写：同批内 search 必须已经能看到刚写入的内容。
+    contents = [item["content"] for item in results[1].data["items"]]
+    assert MEMORY_CONTENT in contents
 
 
 @pytest.mark.asyncio
-async def test_write_without_confirmation_is_rejected(tmp_path):
-    repo = init_repo(tmp_path)
-    loop = P0Loop(repo)
-
+async def test_write_without_confirmation_is_rejected(loop):
     result = await loop.call(
-        "fs.write_text",
-        {
-            "path": "blocked.txt",
-            "content": "x",
-            "encoding": "utf-8",
-            "create_parents": True,
-            "overwrite": True,
-        },
+        "memory.add",
+        {"content": "must never be persisted", "memory_type": "episodic"},
         confirm=False,
     )
 
     assert not result.ok
     assert result.error is not None and result.error.code == "CONFIRMATION_REQUIRED"
-    assert not (repo / "blocked.txt").exists()
+    # 被拒的写不能留下任何痕迹。
+    assert loop.manager.list(memory_type="episodic") == []

@@ -19,9 +19,6 @@ class BaseVectorStore(ABC):
     @abstractmethod
     def search(self, vector: list[float], *, limit: int = 10, memory_type: MemoryType | str | None = None) -> list[tuple[str, float]]: ...
 
-    def clear(self) -> None:
-        pass
-
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
@@ -48,6 +45,14 @@ class InMemoryVectorStore(BaseVectorStore):
             with self._lock:
                 self._vectors[item.id] = (list(item.embedding), item.memory_type)
 
+    def recreate_collection(self, dimension: int) -> None:
+        """Drop in-memory vectors so a confirmed embedding-space rebuild can reindex."""
+
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+            raise ValueError("dimension must be a positive integer")
+        with self._lock:
+            self._vectors.clear()
+
     def delete(self, item_id: str) -> bool:
         with self._lock:
             return self._vectors.pop(item_id, None) is not None
@@ -64,10 +69,6 @@ class InMemoryVectorStore(BaseVectorStore):
             ]
         scores.sort(key=lambda row: (-row[1], row[0]))
         return [(item_id, score) for item_id, score, _ in scores[:limit]]
-
-    def clear(self) -> None:
-        with self._lock:
-            self._vectors.clear()
 
 
 __all__ = ["BaseVectorStore", "InMemoryVectorStore", "cosine_similarity"]

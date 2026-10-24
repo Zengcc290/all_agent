@@ -11,24 +11,18 @@ Discovery outcomes and registration state are queryable from the Agent. See the
 [Chinese tool guide](tool/README.md) for the complete template rules and the
 function-level LLM/tool call chain.
 
-## On-demand skills
-
-`Agent` also scans the `skills` directory (one subdirectory per skill, each
-containing a `SKILL.md`) and registers a `system.skill_catalog` tool. Only
-skill names, descriptions, versions, and triggers stay in the persistent
-system message; the model loads the full instruction content on demand with
-`system.skill_catalog` (`action: view`), so skill bodies never fragment the
-prompt prefix cache. Adding, removing, or editing a skill changes the prompt
-cache key, starting a new cache namespace. Skill directories never execute
-code. See [skills/README.md](skills/README.md) for the Chinese authoring guide.
-
 ## Runtime logs
 
-The runtime prints timestamped activity logs to the console. Each successful
-tool registration includes the tool name and the complete current registry;
-each ReAct round prints its number, model and tool durations, parsed Thought,
-tool names being called, and the final answer. Raw tool arguments and return
-values are omitted to keep the output readable.
+Console output is deliberately narrow (`core/activity_log.py`). The activity
+stream shows the parsed `Thought` of each ReAct round, the names of the tools
+about to be called, the model round latency, and the tool-call latency; tool
+arguments and return values are never printed, so a large tool result cannot
+flood the terminal. Protocol problems are surfaced as warnings
+(`工具调用格式问题`). Tool registration, discovery summaries, round starts and
+final answers are intentionally silent, so a normal run prints only the round
+lines above. The logger is `all_agent.activity` and prints through `print`
+(one `[HH:MM:SS]` prefixed line per event); attach your own handler or set the
+level if you need the rest.
 
 Every model request also includes a system message listing all registered tool
 names. In the explicit lazy-loading mode this can include repository-only tools
@@ -93,22 +87,56 @@ OpenAI function definitions are generated in strict mode. Malformed, unknown, or
 
 Each profile currently uses the `openai_compatible` adapter. The `models` array is declarative, so registration does not depend on a provider exposing `/models`. `tool_mode` documents whether the endpoint supports strict native tools or should use the textual ReAct protocol. The real `provider.toml` contains plaintext keys and is intentionally excluded from Git.
 
-Install development dependencies and run tests with:
+Install development dependencies and run the quality gate with:
 
 ```bash
 python -m pip install -e '.[dev]'
-python -m pytest -q
+python scripts/check.py     # ruff + full pytest, stops at the first failure
 ```
+
+`python -m pytest -q` and `python -m ruff check .` can still be run separately.
+The same gate is wired as a local `pre-commit` hook in
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) (run `pre-commit install`
+once); it uses the hooks' own environment, so the tools must be installed
+there.
 
 ## Standalone memory system
 
 The project now includes an opt-in four-layer memory package under
 [`memory/`](memory/). It provides
 `MemoryManager`, working/episodic/semantic/perceptual memories, SQLite document
-persistence, Qdrant vector search, Neo4j graph relations, and interchangeable
-DashScope/local-transformer/TF-IDF embedding services. The built-in
-`memory.manage` and `memory.rag` tools expose the same APIs to the
+persistence, Qdrant vector search, Neo4j graph relations, and two interchangeable
+embedding services: `APIEmbedding` (any OpenAI-compatible `/embeddings` endpoint,
+default qwen3-embedding-0.6b on DashScope) and the deterministic offline
+`HashEmbedding` used automatically when no API key is configured. The built-in
+memory tools (`memory.query`, `memory.add`, `memory.manage` and the RAG pair
+`memory.rag_search` / `memory.rag`) expose the same APIs to the
 current `Agent` tool runtime. See [`memory/README.md`](memory/README.md) for
 usage and backend configuration.
 
 Copy `.env.example` to `.env` and provide credentials locally. Never commit `.env`.
+
+## 知识星云 Web application
+
+The repository also ships an optional FastAPI application that exposes the
+memory system as an HTTP API and serves a React single-page front end
+("知识星云"): chat with the knowledge agent, upload documents for RAG chunking
+plus LLM entity/relation extraction, add facts or single sentences, inspect the
+graph, run hybrid graph+vector retrieval, and export/import the whole memory
+store as JSON.
+
+```powershell
+# run from the project root
+.venv\Scripts\python.exe -m web.app
+# open http://127.0.0.1:8765
+```
+
+It starts without any API key: retrieval falls back to the offline
+`HashEmbedding`, and `/api/chat` returns 503 with a configuration hint until a
+chat provider is configured. The port comes from `constants.DEFAULT_WEB_PORT` (8765). See
+[`web/README.md`](web/README.md) for the endpoint table, the data flow and the
+front end layout (Vite sources in `web/frontend`, built into `web/static`).
+
+The `config/` directory is resolved relative to the project root and is
+therefore meant to run from a checkout (`python -m web.app`); it is not embedded
+in the built wheel.
